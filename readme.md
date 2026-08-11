@@ -79,3 +79,10 @@ Issue 标题使用 `[范围] 简短描述` 的格式，范围与目录保持一�
 - `[global]`：涉及多个部分或仓库级事项。
 
 一个 Issue 如果涉及多个部分，优先使用 `[global]`，并在正文中列出受影响的目录。
+
+## 当前进展
+
+- 已建立 `web/`、`runner/` 和 `sdk/` 三个目录的基础结构。
+- 已接入 `BitFun-Platform/devkit_sdk` submodule，并配置跟踪 `dev/SupportOH` 分支。
+- 已启用 Issue 模板和标题规范校验 Workflow。
+- 已在 `GeniusProjectTrack` 中创建并转换 Issue `#1`：`[global] 更新项目 README 进展说明`，本次 README 更新通过 Pull Request 合并。

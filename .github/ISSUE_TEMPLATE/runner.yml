@@ -1,0 +1,24 @@
+name: Runner Issue
+description: 报告 Runner 执行端相关问题或需求
+title: "[runner] "
+labels:
+  - runner
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题或需求描述
+      description: 请清楚说明当前情况、期望结果和必要的背景信息。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤
+      description: 如果是缺陷，请提供可复现问题的步骤；如果是需求，可留空。
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: 补充信息
+      description: 可附上截图、日志、相关链接或其他信息。
+

@@ -1,0 +1,85 @@
+name: Validate issue title
+
+on:
+  issues:
+    types:
+      - opened
+      - edited
+      - reopened
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate title prefix
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const validTitle = /^\[(web|runner|sdk|global)\]\s+\S.*$/;
+            const invalidLabel = "invalid-title";
+            const labels = issue.labels.map((label) =>
+              typeof label === "string" ? label : label.name
+            );
+            const hasInvalidLabel = labels.includes(invalidLabel);
+
+            if (validTitle.test(issue.title)) {
+              if (hasInvalidLabel) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  name: invalidLabel,
+                });
+              }
+              core.info(`Valid issue title: ${issue.title}`);
+              return;
+            }
+
+            if (!hasInvalidLabel) {
+              try {
+                await github.rest.issues.getLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: invalidLabel,
+                });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: invalidLabel,
+                  color: "D73A4A",
+                  description: "Issue title does not follow the required format",
+                });
+              }
+
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: [invalidLabel],
+              });
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: [
+                  "Issue 标题不符合命名规范，请修改为以下格式之一：",
+                  "",
+                  "- `[web] 简短描述`",
+                  "- `[runner] 简短描述`",
+                  "- `[sdk] 简短描述`",
+                  "- `[global] 简短描述`",
+                  "",
+                  "标题修改正确后，`invalid-title` 标签会自动移除。",
+                ].join("\n"),
+              });
+            }
+
+            core.setFailed(`Invalid issue title: ${issue.title}`);

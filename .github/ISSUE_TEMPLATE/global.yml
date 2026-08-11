@@ -1,0 +1,29 @@
+name: Global Issue
+description: 报告跨目录或仓库级问题与需求
+title: "[global] "
+labels:
+  - global
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题或需求描述
+      description: 请清楚说明当前情况、期望结果和必要的背景信息。
+    validations:
+      required: true
+  - type: checkboxes
+    id: affected-areas
+    attributes:
+      label: 影响范围
+      description: 请选择所有受影响的部分。
+      options:
+        - label: Web
+        - label: Runner
+        - label: SDK
+        - label: CI、文档或公共配置
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: 补充信息
+      description: 可附上截图、日志、相关链接或其他信息。
+

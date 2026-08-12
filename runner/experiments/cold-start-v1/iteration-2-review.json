@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "iteration": 2,
+  "project": "/Users/stefan/Workspaces/fe-project/expo-app/cold-v2-learning-go",
+  "coldStart": true,
+  "sourceInheritance": false,
+  "outcome": "build-and-core-smoke-pass-with-functional-gaps",
+  "generationMs": 788597,
+  "generationMinutes": 13.14,
+  "trace": {
+    "turns": 50,
+    "outputTokens": 29829,
+    "costUsd": 1.1469646,
+    "terminalReason": "completed"
+  },
+  "automated": {
+    "typecheck": "pass",
+    "sourceAudit": "pass",
+    "harmonyGoExport": "pass",
+    "artifactIntegrity": "pass",
+    "exactAppLaunch": "pass"
+  },
+  "runtimeProof": {
+    "target": "127.0.0.1:5557",
+    "manifestId": "cold-v2-learning-go",
+    "action": "Submitted the prefilled 42.1 check-in for the words goal",
+    "before": "今日已打卡 0 次 · 3 个进行中的目标",
+    "after": "今日已打卡 1 次 · 3 个进行中的目标",
+    "afterForceStopReopen": "今日已打卡 1 次 · 3 个进行中的目标",
+    "smokeEvidence": "/Users/stefan/Workspaces/fe-project/expo-app/cold-v2-learning-go/.expo-fast/smoke/action.json"
+  },
+  "rubric": {
+    "source": "/Users/stefan/Workspaces/fe-project/ExpoHarmonyFast/experiments/cold-start-v1/rubric.json",
+    "score": 38,
+    "maximum": 52,
+    "percent": 73.1,
+    "items": [
+      { "id": "DATA-01", "score": 2, "reason": "Goal model and create/edit form contain all required fields." },
+      { "id": "DATA-02", "score": 2, "reason": "Entries are append-only and receive timestamp-plus-random IDs, so multiple same-day records are retained." },
+      { "id": "DATA-03", "score": 2, "reason": "State hydrates before rendering, uses a namespaced AsyncStorage key, persists mutations, migrates v1 and seeds only without valid stored state." },
+      { "id": "CALC-01", "score": 2, "reason": "Suggestion uses remaining divided by inclusive remaining days and is editable in the prefilled check-in form." },
+      { "id": "CALC-02", "score": 1, "reason": "Amount-based progress and a no-sample state exist, but the sample-day threshold counts all historical dates instead of distinct dates inside the latest seven-day window." },
+      { "id": "CALC-03", "score": 0, "reason": "The backward scan treats the closest miss as the weekly rest day regardless of chronological first/second miss order and does not stop at goal.createdAt." },
+      { "id": "CALC-04", "score": 0, "reason": "Today derives yellow versus red from the flawed backward rest scan; the seeded Python goal with consecutive misses is shown as a yellow first-rest state." },
+      { "id": "TODAY-01", "score": 2, "reason": "Top/bottom create, actionable cards, edit, confirmed delete, check-in and overdue adjust exits are wired." },
+      { "id": "TODAY-02", "score": 2, "reason": "Amount is editable, minutes are optional, and the prior six real dates can be backfilled." },
+      { "id": "TODAY-03", "score": 1, "reason": "Streak, ETA/deadline and contingency plan are shown, but the Today card does not expose an explicit completion rate." },
+      { "id": "BOARD-01", "score": 2, "reason": "Each goal has a progress ring, three metrics, contingency plan and ten latest removable entries." },
+      { "id": "BOARD-02", "score": 1, "reason": "The 14-day SVG bars omit missing minutes, but each goal renders its own single-series chart; this is not a multi-goal stacked chart." },
+      { "id": "WEEK-01", "score": 1, "reason": "Monday-Sunday totals, days and minutes exist, but amount comparison sums unlike units into one percentage." },
+      { "id": "WEEK-02", "score": 2, "reason": "Past weeks are navigable and all four notes persist on each edit." },
+      { "id": "WEEK-03", "score": 1, "reason": "Report output includes all four notes and comparisons, but its amount comparison inherits the mixed-unit error." },
+      { "id": "PROFILE-01", "score": 2, "reason": "JSON export, prevalidated confirmed overwrite, valid empty arrays and legacy migration are implemented." },
+      { "id": "PROFILE-02", "score": 2, "reason": "Example-only clearing and exact-phrase confirmed clear-all are distinct." },
+      { "id": "PROFILE-03", "score": 2, "reason": "A three-step home-screen guide is present." },
+      { "id": "SEED-01", "score": 1, "reason": "Three sample goals, contingency plans and a backfill record exist, but the intended yellow/red demo states are not reliably exercised by correct logic." },
+      { "id": "SEED-02", "score": 0, "reason": "Seed has only 12 records, so the 20-record banner is not initially reachable; its CTA only switches tabs instead of directly producing export data." },
+      { "id": "VISUAL-01", "score": 1, "reason": "The palette, hierarchy and starter cleanup are coherent, but the requested purple gradient is mostly a flat accent-soft background." },
+      { "id": "VISUAL-02", "score": 1, "reason": "Navigation, action icons and charts are local SVG, but the modal close control is a text multiplication glyph." },
+      { "id": "VISUAL-03", "score": 2, "reason": "Crossing a completion boundary triggers a timed falling confetti animation." },
+      { "id": "RESP-01", "score": 2, "reason": "Phone bottom tabs, tablet top navigation and desktop fixed sidebar/multi-column layout are implemented." },
+      { "id": "RUN-01", "score": 2, "reason": "All build, audit, artifact, launch and exact-app identity checks passed." },
+      { "id": "RUN-02", "score": 2, "reason": "A real check-in changed today-summary and remained after force-stop and exact-app reopen." }
+    ]
+  },
+  "diagnosis": [
+    "Vertical-slice implementation fixed iteration 1's catastrophic composition failure and finished in 13:09.",
+    "The final review spent time on local implementation details but did not close high-risk requirement classes: temporal boundaries, threshold-triggered behavior, dimension-safe aggregation and exact visual semantics.",
+    "Passing generic source and launch gates did not detect incorrect domain semantics or unreachable requested demo states."
+  ],
+  "generalizedChangesForNextIteration": [
+    "Keep the runnable vertical skeleton first.",
+    "After the primary state-changing flow works, reserve the final implementation quarter for a requirement-closure ledger rather than local polish.",
+    "Audit threshold states and direct CTAs, time-window boundaries and ordering, aggregation dimensions, seed-state reachability, and exact visual semantics before cosmetic refinement.",
+    "Require review evidence to connect each requested behavior to implementation and a reachable state without exposing this product's frozen scoring rubric."
+  ]
+}

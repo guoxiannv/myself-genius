@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "valid": true,
+  "project": "/Users/stefan/Workspaces/fe-project/expo-app/loop-fast-r11-k3-low-aggregate-20260810",
+  "change": "Pin the complex lane to k3-256k low effort with path-whitelisted native Read/Write/Edit, strict empty MCP configuration, one same-session k3 medium repair, trace routing metrics, and aggregated dependency/typecheck/source-audit diagnostics.",
+  "isolation": {
+    "protocol": "cold-start-v1",
+    "sourceInheritance": false,
+    "traceScope": "pass",
+    "repairTraceScope": "pass",
+    "promptSha256": "67327de7365ae21d5af314dd75ce16c33ab817bd3b409178850addc4807d89ad",
+    "templateProductSha256": "d9c2aa267a4b3fc6aafdffa270124fda854364abbb1a16d398cf26acc828fb30"
+  },
+  "timingMs": {
+    "generation": 710640,
+    "model": 663371,
+    "repair": 33797,
+    "seedModules": 6757,
+    "dependencySyncInitial": 368,
+    "typecheckInitial": 691,
+    "sourceAuditInitial": 49,
+    "dependencySyncRetry": 47,
+    "typecheckRetry": 581,
+    "sourceAuditRetry": 27,
+    "exportRetry": 4567,
+    "artifactAuditRetry": 26,
+    "firstProductWrite": 131670,
+    "codeWriteWindow": 494840
+  },
+  "trace": {
+    "actualModel": "k3-256k",
+    "turns": 37,
+    "inputTokens": 57988,
+    "cacheReadTokens": 852224,
+    "outputTokens": 31459,
+    "costUsd": 1.504522,
+    "toolCalls": { "Read": 11, "Write": 11, "Edit": 14 },
+    "repairTurns": 3,
+    "repairCostUsd": 0.351331,
+    "repairToolCalls": { "Read": 1, "Edit": 1 }
+  },
+  "product": {
+    "files": 13,
+    "lines": 1317,
+    "score": 43,
+    "maxScore": 52,
+    "scorePercent": 82.7,
+    "scoreByRequirement": {
+      "DATA-01": 2, "DATA-02": 2, "DATA-03": 2,
+      "CALC-01": 2, "CALC-02": 2, "CALC-03": 1, "CALC-04": 1,
+      "TODAY-01": 2, "TODAY-02": 2, "TODAY-03": 2,
+      "BOARD-01": 2, "BOARD-02": 2,
+      "WEEK-01": 1, "WEEK-02": 2, "WEEK-03": 2,
+      "PROFILE-01": 1, "PROFILE-02": 2, "PROFILE-03": 2,
+      "SEED-01": 1, "SEED-02": 0,
+      "VISUAL-01": 1, "VISUAL-02": 2, "VISUAL-03": 2,
+      "RESP-01": 2, "RUN-01": 2, "RUN-02": 1
+    },
+    "strengths": [
+      "AsyncStorage hydrates before all user mutations and every mutation persists under an app-slug namespace.",
+      "All four destinations, create/edit/delete/check-in/backfill, per-goal board, weekly notes, import confirmation, migration, inline SVG charts/icons, confetti, and three desktop breakpoints are implemented.",
+      "expo-sharing, expo-document-picker, expo-clipboard, expo-haptics, expo-linear-gradient, expo-status-bar, AsyncStorage, and react-native-svg use exact catalog versions.",
+      "Typecheck, source audit, Harmony Go export, artifact binding, exact desktop install/open, and error-overlay detection pass."
+    ],
+    "gaps": [
+      "Streak and missed-day scans can count dates before goal.createdAt.",
+      "Weekly amountTotal mixes different goal units even though per-goal rows keep their units.",
+      "Import rejects structurally valid empty backups; shareAsync receives a data URI rather than a proven local file URI.",
+      "Seed has only 13 entries and does not visibly exercise both rest and rollover states; the 20-entry banner is initially unreachable and its CTA only navigates to My instead of exporting directly.",
+      "Desktop launch screenshot shows oversized vertically stretched navigation cells and near-white hero rendering with low-contrast white text.",
+      "Core mutation/restart persistence was intentionally not executed in this loop, so runtime persistence remains unproven for this artifact."
+    ]
+  },
+  "verification": {
+    "typecheck": "pass",
+    "sourceAudit": "pass",
+    "export": "pass",
+    "artifactAudit": "pass",
+    "desktopLaunch": "pass",
+    "errorOverlay": "absent",
+    "coreFlowQa": "not-run-by-protocol"
+  }
+}

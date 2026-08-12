@@ -1,0 +1,27 @@
+{
+  "name": "__APP_SLUG__",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "harmony": "expo run:harmony",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@babel/runtime": "^7.20.0",
+    "@expo/cli": "57.0.11",
+    "@react-native-oh/react-native-harmony": "0.84.2",
+    "@react-native-oh/react-native-harmony-cli": "0.84.2",
+    "expo": "57.0.9",
+    "metro": "0.83.3",
+    "metro-config": "0.83.3",
+    "react": "19.2.3",
+    "react-native": "0.84.1"
+  },
+  "devDependencies": {
+    "@expo/metro": "56.0.0",
+    "@react-native-community/cli": "20.2.0",
+    "@types/react": "~19.2.2",
+    "typescript": "~5.9.2"
+  }
+}

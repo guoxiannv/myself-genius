@@ -1,0 +1,17 @@
+.DS_Store
+
+node_modules/
+dist/
+coverage/
+.expo/
+.expo-fast/
+
+.env
+.env.*
+!.env.example
+
+*.log
+
+# Raw Codex exports can contain credentials and machine-local execution context.
+session-history/*.jsonl
+session-history/*.txt

@@ -1,0 +1,86 @@
+{
+  "project": "/Users/stefan/Workspaces/fe-project/expo-app/cold-v1-learning-go",
+  "experiment": {
+    "schemaVersion": 1,
+    "protocol": "cold-start-v1",
+    "coldStart": true,
+    "sourceInheritance": false,
+    "templateProductSha256": "10a206e1cd70dc3b108a9e729da8f142bd6df668bf0ec23d3c1783d76b2b8add",
+    "preparedAt": "2026-08-09T02:41:15.553Z"
+  },
+  "result": null,
+  "product": {
+    "files": 14,
+    "lines": 1028,
+    "bytes": 46900,
+    "paths": [
+      "App.tsx",
+      "src/app-shell.tsx",
+      "src/components/charts.tsx",
+      "src/components/confetti.tsx",
+      "src/components/goal-form.tsx",
+      "src/components/icons.tsx",
+      "src/components/ui.tsx",
+      "src/lib/calc.ts",
+      "src/lib/dates.ts",
+      "src/lib/seed.ts",
+      "src/lib/storage.ts",
+      "src/store.tsx",
+      "src/theme.ts",
+      "src/types.ts"
+    ]
+  },
+  "traces": [
+    {
+      "path": "/Users/stefan/Workspaces/fe-project/expo-app/cold-v1-learning-go/.expo-fast/agent-trace.jsonl",
+      "bytes": 1110682,
+      "apiDurationMs": 1072933,
+      "turns": 27,
+      "costUsd": 0.5395378000000001,
+      "usage": {
+        "input_tokens": 42639,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 376064,
+        "output_tokens": 19828,
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 0,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "not_available",
+        "iterations": [],
+        "speed": "standard"
+      },
+      "terminalReason": "aborted_streaming",
+      "isError": true,
+      "byTool": {
+        "Read": 10,
+        "Glob": 1,
+        "Write": 13,
+        "Edit": 1
+      },
+      "writeChars": 42266,
+      "editOldChars": 457,
+      "editNewChars": 305,
+      "firstProductCall": {
+        "name": "Read",
+        "input": {
+          "file_path": "/Users/stefan/Workspaces/fe-project/expo-app/cold-v1-learning-go/App.tsx"
+        },
+        "timestamp": "2026-08-09T02:41:35.679Z"
+      },
+      "lastProductCall": {
+        "name": "Write",
+        "input": {
+          "file_path": "/Users/stefan/Workspaces/fe-project/expo-app/cold-v1-learning-go/src/components/goal-form.tsx",
+          "content": "import React, { useState } from 'react';\nimport { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';\nimport type { Goal } from '../types';\nimport { goalColors, palette } from '../theme';\nimport { addDays, isValidKey, todayKey } from '../lib/dates';\nimport { ActionButton } from './ui';\n\ntype GoalDraft = Omit<Goal, 'id' | 'createdAt'>;\n\nexport function GoalForm({ initial, onSubmit, onCancel, submitLabel, testID }: {\n  initial?: Goal;\n  onSubmit: (draft: GoalDraft) => void;\n  onCancel?: () => void;\n  submitLabel: string;\n  testID?: string;\n}) {\n  const [name, setName] = useState(initial?.name ?? '');\n  const [unit, setUnit] = useState(initial?.unit ?? '');\n  const [total, setTotal] = useState(initial ? String(initial.total) : '');\n  const [deadline, setDeadline] = useState(initial?.deadline ?? addDays(todayKey(), 30));\n  const [color, setColor] = useState(initial?.color ?? goalColors[0]);\n  const [obstacle, setObstacle] = useState(initial?.obstacle ?? '');\n  const [plan, setPlan] = useState(initial?.plan ?? '');\n  const [error, setError] = useState('');\n\n  const totalNum = Number(total);\n  const valid = name.trim().length > 0 && unit.trim().length > 0 && Number.isFinite(totalNum) && totalNum > 0 && isValidKey(deadline);\n\n  const submit = () => {\n    if (!valid) {\n      setError('请填写名称、单位、大于 0 的总量，并使用 YYYY-MM-DD 格式的截止日。');\n      return;\n    }\n    onSubmit({\n      name: name.trim(), unit: unit.trim(), total: totalNum, deadline, color,\n      obstacle: obstacle.trim(), plan: plan.trim(),\n      ...(initial?.isSample ? { isSample: true } : {}),\n    });\n  };\n\n  return <View style={styles.form} testID={testID}>\n    <Field label=\"目标名称\"><TextInput accessibilityLabel=\"目标名称\" onChangeText={setName} placeholder=\"例如：背完 2000 个英语单词\" placeholderTextColor={palette.faint} style={styles.input} testID=\"goal-name-input\" value={name} /></Field>\n    <View style={styles.row}>\n      <Field flex label=\"单位\"><TextInput accessibilityLabel=\"单位\" onChangeText={setUnit} placeholder=\"个 / 页 / 节\" placeholderTextColor={palette.faint} style={styles.input} testID=\"goal-unit-input\" value={unit} /></Field>\n      <Field flex label=\"总量\"><TextInput accessibilityLabel=\"总量\" keyboardType=\"numeric\" onChangeText={setTotal} placeholder=\"2000\" placeholderTextColor={palette.faint} style={styles.input} testID=\"goal-total-input\" value={total} /></Field>\n    </View>\n    <Field label=\"截止日（YYYY-MM-DD）\"><TextInput accessibilityLabel=\"截止日\" onChangeText={setDeadline} placeholder=\"2026-09-30\" placeholderTextColor={palette.faint} style={styles.input} testID=\"goal-deadline-input\" value={deadline} /></Field>\n    <View style={styles.field}>\n      <Text style={styles.label}>配色</Text>\n      <View style={styles.swatches}>\n        {goalColors.map((c) => (\n          <Pressable accessibilityLabel={`配色 ${c}`} accessibilityRole=\"button\" key={c} onPress={() => setColor(c)} style={[styles.swatch, { backgroundColor: c }, color === c && styles.swatchActive]} testID={`swatch-${c}`} />\n        ))}\n      </View>\n    </View>\n    <Field label=\"最容易拦住我的障碍（选填）\"><TextInput accessibilityLabel=\"障碍\" multiline onChangeText={setObstacle} placeholder=\"例如：睡前刷手机\" placeholderTextColor={palette.faint} style={[styles.input, styles.multiline]} testID=\"goal-obstacle-input\" value={obstacle} /></Field>\n    <Field label=\"如果它出现，我就……（选填）\"><TextInput accessibilityLabel=\"对策\" multiline onChangeText={setPlan} placeholder=\"例如：就先读 5 页书再决定要不要刷\" placeholderTextColor={palette.faint} style={[styles.input, styles.multiline]} testID=\"goal-plan-input\" value={plan} /></Field>\n    {error ? <Text style={styles.error} testID=\"goal-form-error\">{error}</Text> : null}\n    <View style={styles.actions}>\n      {onCancel ? <ActionButton label=\"取消\" onPress={onCancel} testID=\"goal-form-cancel\" /> : null}\n      <ActionButton label={submitLabel} onPress={submit} testID=\"goal-form-submit\" tone=\"primary\" />\n    </View>\n  </View>;\n}\n\nfunction Field({ children, label, flex }: React.PropsWithChildren<{ label: string; flex?: boolean }>) {\n  return <View style={[styles.field, flex && styles.flex]}><Text style={styles.label}>{label}</Text>{children}</View>;\n}\n\nconst styles = StyleSheet.create({\n  form: { gap: 14 },\n  field: { gap: 7 },\n  flex: { flex: 1 },\n  row: { flexDirection: 'row', gap: 12 },\n  label: { color: palette.ink, fontSize: 13, fontWeight: '700' },\n  input: { backgroundColor: '#FBFAFE', borderColor: palette.border, borderRadius: 12, borderWidth: 1, color: palette.ink, fontSize: 15, minHeight: 46, paddingHorizontal: 13, paddingVertical: 10 },\n  multiline: { minHeight: 74, textAlignVertical: 'top' },\n  swatches: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },\n  swatch: { borderRadius: 999, height: 34, width: 34 },\n  swatchActive: { borderColor: palette.ink, borderWidth: 3 },\n  error: { color: palette.danger, fontSize: 13, fontWeight: '600' },\n  actions: { flexDirection: 'row', gap: 10, justifyContent: 'flex-end', marginTop: 4 },\n});\n"
+        },
+        "timestamp": "2026-08-09T02:59:14.494Z"
+      }
+    }
+  ]
+}

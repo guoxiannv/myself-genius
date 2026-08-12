@@ -1,0 +1,84 @@
+{
+  "project": "/Users/stefan/Workspaces/fe-project/expo-app/cold-v3-learning-go",
+  "experiment": {
+    "schemaVersion": 1,
+    "protocol": "cold-start-v1",
+    "coldStart": true,
+    "sourceInheritance": false,
+    "templateProductSha256": "f8b25d5b6836333fea2848c04fa09103563cd4760233ecdc82acbcafd3ea8b0d",
+    "preparedAt": "2026-08-09T03:27:51.857Z"
+  },
+  "result": null,
+  "product": {
+    "files": 12,
+    "lines": 1163,
+    "bytes": 67512,
+    "paths": [
+      "App.tsx",
+      "src/app-shell.tsx",
+      "src/components/charts.tsx",
+      "src/components/forms.tsx",
+      "src/components/icons.tsx",
+      "src/components/ui.tsx",
+      "src/lib.ts",
+      "src/screens/board.tsx",
+      "src/screens/today.tsx",
+      "src/store.ts",
+      "src/theme.ts",
+      "src/types.ts"
+    ]
+  },
+  "traces": [
+    {
+      "path": "/Users/stefan/Workspaces/fe-project/expo-app/cold-v3-learning-go/.expo-fast/agent-trace.jsonl",
+      "bytes": 7061315,
+      "apiDurationMs": 1189217,
+      "turns": 24,
+      "costUsd": 1.013191,
+      "usage": {
+        "input_tokens": 38650,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 258048,
+        "output_tokens": 54545,
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 0,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "not_available",
+        "iterations": [],
+        "speed": "standard"
+      },
+      "terminalReason": "aborted_streaming",
+      "isError": true,
+      "byTool": {
+        "Read": 10,
+        "Glob": 1,
+        "Write": 9,
+        "Edit": 2
+      },
+      "writeChars": 60831,
+      "editOldChars": 308,
+      "editNewChars": 1292,
+      "firstProductCall": {
+        "name": "Read",
+        "input": {
+          "file_path": "/Users/stefan/Workspaces/fe-project/expo-app/cold-v3-learning-go/App.tsx"
+        },
+        "timestamp": "2026-08-09T03:28:11.513Z"
+      },
+      "lastProductCall": {
+        "name": "Write",
+        "input": {
+          "file_path": "/Users/stefan/Workspaces/fe-project/expo-app/cold-v3-learning-go/src/screens/board.tsx",
+          "content": "import React, { useState } from 'react';\nimport { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';\n\nimport { ProgressRing, StackedBarChart, type StackDay } from '../components/charts';\nimport { ConfirmModal } from '../components/forms';\nimport { FlameIcon, TrashIcon } from '../components/icons';\nimport { doneAmount, formatCN, formatDelta, forecastCompletion, lastNDays, recentLogs, streakInfo } from '../lib';\nimport { layout, palette } from '../theme';\nimport type { Log, StoreShape } from '../types';\n\ntype Mutate = (updater: (prev: StoreShape) => StoreShape) => void;\n\nexport function BoardScreen({ state, mutate, today }: { state: StoreShape; mutate: Mutate; today: string }) {\n  const { width } = useWindowDimensions();\n  const isDesktop = width >= 1000;\n  const [deletingLog, setDeletingLog] = useState<Log | undefined>();\n\n  const days = lastNDays(today, 14);\n  const chart: StackDay[] = days.map((d) => {\n    const byGoal: Record<string, number> = {};\n    let total = 0;\n    for (const l of state.logs) {\n      if (l.date !== d || l.minutes == null) continue;\n      byGoal[l.goalId] = (byGoal[l.goalId] ?? 0) + l.minutes;\n      total += l.minutes;\n    }\n    return {\n      date: d, label: `${Number(d.slice(5, 7))}/${Number(d.slice(8, 10))}`, total,\n      segments: state.goals.filter((g) => byGoal[g.id]).map((g) => ({ id: g.id, color: g.color, value: byGoal[g.id] })),\n    };\n  });\n  const anyMinutes = chart.some((d) => d.total > 0);\n\n  const deleteLog = (log: Log) => mutate((prev) => ({ ...prev, logs: prev.logs.filter((l) => l.id !== log.id) }));\n\n  return <View>\n    <Text style={layout.title}>看板</Text>\n    <Text style={layout.subtitle}>每个目标的进度环、核心数字、预案和最近记录</Text>\n    <View style={[styles.boardGrid, isDesktop && styles.boardGridDesktop]}>\n      {state.goals.map((g) => {\n        const done = doneAmount(state.logs, g.id);\n        const pct = Math.min(100, Math.round((done / g.total) * 100));\n        const streak = streakInfo(state.logs, g.id, today).streak;\n        const forecast = forecastCompletion(g, state.logs, today);\n        const recent = recentLogs(state.logs, g.id, 10);\n        return <View key={g.id} style={[styles.boardCard, isDesktop && styles.boardCardDesktop]} testID={`board-card-${g.id}`}>\n          <View style={styles.boardHead}>\n            <View style={[styles.colorBar, { backgroundColor: g.color }]} />\n            <Text style={styles.boardName}>{g.name}</Text>\n          </View>\n          <View style={styles.ringRow}>\n            <ProgressRing color={pct >= 100 ? palette.success : g.color} pct={pct} size={110}>\n              <Text style={styles.ringPct}>{pct}%</Text>\n              <Text style={styles.ringSub}>完成率</Text>\n            </ProgressRing>\n            <View style={styles.statCol}>\n              <View style={styles.statBox} testID={`stat-done-${g.id}`}>\n                <Text style={styles.statValue}>{done}<Text style={styles.statUnit}> / {g.total} {g.unit}</Text></Text>\n                <Text style={styles.statLabel}>已完成量</Text>\n              </View>\n              <View style={styles.statBox} testID={`stat-streak-${g.id}`}>\n                <View style={{ alignItems: 'center', flexDirection: 'row', gap: 5 }}>\n                  <FlameIcon color={streak > 0 ? palette.warning : palette.muted} size={16} />\n                  <Text style={styles.statValue}>{streak}<Text style={styles.statUnit}> 天</Text></Text>\n                </View>\n                <Text style={styles.statLabel}>连续打卡</Text>\n              </View>\n              <View style={styles.statBox} testID={`stat-forecast-${g.id}`}>\n                <Text style={styles.statValue}>{forecast ? formatCN(forecast.date) : '暂无推算'}</Text>\n                <Text style={styles.statLabel}>{forecast ? `预计完成 · ${formatDelta(forecast.delta)}` : '近 7 天打卡样本不足'}</Text>\n              </View>\n            </View>\n          </View>\n          {g.obstacle || g.coping ? <View style={styles.planBox} testID={`board-plan-${g.id}`}>\n            {g.obstacle ? <Text style={styles.planText}>障碍：{g.obstacle}</Text> : null}\n            {g.coping ? <Text style={styles.planText}>预案：{g.coping}</Text> : null}\n          </View> : null}\n          <Text style={styles.recentTitle}>最近 {recent.length} 条记录</Text>\n          {recent.length === 0 ? <Text style={layout.caption}>还没有记录。</Text> : recent.map((l) => <View key={l.id} style={styles.logRow} testID={`log-row-${l.id}`}>\n            <Text style={styles.logDate}>{formatCN(l.date)}</Text>\n            {l.isBackfill ? <View style={styles.backfillTag}><Text style={styles.backfillTagText}>补</Text></View> : null}\n            <Text style={styles.logAmount}>{l.amount} {g.unit}{l.minutes != null ? ` · ${l.minutes} 分钟` : ''}</Text>\n            <Pressable accessibilityLabel={`删除 ${formatCN(l.date)} 的记录`} accessibilityRole=\"button\" onPress={() => setDeletingLog(l)} style={styles.logDelete} testID={`delete-log-${l.id}`}>\n              <TrashIcon color={palette.danger} size={14} />\n            </Pressable>\n          </View>)}\n        </View>;\n      })}\n      {state.goals.length === 0 ? <View style={styles.boardCard}><Text style={layout.caption}>还没有目标，先去「今日」页新建一个。</Text></View> : null}\n    </View>\n    <View style={styles.chartCard}>\n      <Text style={styles.chartTitle}>近 14 天投入分钟</Text>\n      <Text style={layout.caption}>分目标堆叠，仅统计填写了分钟数的记录</Text>\n      {anyMinutes ? <View style={{ marginTop: 12 }}><StackedBarChart days={chart} /></View> : <Text style={[layout.caption, { marginTop: 12 }]} testID=\"minutes-chart-empty\">最近 14 天没有带分钟数的记录，图表不硬凑。</Text>}\n      <View style={styles.legendRow}>\n        {state.goals.map((g) => <View key={g.id} style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: g.color }]} /><Text style={styles.legendLabel}>{g.name}</Text></View>)}\n      </View>\n    </View>\n    <ConfirmModal body={`删除 ${deletingLog ? formatCN(deletingLog.date) : ''} 的这条记录？连续天数与推算会按真实日期重新计算。`} confirmLabel=\"删除\" danger onClose={() => setDeletingLog(undefined)} onConfirm={() => { if (deletingLog) deleteLog(deletingLog); setDeletingLog(undefined); }} testID=\"confirm-delete-log\" title=\"删除记录？\" visible={deletingLog != null} />\n  </View>;\n}\n\nconst styles = StyleSheet.create({\n  boardGrid: { gap: 14, marginTop: 18 },\n  boardGridDesktop: { flexDirection: 'row', flexWrap: 'wrap' },\n  boardCard: { backgroundColor: palette.surface, borderColor: palette.border, borderRadius: 20, borderWidth: 1, gap: 12, padding: 18 },\n  boardCardDesktop: { width: '48.5%' },\n  boardHead: { alignItems: 'center', flexDirection: 'row', gap: 8 },\n  colorBar: { borderRadius: 3, height: 18, width: 5 },\n  boardName: { color: palette.ink, flex: 1, fontSize: 16, fontWeight: '800' },\n  ringRow: { alignItems: 'center', flexDirection: 'row', gap: 16 },\n  ringPct: { color: palette.ink, fontSize: 20, fontWeight: '800' },\n  ringSub: { color: palette.muted, fontSize: 11, fontWeight: '700', marginTop: 1 },\n  statCol: { flex: 1, gap: 10 },\n  statBox: { gap: 2 },\n  statValue: { color: palette.ink, fontSize: 18, fontWeight: '800' },\n  statUnit: { color: palette.muted, fontSize: 12, fontWeight: '600' },\n  statLabel: { color: palette.muted, fontSize: 12 },\n  planBox: { backgroundColor: palette.canvas, borderRadius: 12, gap: 5, padding: 12 },\n  planText: { color: palette.muted, fontSize: 12.5, lineHeight: 18 },\n  recentTitle: { color: palette.ink, fontSize: 13, fontWeight: '800', marginTop: 2 },\n  logRow: { alignItems: 'center', borderTopColor: palette.border, borderTopWidth: 1, flexDirection: 'row', gap: 8, paddingVertical: 9 },\n  logDate: { color: palette.ink, fontSize: 13, fontWeight: '700', width: 62 },\n  backfillTag: { backgroundColor: palette.warningSoft, borderColor: palette.warning, borderRadius: 6, borderWidth: 1, paddingHorizontal: 5, paddingVertical: 1 },\n  backfillTagText: { color: palette.warning, fontSize: 10, fontWeight: '800' },\n  logAmount: { color: palette.muted, flex: 1, fontSize: 13 },\n  logDelete: { alignItems: 'center', height: 30, justifyContent: 'center', width: 30 },\n  chartCard: { backgroundColor: palette.surface, borderColor: palette.border, borderRadius: 20, borderWidth: 1, gap: 4, marginTop: 16, padding: 18 },\n  chartTitle: { color: palette.ink, fontSize: 16, fontWeight: '800' },\n  legendRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, marginTop: 12 },\n  legendItem: { alignItems: 'center', flexDirection: 'row', gap: 6 },\n  legendDot: { borderRadius: 4, height: 10, width: 10 },\n  legendLabel: { color: palette.muted, fontSize: 12, fontWeight: '600' },\n});\n"
+        },
+        "timestamp": "2026-08-09T03:47:48.847Z"
+      }
+    }
+  ]
+}

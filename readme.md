@@ -7,7 +7,7 @@ Genius 仓库用于统一管理 Frontend、Runner 和 SDK 三个部分。
 | 目录 | 用途 |
 | --- | --- |
 | `frontend/` | Frontend 相关代码、资源和配置。 |
-| `runner/` | Runner 执行端相关代码、脚本和配置。 |
+| `runner/` | Runner 执行端相关代码、脚本和配置。初始代码从 [`yuhuailiu/expo-arkpilot`](https://github.com/yuhuailiu/expo-arkpilot) 的 `expo-harmony-fast-round3-reproduction` 分支导入。 |
 | `sdk/` | DevKit SDK。该目录是 Git submodule，关联 [`BitFun-Platform/devkit_sdk`](https://github.com/BitFun-Platform/devkit_sdk)，不是直接存放在本仓库中的普通目录。 |
 
 ## 获取 SDK
@@ -83,6 +83,7 @@ Issue 标题使用 `[范围] 简短描述` 的格式，范围与目录保持一�
 ## 当前进展
 
 - 已建立 `frontend/`、`runner/` 和 `sdk/` 三个目录的基础结构。
+- 已将 `yuhuailiu/expo-arkpilot` 的 Runner 当前代码初始导入 `runner/` 目录。
 - 已接入 `BitFun-Platform/devkit_sdk` submodule，并配置跟踪 `dev/SupportOH` 分支。
 - 已启用 Issue 模板和标题规范校验 Workflow。
 - 已在 `GeniusProjectTrack` 中创建并转换 Issue `#1`：`[global] 更新项目 README 进展说明`，本次 README 更新通过 Pull Request 合并。

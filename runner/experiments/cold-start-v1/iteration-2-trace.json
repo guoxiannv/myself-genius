@@ -1,0 +1,158 @@
+{
+  "project": "/Users/stefan/Workspaces/fe-project/expo-app/cold-v2-learning-go",
+  "experiment": {
+    "schemaVersion": 1,
+    "protocol": "cold-start-v1",
+    "coldStart": true,
+    "sourceInheritance": false,
+    "templateProductSha256": "c3bc9d6f546c395828249806d790d7a452750017bdd6ad32aecbc2f417d71f16",
+    "preparedAt": "2026-08-09T03:04:58.109Z"
+  },
+  "result": {
+    "candidate": "repair",
+    "selection": {
+      "requested": "repair",
+      "complexityScore": 8190
+    },
+    "project": "/Users/stefan/Workspaces/fe-project/expo-app/cold-v2-learning-go",
+    "request": "/Users/stefan/Workspaces/fe-project/ExpoHarmonyFast/prompts/learning-goals.md",
+    "startedAt": "2026-08-09T03:04:57.729Z",
+    "stages": {
+      "seedModulesMs": 9202,
+      "claudeMs": 773924,
+      "typecheckMs": 634,
+      "sourceAuditMs": 26,
+      "exportMs": 4399,
+      "artifactAuditMs": 24
+    },
+    "experiment": {
+      "schemaVersion": 1,
+      "protocol": "cold-start-v1",
+      "coldStart": true,
+      "sourceInheritance": false,
+      "templateProductSha256": "c3bc9d6f546c395828249806d790d7a452750017bdd6ad32aecbc2f417d71f16",
+      "preparedAt": "2026-08-09T03:04:58.109Z"
+    },
+    "sessionId": "29612efe-ff40-4986-8b74-68d6e3e37271",
+    "claudeDeadlineReached": false,
+    "traceUsage": {
+      "totalCostUsd": 1.1469645999999998,
+      "turns": 50,
+      "usage": {
+        "input_tokens": 59750,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 1729280,
+        "output_tokens": 29829,
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 0,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "not_available",
+        "iterations": [],
+        "speed": "standard"
+      }
+    },
+    "generationCompletedAt": "2026-08-09T03:18:06.326Z",
+    "generationMs": 788597,
+    "totalMs": 788597,
+    "launch": {
+      "result": "PASS",
+      "target": "127.0.0.1:5557",
+      "bundleName": "host.exp.exponent.harmony",
+      "manifestId": "cold-v2-learning-go",
+      "appNode": "responsive-navigation",
+      "actions": [
+        {
+          "action": "install",
+          "x": 3003,
+          "y": 1631,
+          "bounds": "[2950,1595][3056,1667]",
+          "text": "安装"
+        }
+      ],
+      "port": 3352
+    },
+    "completedAt": "2026-08-09T03:18:17.011Z",
+    "status": "passed"
+  },
+  "product": {
+    "files": 13,
+    "lines": 1500,
+    "bytes": 79436,
+    "paths": [
+      "App.tsx",
+      "src/app-shell.tsx",
+      "src/components/goal-forms.tsx",
+      "src/components/icons.tsx",
+      "src/components/ui.tsx",
+      "src/domain.ts",
+      "src/screens/board.tsx",
+      "src/screens/mine.tsx",
+      "src/screens/today.tsx",
+      "src/screens/weekly.tsx",
+      "src/store.tsx",
+      "src/theme.ts",
+      "src/types.ts"
+    ]
+  },
+  "traces": [
+    {
+      "path": "/Users/stefan/Workspaces/fe-project/expo-app/cold-v2-learning-go/.expo-fast/agent-trace.jsonl",
+      "bytes": 717836,
+      "apiDurationMs": 774443,
+      "turns": 50,
+      "costUsd": 1.1469645999999998,
+      "usage": {
+        "input_tokens": 59750,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 1729280,
+        "output_tokens": 29829,
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 0,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "not_available",
+        "iterations": [],
+        "speed": "standard"
+      },
+      "terminalReason": "completed",
+      "isError": false,
+      "byTool": {
+        "Read": 15,
+        "Glob": 1,
+        "Write": 11,
+        "Edit": 20,
+        "Grep": 2
+      },
+      "writeChars": 70513,
+      "editOldChars": 5628,
+      "editNewChars": 7709,
+      "firstProductCall": {
+        "name": "Read",
+        "input": {
+          "file_path": "/Users/stefan/Workspaces/fe-project/expo-app/cold-v2-learning-go/App.tsx"
+        },
+        "timestamp": "2026-08-09T03:05:17.244Z"
+      },
+      "lastProductCall": {
+        "name": "Read",
+        "input": {
+          "file_path": "/Users/stefan/Workspaces/fe-project/expo-app/cold-v2-learning-go/src/screens/mine.tsx",
+          "limit": 12,
+          "offset": 56
+        },
+        "timestamp": "2026-08-09T03:17:46.251Z"
+      }
+    }
+  ]
+}

@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "valid": true,
+  "project": "/Users/stefan/Workspaces/fe-project/expo-app/loop-fast-r12-k3-low-capindex-20260810",
+  "change": "Replace the 76 KB paginated model-facing capability catalog with a deterministic 53-row, 24.5 KB index preserving every available/unavailable package, exact version, supported export, limitation, implementation, and evidence field.",
+  "isolation": {
+    "protocol": "cold-start-v1",
+    "sourceInheritance": false,
+    "traceScope": "pass",
+    "repairTraceScope": "pass",
+    "promptSha256": "67327de7365ae21d5af314dd75ce16c33ab817bd3b409178850addc4807d89ad",
+    "templateProductSha256": "20c1fd8a2ebc2f9b167382edfed52dd545e7b625ed25103f94ae12f180dfeb2f",
+    "capabilityCatalogSha256": "a6c9df09dd124a5b66a084e0a0082669d97411179c7bafbd074f450a114292d8",
+    "modelCapabilityIndexSha256": "c6b26032260d02d059752d5c90803e5272c1fcf215d02be23d056273f03c7dc1",
+    "modelCapabilityIndexBytes": 24472
+  },
+  "timingMs": {
+    "generation": 645880,
+    "model": 518141,
+    "repair": 115023,
+    "seedModules": 6929,
+    "dependencySyncInitial": 353,
+    "typecheckInitial": 656,
+    "sourceAuditInitial": 26,
+    "dependencySyncRetry": 42,
+    "typecheckRetry": 556,
+    "sourceAuditRetry": 25,
+    "exportRetry": 3739,
+    "artifactAuditRetry": 29,
+    "firstProductWrite": 75339,
+    "codeWriteWindow": 417076
+  },
+  "trace": {
+    "actualModel": "k3-256k",
+    "turns": 35,
+    "inputTokens": 46301,
+    "cacheReadTokens": 688128,
+    "outputTokens": 28385,
+    "costUsd": 1.287235,
+    "toolCalls": { "Read": 11, "Write": 11, "Edit": 12 },
+    "repairTurns": 11,
+    "repairInputTokens": 51683,
+    "repairCacheReadTokens": 397568,
+    "repairOutputTokens": 3822,
+    "repairCostUsd": 0.552749,
+    "repairToolCalls": { "Read": 2, "Write": 1, "Edit": 7 },
+    "catalogReads": 0,
+    "modelCapabilityIndexReads": 1
+  },
+  "product": {
+    "files": 14,
+    "lines": 1138,
+    "score": 43,
+    "maxScore": 52,
+    "scorePercent": 82.7,
+    "scoreByRequirement": {
+      "DATA-01": 2, "DATA-02": 2, "DATA-03": 2,
+      "CALC-01": 2, "CALC-02": 1, "CALC-03": 1, "CALC-04": 1,
+      "TODAY-01": 2, "TODAY-02": 2, "TODAY-03": 2,
+      "BOARD-01": 2, "BOARD-02": 2,
+      "WEEK-01": 2, "WEEK-02": 2, "WEEK-03": 2,
+      "PROFILE-01": 1, "PROFILE-02": 1, "PROFILE-03": 2,
+      "SEED-01": 1, "SEED-02": 1,
+      "VISUAL-01": 2, "VISUAL-02": 2, "VISUAL-03": 2,
+      "RESP-01": 1, "RUN-01": 2, "RUN-02": 1
+    },
+    "strengths": [
+      "AsyncStorage, multiple same-day records, all four destinations, full primary actions, per-unit weekly comparisons, immediate weekly notes, inline SVG chart/icons, and animated confetti are implemented.",
+      "The repair adds a shared exportBackup action used directly by both the 20-record banner and Profile; expo-sharing and clipboard fallback use exact catalog versions.",
+      "The desktop screenshot has compact fixed navigation, legible hierarchy, coherent cold-white/purple/status colors, and no starter residue or error overlay.",
+      "Typecheck, source audit, Harmony Go export, artifact binding, exact desktop install/open, and trace isolation pass."
+    ],
+    "gaps": [
+      "Forecast starts with a single recent entry instead of requiring enough real sample days.",
+      "Streak and yellow/red missed-day scans do not stop at goal.createdAt.",
+      "Legacy migration supports only the current goals/entries shape; shareAsync still uses an unproven data URI instead of a local file URI.",
+      "Clear-samples has no confirmation and clear-all relies only on the exact phrase rather than a second dialog.",
+      "Seed has 18 records, so the >=20 backup banner is not initially visible and the seed does not visibly cover both yellow-rest and red-rollover examples.",
+      "Board and weekly notes use desktop multi-column layouts, but the primary Today list remains one column in the desktop launch screenshot.",
+      "Core mutation/restart persistence was intentionally not executed in this loop, so runtime persistence remains unproven for this artifact."
+    ]
+  },
+  "verification": {
+    "typecheck": "pass",
+    "sourceAudit": "pass",
+    "export": "pass",
+    "artifactAudit": "pass",
+    "desktopLaunch": "pass",
+    "errorOverlay": "absent",
+    "coreFlowQa": "not-run-by-protocol"
+  }
+}

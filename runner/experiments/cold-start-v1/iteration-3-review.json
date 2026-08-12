@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "iteration": 3,
+  "project": "/Users/stefan/Workspaces/fe-project/expo-app/cold-v3-learning-go",
+  "coldStart": true,
+  "sourceInheritance": false,
+  "outcome": "failed-time-limit",
+  "timeLimitMinutes": 20,
+  "trace": {
+    "apiDurationMs": 1189217,
+    "turns": 24,
+    "outputTokens": 54545,
+    "costUsd": 1.013191,
+    "terminalReason": "aborted_streaming"
+  },
+  "sourceAtStop": {
+    "files": 12,
+    "lines": 1163,
+    "typecheck": "fail",
+    "sourceAudit": "fail",
+    "starterEntryStillActive": true,
+    "requestedScreensCreated": 2,
+    "requestedScreensConnected": 0,
+    "seedRecords": 19
+  },
+  "rubric": {
+    "source": "/Users/stefan/Workspaces/fe-project/ExpoHarmonyFast/experiments/cold-start-v1/rubric.json",
+    "score": 13,
+    "maximum": 52,
+    "percent": 25.0,
+    "items": [
+      { "id": "DATA-01", "score": 1, "reason": "The model and form exist in unconnected product source." },
+      { "id": "DATA-02", "score": 1, "reason": "Append logic and collision-resistant IDs exist but no generated screen is reachable from the entry." },
+      { "id": "DATA-03", "score": 1, "reason": "A namespaced AsyncStorage hook exists but AppShell still runs the in-memory starter state." },
+      { "id": "CALC-01", "score": 0, "reason": "Suggestion calculation exists, but RecordForm resets amount to empty and never prefills it." },
+      { "id": "CALC-02", "score": 1, "reason": "Progress and a correctly bounded seven-day forecast exist only in an unreachable screen." },
+      { "id": "CALC-03", "score": 0, "reason": "The rest scan still chooses a miss while walking backward and ignores goal creation boundaries." },
+      { "id": "CALC-04", "score": 0, "reason": "Yellow/red status inherits the flawed rest scan and is unreachable." },
+      { "id": "TODAY-01", "score": 1, "reason": "Today source includes top/bottom create, edit/delete, record and adjust actions but is not mounted." },
+      { "id": "TODAY-02", "score": 1, "reason": "Minutes and six-day backfill source exist, but prefill is missing and the form is unreachable." },
+      { "id": "TODAY-03", "score": 1, "reason": "Progress, forecast and contingency source exist; streak is incomplete and the card is unreachable." },
+      { "id": "BOARD-01", "score": 1, "reason": "The requested board card source exists but is not mounted." },
+      { "id": "BOARD-02", "score": 1, "reason": "A true multi-goal fourteen-day inline-SVG stacked chart was written but is not mounted." },
+      { "id": "WEEK-01", "score": 0, "reason": "No weekly screen was written." },
+      { "id": "WEEK-02", "score": 0, "reason": "No weekly screen was written." },
+      { "id": "WEEK-03", "score": 0, "reason": "No weekly screen was written." },
+      { "id": "PROFILE-01", "score": 0, "reason": "No profile screen was written." },
+      { "id": "PROFILE-02", "score": 0, "reason": "No profile screen was written." },
+      { "id": "PROFILE-03", "score": 0, "reason": "No profile screen was written." },
+      { "id": "SEED-01", "score": 1, "reason": "Three samples and a backfill record exist, but special-state semantics are unreliable and nothing is reachable." },
+      { "id": "SEED-02", "score": 0, "reason": "Only 19 seed records were written and there is no backup banner or direct export action." },
+      { "id": "VISUAL-01", "score": 0, "reason": "The foreground entry still displays starter copy and starter business UI." },
+      { "id": "VISUAL-02", "score": 1, "reason": "Generated icon and chart source uses local SVG, but the complete production UI is absent." },
+      { "id": "VISUAL-03", "score": 1, "reason": "A running confetti component is referenced by unreachable Today source." },
+      { "id": "RESP-01", "score": 1, "reason": "The starter has responsive shell mechanics but only three starter tabs, and generated product screens are not connected." },
+      { "id": "RUN-01", "score": 0, "reason": "Typecheck and source audit fail; export and launch never ran." },
+      { "id": "RUN-02", "score": 0, "reason": "No product runtime mutation could be tested." }
+    ]
+  },
+  "timeline": [
+    { "at": "00:00", "event": "Started reading authoritative scaffold." },
+    { "at": "07:31", "event": "First write: coverage-ledger brief." },
+    { "at": "08:40", "event": "First domain library write." },
+    { "at": "15:00", "event": "Rewrote the domain library as a full file." },
+    { "at": "17:42", "event": "Forms completed; no requested screen was yet connected." },
+    { "at": "18:57", "event": "First requested screen completed: Today." },
+    { "at": "19:57", "event": "Second requested screen completed: Board." },
+    { "at": "20:00", "event": "Runner terminated the model before Weekly, Profile and entry composition." }
+  ],
+  "diagnosis": [
+    "The larger coverage-ledger prompt increased semantic awareness but caused about seven minutes of pre-write reasoning.",
+    "The model's own plan explicitly reverted to a bottom-up types-to-library-to-state-to-components-to-screens sequence, contradicting the vertical-slice instruction.",
+    "A full rewrite of the domain library consumed another large turn before any requested screen existed.",
+    "At termination AppShell remained the starter, so static build failure and zero reachable generated product behavior were deterministic.",
+    "This is a failed independent generation, not source inheritance or a warm-start shortcut."
+  ],
+  "selectionDecision": {
+    "selectedIteration": 2,
+    "reason": "Iteration 2 is the only independent run that completed under 20 minutes, passed the build/export/launch chain and proved a persistent core mutation. Iteration 3's coverage-ledger variant is rejected and will not remain the active orchestration."
+  }
+}

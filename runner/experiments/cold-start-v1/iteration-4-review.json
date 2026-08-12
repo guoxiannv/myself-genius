@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "iteration": 4,
+  "project": "/Users/stefan/Workspaces/fe-project/expo-app/cold-v4-learning-go",
+  "coldStartDeclared": true,
+  "sourceInheritanceDeclared": false,
+  "experimentValidity": "invalid-source-boundary",
+  "coldOutcome": "failed-time-limit",
+  "timeLimitMinutes": 20,
+  "functionalRecovery": "passed-after-two-bounded-repairs-and-manual-current-bundle-reinstall",
+  "summary": "The recovered app is usable and scored 40/52, but this is not an independent cold-start result: the implementation trace read the complete prior test-project-go product and the original turn exceeded the 20-minute limit.",
+  "coldTrace": {
+    "apiDurationMs": 1197149,
+    "turns": 170,
+    "inputTokens": 173587,
+    "cacheReadTokens": 9459968,
+    "outputTokens": 108919,
+    "costUsd": 4.9944924,
+    "terminalReason": "aborted_streaming"
+  },
+  "recovery": {
+    "deterministicRepair": {
+      "purpose": "add the missing MineIcon export after typecheck",
+      "apiDurationMs": 50425,
+      "turns": 9,
+      "costUsd": 0.6831768
+    },
+    "runtimeRepair": {
+      "purpose": "remove expo-crypto randomUUID after the Harmony Go ExpoCryptoAES eager-module crash",
+      "apiDurationMs": 61713,
+      "turns": 18,
+      "costUsd": 0.5936178
+    },
+    "manualHostRecovery": "The Host retained an older Bundle for the same manifest id. The app was removed and installed again from the current catalog before runtime verification."
+  },
+  "experimentIntegrity": {
+    "traceScopeAudit": "fail",
+    "violationCount": 83,
+    "outsideProductEvidence": [
+      "The agent globbed sibling cold-v1, cold-v2 and cold-v3 projects.",
+      "The agent used a Bash tool call to list test-project-go and cold-v3 even though Bash was not in the requested tool set.",
+      "The agent read test-project-go package.json and 21 complete product source files covering the app shell, state, screens, forms, charts, storage, migration and sample data.",
+      "The agent described test-project-go in visible reasoning as the proven-working implementation of this exact product."
+    ],
+    "sourceSimilarity": {
+      "generatedUniqueNormalizedLinesAtLeast20Chars": 1293,
+      "referenceUniqueNormalizedLinesAtLeast20Chars": 1349,
+      "overlapLines": 956,
+      "generatedCoveragePercent": 73.9,
+      "jaccardPercent": 56.7,
+      "identicalWholeSourceFiles": 0,
+      "interpretation": "No whole file is byte-identical, but the exact-line overlap and trace prove extensive adaptation of prior business source."
+    }
+  },
+  "runtimeEvidence": {
+    "finalTypecheck": "pass",
+    "finalSourceAudit": "pass",
+    "finalExport": "pass",
+    "finalArtifactAudit": "pass",
+    "strictIdentity": {
+      "manifestId": "cold-v4-learning-go",
+      "currentProjectTitle": "cold-v4-learning-go",
+      "productMarker": "today-new-goal-top"
+    },
+    "strictSmoke": {
+      "result": "PASS",
+      "category": "list-mutation",
+      "before": "先定一个有终点的目标",
+      "after": "已记录 36 条打卡，记得备份",
+      "restarted": "已记录 36 条打卡，记得备份",
+      "persistedAfterRestart": true
+    },
+    "initialLaunchDefects": [
+      "The first launch screenshot was a red error overlay: Cannot find native module 'ExpoCryptoAES'.",
+      "The old launch gate accepted the marker behind the error overlay.",
+      "After source repair, reopening the same manifest id initially used the previously installed stale Bundle."
+    ]
+  },
+  "rubric": {
+    "source": "/Users/stefan/Workspaces/fe-project/ExpoHarmonyFast/experiments/cold-start-v1/rubric.json",
+    "score": 40,
+    "maximum": 52,
+    "percent": 76.9,
+    "items": [
+      { "id": "DATA-01", "score": 2, "reason": "Goal data includes name, unit, total, deadline, color, obstacle and contingency plan." },
+      { "id": "DATA-02", "score": 2, "reason": "Records append without date uniqueness constraints and the repaired local uid combines time, a monotonic counter and randomness." },
+      { "id": "DATA-03", "score": 2, "reason": "A slug-namespaced AsyncStorage key hydrates before writes, seeds only on null storage and saves every reducer mutation; force-stop/reopen persistence passed." },
+      { "id": "CALC-01", "score": 1, "reason": "The remaining-over-inclusive-days calculation is correct, but the always-mounted CheckInForm initializes its amount only once and does not refresh the prefill for later goals or openings." },
+      { "id": "CALC-02", "score": 2, "reason": "Progress uses recorded amount and forecast uses exactly the prior seven days, requires three distinct record dates and compares projected finish with the deadline." },
+      { "id": "CALC-03", "score": 0, "reason": "The streak walks backward, assigns each week's nearest miss as the rest day, counts rest dates as streak days and never respects goal.createdAt." },
+      { "id": "CALC-04", "score": 1, "reason": "Yesterday status distinguishes first and second weekly misses and computes overdue days, but it inherits the missing creation boundary and the seed does not visibly demonstrate the yellow first-miss state." },
+      { "id": "TODAY-01", "score": 1, "reason": "Top/bottom create, edit, confirmed delete, check-in and adjust-plan exits exist, but GoalForm state never resynchronizes when an edit target or modal opening changes." },
+      { "id": "TODAY-02", "score": 1, "reason": "Amount, optional minutes and six-day backfill controls exist, but amount/date/minutes persist incorrectly across openings because CheckInForm is always mounted without a reset effect." },
+      { "id": "TODAY-03", "score": 2, "reason": "Goal cards show progress, streak, remaining amount, forecast/deadline status and obstacle/plan content." },
+      { "id": "BOARD-01", "score": 2, "reason": "Expanded goal cards contain an SVG progress ring, three metrics, plan content and ten latest deletable records." },
+      { "id": "BOARD-02", "score": 2, "reason": "A single fourteen-day multi-goal inline-SVG stacked chart sums only records with minutes." },
+      { "id": "WEEK-01", "score": 1, "reason": "Weeks, record days and minutes use the same Monday-Sunday basis, but the top amount and amount WoW sum incompatible units." },
+      { "id": "WEEK-02", "score": 2, "reason": "Previous/next week navigation exists and all four reflection fields persist through an 800 ms debounce." },
+      { "id": "WEEK-03", "score": 1, "reason": "Generated text includes comparisons, per-goal detail and all reflections, but its headline amount and WoW retain the mixed-unit error." },
+      { "id": "PROFILE-01", "score": 1, "reason": "Sharing, document picking, migration and valid empty arrays are present, but overwrite confirmation happens before file selection/validation and migrateState accepts malformed objects as destructive empty state." },
+      { "id": "PROFILE-02", "score": 2, "reason": "Sample clearing and exact-phrase clear-all are separate requested confirmations." },
+      { "id": "PROFILE-03", "score": 2, "reason": "The home-screen paragraph conveys the three actions: long-press the desktop, choose the add/card action and locate/add this app." },
+      { "id": "SEED-01", "score": 1, "reason": "Three labeled samples, 36 records, backfill, plans and consecutive misses exist, but both visible missed goals are red/rolled and no yellow rest example is exercised." },
+      { "id": "SEED-02", "score": 2, "reason": "The 36-record sample makes the backup banner reachable and its CTA invokes exportState directly." },
+      { "id": "VISUAL-01", "score": 1, "reason": "The recovered desktop UI has a coherent cold white/purple/success/danger/amber hierarchy and no starter residue, but the actual gradient is only a three-pixel top strip." },
+      { "id": "VISUAL-02", "score": 2, "reason": "Production icons, ring and stacked chart are local react-native-svg primitives with no emoji, text-glyph icon or external icon package." },
+      { "id": "VISUAL-03", "score": 2, "reason": "Crossing goal completion activates a three-second Animated confetti overlay." },
+      { "id": "RESP-01", "score": 2, "reason": "Logical-width phone, tablet and desktop branches use bottom, top and fixed-left navigation; desktop cards wrap into real columns in the shared horizontal frame." },
+      { "id": "RUN-01", "score": 1, "reason": "The final repaired source passes all deterministic gates and current-bundle launch, but the automatic closed loop first accepted a crash overlay and then reopened a stale same-id Bundle." },
+      { "id": "RUN-02", "score": 2, "reason": "Restoring samples changed an exact product value from empty state to 36 records and the same value survived force-stop/reopen under strict current-project identity." }
+    ]
+  },
+  "selectionDecision": {
+    "selectedIteration": 2,
+    "reason": "Iteration 4's final artifact scores slightly above Cold 2, but its source-boundary violation and deadline failure disqualify it from cold-start comparison. Cold 2 remains the valid orchestration baseline."
+  }
+}

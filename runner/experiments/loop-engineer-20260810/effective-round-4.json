@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "valid": true,
+  "project": "/Users/stefan/Workspaces/fe-project/expo-app/loop-fast-r14-gate-semantics-20260810",
+  "change": "Return to the effective-round-2 AVAILABLE capability policy and remove false-positive source-audit repairs by accepting AsyncStorage multiGet/multiSet plus semantically equivalent forecast and prior-week comparison labels.",
+  "isolation": {
+    "protocol": "cold-start-v1",
+    "sourceInheritance": false,
+    "traceScope": "pass",
+    "repairTraceScope": "pass",
+    "promptSha256": "67327de7365ae21d5af314dd75ce16c33ab817bd3b409178850addc4807d89ad",
+    "templateAssetSha256": "cd173529723e435184cbf8e39ca71bcd314321687092b5ff5e3f3868b14c7973",
+    "templateProductSha256": "956ce545db9eeb8bd262d9790d8724bf98577d471c3154c7abc1fec63c054de1",
+    "capabilityCatalogSha256": "9ac8f76e0b74d56b342c94bfe7d9ea41c75d67593896737c39b0c753ccc0bb2b",
+    "modelCapabilityIndexSha256": "c6b26032260d02d059752d5c90803e5272c1fcf215d02be23d056273f03c7dc1",
+    "modelCapabilityIndexBytes": 24472,
+    "sessionId": "90392b56-38db-4f48-92ad-71a54e2e314b"
+  },
+  "timingMs": {
+    "generation": 970129,
+    "model": 823824,
+    "repair": 133079,
+    "seedModules": 7107,
+    "dependencySyncInitial": 352,
+    "typecheckInitial": 661,
+    "sourceAuditInitial": 27,
+    "dependencySyncRetry": 45,
+    "typecheckRetry": 602,
+    "sourceAuditRetry": 27,
+    "exportRetry": 4006,
+    "artifactAuditRetry": 27,
+    "firstProductWrite": 302808,
+    "codeWriteWindow": 455811
+  },
+  "trace": {
+    "actualModel": "k3-256k",
+    "turns": 35,
+    "inputTokens": 50262,
+    "cacheReadTokens": 642816,
+    "outputTokens": 34101,
+    "costUsd": 1.427239,
+    "toolCalls": { "Read": 10, "Write": 11, "Edit": 13, "Search": 0 },
+    "repairTurns": 12,
+    "repairInputTokens": 56817,
+    "repairCacheReadTokens": 271616,
+    "repairOutputTokens": 3394,
+    "repairCostUsd": 0.504743,
+    "repairToolCalls": { "Read": 2, "Write": 1, "Edit": 8, "Search": 0 },
+    "falsePositiveGateErrors": 0,
+    "realInitialErrors": [
+      "src/lib/domain.ts referenced an undefined goalId variable.",
+      "Requested JSON export did not invoke expo-sharing."
+    ]
+  },
+  "product": {
+    "files": 14,
+    "lines": 1412,
+    "score": 44,
+    "maxScore": 52,
+    "scorePercent": 84.6,
+    "scoreByRequirement": {
+      "DATA-01": 2, "DATA-02": 2, "DATA-03": 2,
+      "CALC-01": 2, "CALC-02": 2, "CALC-03": 1, "CALC-04": 2,
+      "TODAY-01": 1, "TODAY-02": 2, "TODAY-03": 1,
+      "BOARD-01": 2, "BOARD-02": 2,
+      "WEEK-01": 2, "WEEK-02": 2, "WEEK-03": 2,
+      "PROFILE-01": 1, "PROFILE-02": 2, "PROFILE-03": 2,
+      "SEED-01": 2, "SEED-02": 1,
+      "VISUAL-01": 1, "VISUAL-02": 2, "VISUAL-03": 2,
+      "RESP-01": 1, "RUN-01": 2, "RUN-02": 1
+    },
+    "strengths": [
+      "Namespaced AsyncStorage hydrates before saving and persists every state mutation; storage is seeded only when empty.",
+      "Forecast requires three real sample dates, weekly amounts are compared per goal/unit, backfills use real dates, and the seed visibly exercises amber rest plus red rollover states.",
+      "All four destinations, create/edit/delete/check-in, historical weekly notes/report, inline SVG charts/icons, confirmed destructive actions, import/export capabilities, and animated confetti are present.",
+      "Typecheck, source audit, export, artifact binding, exact desktop launch, and both trace-scope audits pass."
+    ],
+    "gaps": [
+      "Goals that are both yesterday-missed and overdue are rendered twice in the priority region, while priority goals are excluded from the full editable Today cards.",
+      "The streak scan begins at the earliest recorded entry, so multiple misses between goal creation and the first entry can be ignored.",
+      "The system-share path uses an unproven data URI and full import validation occurs after confirmation rather than before the overwrite dialog; version migration is only implicit defaulting.",
+      "Seed has 13 records, so the >=20 backup banner is initially unreachable.",
+      "Harmony Go rendered LinearGradient primary buttons with transparent backgrounds and white low-contrast labels; the desktop launch state is a stretched single priority column rather than a useful two-column dashboard.",
+      "Core mutation/restart persistence was intentionally not executed in this loop, so runtime persistence remains unproven for this artifact."
+    ]
+  },
+  "verification": {
+    "typecheck": "pass",
+    "sourceAudit": "pass",
+    "export": "pass",
+    "artifactAudit": "pass",
+    "desktopLaunch": "pass",
+    "errorOverlay": "absent",
+    "coreFlowQa": "not-run-by-protocol"
+  },
+  "decision": "Valid but rejected for speed: generation is 50.2% slower than effective round 2 and 23.0% slower than the baseline. The semantic gate change is retained because it eliminated false-positive diagnostics; effective round 2 remains the speed winner."
+}

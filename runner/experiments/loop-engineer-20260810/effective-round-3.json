@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "valid": true,
+  "project": "/Users/stefan/Workspaces/fe-project/expo-app/loop-fast-r13-required-capabilities-20260810",
+  "change": "Mark request-matched storage, import, sharing, SVG, and gradient catalog rows as REQUIRED and require them in the brief, dependency manifest, and implementation.",
+  "isolation": {
+    "protocol": "cold-start-v1",
+    "sourceInheritance": false,
+    "traceScope": "pass",
+    "repairTraceScope": "pass",
+    "promptSha256": "67327de7365ae21d5af314dd75ce16c33ab817bd3b409178850addc4807d89ad",
+    "templateAssetSha256": "cd173529723e435184cbf8e39ca71bcd314321687092b5ff5e3f3868b14c7973",
+    "templateProductSha256": "b167338532d77232b6d836c2fc6c28c85ff955232244879c7b7d45856750864d",
+    "modelCapabilityIndexSha256": "605a3bcadb595e0d19f0cd3ed21da47e8da6140d6528f675cf843dcde61b2521",
+    "requiredCapabilities": [
+      "@react-native-async-storage/async-storage",
+      "expo-document-picker",
+      "expo-linear-gradient",
+      "expo-sharing",
+      "react-native-svg"
+    ]
+  },
+  "timingMs": {
+    "generation": 734410,
+    "model": 615448,
+    "repair": 105416,
+    "seedModules": 6881,
+    "dependencySyncInitial": 350,
+    "typecheckInitial": 654,
+    "sourceAuditInitial": 27,
+    "dependencySyncRetry": 39,
+    "typecheckRetry": 577,
+    "sourceAuditRetry": 26,
+    "exportRetry": 4582,
+    "artifactAuditRetry": 45,
+    "firstProductWrite": 124472,
+    "codeWriteWindow": 456745
+  },
+  "trace": {
+    "actualModel": "k3-256k",
+    "turns": 33,
+    "inputTokens": 50720,
+    "cacheReadTokens": 622592,
+    "outputTokens": 33950,
+    "costUsd": 1.415621,
+    "toolCalls": { "Read": 9, "Write": 13, "Edit": 10 },
+    "repairTurns": 11,
+    "repairInputTokens": 57208,
+    "repairCacheReadTokens": 217856,
+    "repairOutputTokens": 4706,
+    "repairCostUsd": 0.512618,
+    "repairToolCalls": { "Read": 2, "Edit": 8 }
+  },
+  "product": {
+    "files": 15,
+    "lines": 1498,
+    "score": 48,
+    "maxScore": 52,
+    "scorePercent": 92.3,
+    "scoreByRequirement": {
+      "DATA-01": 2, "DATA-02": 2, "DATA-03": 2,
+      "CALC-01": 2, "CALC-02": 2, "CALC-03": 2, "CALC-04": 2,
+      "TODAY-01": 2, "TODAY-02": 2, "TODAY-03": 2,
+      "BOARD-01": 2, "BOARD-02": 2,
+      "WEEK-01": 1, "WEEK-02": 2, "WEEK-03": 2,
+      "PROFILE-01": 2, "PROFILE-02": 2, "PROFILE-03": 2,
+      "SEED-01": 1, "SEED-02": 1,
+      "VISUAL-01": 2, "VISUAL-02": 2, "VISUAL-03": 2,
+      "RESP-01": 2, "RUN-01": 2, "RUN-02": 1
+    },
+    "strengths": [
+      "Forecast requires three sampled days; streak and yesterday status honor goal.createdAt and real backfill dates.",
+      "All primary and secondary actions, confirmed deletes/import/sample clear, valid empty backups, explicit legacy v1 migration, direct system sharing, charts, confetti, and three responsive device layouts are implemented.",
+      "Desktop screenshot shows compact fixed sidebar, a real two-column Today priority region, coherent visual hierarchy, and no error overlay.",
+      "Typecheck, source audit, export, artifact binding, exact desktop launch, and both trace-scope audits pass."
+    ],
+    "gaps": [
+      "weekSummary still sums amounts across goals with different units for one aggregate comparison.",
+      "Seed contains only 13 records and does not reliably show both amber rest and red rollover states; the >=20 backup banner is initially unreachable.",
+      "The backup banner direct action copies JSON rather than using the system sharing path used in Profile.",
+      "Core mutation/restart persistence was intentionally not executed in this loop, so runtime persistence remains unproven for this artifact."
+    ]
+  },
+  "verification": {
+    "typecheck": "pass",
+    "sourceAudit": "pass",
+    "export": "pass",
+    "artifactAudit": "pass",
+    "desktopLaunch": "pass",
+    "errorOverlay": "absent",
+    "coreFlowQa": "not-run-by-protocol"
+  },
+  "decision": "Do not select for speed: generation is 13.7% slower than effective round 2. REQUIRED package presence did not guarantee correct API use and did not avoid repair."
+}

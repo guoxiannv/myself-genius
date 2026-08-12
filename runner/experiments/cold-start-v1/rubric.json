@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "protocol": "cold-start-v1",
+  "frozenBeforeIteration1Completed": true,
+  "generatorCanReadThis": false,
+  "scoring": {
+    "fullyImplemented": 2,
+    "partialOrUnproven": 1,
+    "missingOrIncorrect": 0
+  },
+  "requirements": [
+    { "id": "DATA-01", "area": "data", "text": "Goals contain name, unit, total, deadline, color, optional obstacle and coping plan." },
+    { "id": "DATA-02", "area": "data", "text": "Multiple check-ins per goal per real date are supported with collision-safe IDs." },
+    { "id": "DATA-03", "area": "data", "text": "All mutations hydrate then persist through namespaced AsyncStorage; seed appears only for empty storage." },
+    { "id": "CALC-01", "area": "logic", "text": "Today's suggestion is remaining amount divided by remaining calendar days and is prefilled but editable." },
+    { "id": "CALC-02", "area": "logic", "text": "Completion rate and forecast use recorded amounts; forecast requires enough real samples and compares against deadline." },
+    { "id": "CALC-03", "area": "logic", "text": "Monday-Sunday streak grants exactly one rest miss per week; a second miss breaks it; creation boundary and backfill dates are respected." },
+    { "id": "CALC-04", "area": "logic", "text": "Yesterday's first miss is yellow and second miss is red/rolled into today; overdue days are correct." },
+    { "id": "TODAY-01", "area": "today", "text": "Today has top and bottom create actions, actionable goal cards, edit, confirmed delete, check-in and adjust-plan exits." },
+    { "id": "TODAY-02", "area": "today", "text": "Check-in supports editable amount, optional minutes and backfill for the previous six days." },
+    { "id": "TODAY-03", "area": "today", "text": "Cards show progress, streak, forecast/deadline status and obstacle/coping plan." },
+    { "id": "BOARD-01", "area": "board", "text": "Each goal has a progress ring, three core metrics, plan and ten latest removable records." },
+    { "id": "BOARD-02", "area": "board", "text": "Fourteen-day per-goal stacked minutes chart is inline SVG and excludes records without minutes." },
+    { "id": "WEEK-01", "area": "weekly", "text": "Monday-Sunday weekly amount, check-in days and minutes compare with prior week on the same basis without mixing units." },
+    { "id": "WEEK-02", "area": "weekly", "text": "Historical weeks are navigable; four reflection fields save immediately." },
+    { "id": "WEEK-03", "area": "weekly", "text": "Generated report text includes comparisons and all four reflection fields." },
+    { "id": "PROFILE-01", "area": "profile", "text": "JSON export, prevalidated overwrite-confirmed import and legacy migration work, including valid empty backups." },
+    { "id": "PROFILE-02", "area": "profile", "text": "Clear examples and exact-phrase clear-all are distinct and confirmed as requested." },
+    { "id": "PROFILE-03", "area": "profile", "text": "Three-step add-to-home-screen guidance is present." },
+    { "id": "SEED-01", "area": "seed", "text": "Three labeled examples and records visibly exercise backfill, rest-day, consecutive misses and contingency plans." },
+    { "id": "SEED-02", "area": "seed", "text": "At 20 records the backup banner appears and its CTA directly produces export data." },
+    { "id": "VISUAL-01", "area": "visual", "text": "Cold white/purple/success/danger/amber system, coherent hierarchy and no starter residue." },
+    { "id": "VISUAL-02", "area": "visual", "text": "All production icons/charts are local inline SVG; no emoji, glyph icons or external icon package." },
+    { "id": "VISUAL-03", "area": "visual", "text": "Goal completion triggers an actual running confetti animation." },
+    { "id": "RESP-01", "area": "responsive", "text": "Phone bottom tabs/single column, tablet top navigation and desktop fixed side navigation/multi-column are implemented." },
+    { "id": "RUN-01", "area": "runtime", "text": "Typecheck, source audit, Harmony Go export, artifact integrity and exact-app launch pass." },
+    { "id": "RUN-02", "area": "runtime", "text": "At least one core product mutation changes an exact UI value and remains after force-stop/reopen." }
+  ]
+}

@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "iteration": 4,
+  "project": "/Users/stefan/Workspaces/fe-project/expo-app/cold-v4-learning-go",
+  "experiment": {
+    "protocol": "cold-start-v1",
+    "coldStartDeclared": true,
+    "sourceInheritanceDeclared": false,
+    "templateProductSha256": "97b4de149b300262cb56b91ff7a84b0ba6361ec3a8a5d1eb63e5777f003897b3",
+    "preparedAt": "2026-08-09T16:37:49.169Z",
+    "validity": "invalid-source-boundary"
+  },
+  "product": {
+    "files": 23,
+    "linesByAnalyzerConvention": 2649,
+    "bytes": 100232
+  },
+  "traces": [
+    {
+      "name": "implementation",
+      "path": "/Users/stefan/Workspaces/fe-project/expo-app/cold-v4-learning-go/.expo-fast/agent-trace.jsonl",
+      "bytes": 14420785,
+      "apiDurationMs": 1197149,
+      "turns": 170,
+      "costUsd": 4.9944924,
+      "usage": { "inputTokens": 173587, "cacheReadTokens": 9459968, "outputTokens": 108919 },
+      "terminalReason": "aborted_streaming",
+      "isError": true,
+      "observedModel": "deepseek-v4-flash",
+      "requestedCandidateModelAlias": "sonnet",
+      "byTool": { "Read": 59, "Glob": 53, "Grep": 17, "Bash": 1, "Write": 23, "Edit": 15 },
+      "writeChars": 95596,
+      "editOldChars": 2520,
+      "editNewChars": 3702
+    },
+    {
+      "name": "deterministic-repair",
+      "path": "/Users/stefan/Workspaces/fe-project/expo-app/cold-v4-learning-go/.expo-fast/agent-repair-trace.jsonl",
+      "apiDurationMs": 50425,
+      "runnerWallMs": 53433,
+      "turns": 9,
+      "costUsd": 0.6831768,
+      "usage": { "inputTokens": 126446, "cacheReadTokens": 935296, "outputTokens": 1550 },
+      "byTool": { "Glob": 1, "Read": 5, "Grep": 1, "Edit": 1 },
+      "result": "Added the missing MineIcon export; typecheck and deterministic export gates then passed."
+    },
+    {
+      "name": "runtime-repair",
+      "path": "/Users/stefan/Workspaces/fe-project/expo-app/cold-v4-learning-go/.expo-fast/agent-runtime-repair-trace.jsonl",
+      "apiDurationMs": 61713,
+      "turns": 18,
+      "costUsd": 0.5936178,
+      "usage": { "inputTokens": 11920, "cacheReadTokens": 1717376, "outputTokens": 2843 },
+      "byTool": { "Read": 5, "Write": 1, "Edit": 9, "Grep": 2 },
+      "result": "Replaced expo-crypto randomUUID with a local time/counter/random id after the ExpoCryptoAES launch crash."
+    }
+  ],
+  "combinedUsage": {
+    "apiDurationMs": 1309287,
+    "costUsd": 6.271287,
+    "inputTokens": 311953,
+    "cacheReadTokens": 12112640,
+    "outputTokens": 113312,
+    "note": "Input, cache-read and output are reported separately; they must not be collapsed into one model-token number."
+  },
+  "timeline": [
+    { "at": "00:00", "event": "Implementation session started reading the fresh project." },
+    { "at": "08:22", "event": "First write: .expo-fast/brief.json after broad dependency and sibling-project discovery." },
+    { "at": "08:36", "event": "First domain source write: types.ts." },
+    { "at": "12:01", "event": "TodayScreen was written after types, theme, icons/UI/charts, utilities, storage, state and both forms." },
+    { "at": "12:22", "event": "BoardScreen was written." },
+    { "at": "12:47", "event": "MineScreen completed the four requested screens." },
+    { "at": "13:08", "event": "App.tsx finally connected the generated product." },
+    { "at": "19:11", "event": "The agent rewrote the stacked chart late in the turn." },
+    { "at": "20:00", "event": "The runner interrupted the implementation at the hard deadline." }
+  ],
+  "stageAnalysis": [
+    "The prompt requested a vertical skeleton in the first third, but the agent's brief chose types→theme→icons/UI/charts→utils→storage→state→forms→screens→app-shell.",
+    "About eight minutes elapsed before the brief and more than twelve minutes before the first requested screen, so the observed path repeated the known bottom-up failure mode.",
+    "The 59 Reads, 53 Globs and 17 Greps dominate the 23 Writes; cache-read usage reached 9.46 million tokens in the main turn.",
+    "The late chart rewrite and continued cross-project inspection consumed the remaining budget instead of stopping after the runnable product was connected."
+  ],
+  "traceScope": {
+    "status": "fail",
+    "violationCount": 83,
+    "priorProductSourceFilesRead": 21,
+    "siblingColdProjectsProbed": ["cold-v1-learning-go", "cold-v2-learning-go", "cold-v3-learning-go"],
+    "forbiddenShellCalls": 1,
+    "generatedLineCoverageFromTestProjectPercent": 73.9
+  },
+  "caveats": [
+    "The main result is an orchestration SIGINT/error at the 20-minute limit, not a normal model stop.",
+    "The later result.json records recovery invocations and must not be used to rewrite the original cold-start outcome as PASS.",
+    "API duration, runner wall time, manual runtime diagnosis and UI evaluation are different clocks and are reported separately."
+  ]
+}

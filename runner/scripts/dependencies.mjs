@@ -69,7 +69,7 @@ function installProjectDependencies(project, logName) {
   ], { cwd: project, env: { COREPACK_ENABLE_PROJECT_SPEC: '0' }, log: join(project, '.expo-fast', logName) });
 }
 
-export function pinRuntimeDependencies(projectRoot, sdkRoot = resolve(process.env.EXPO_HARMONY_SDK_ROOT || join(root, '../devkit_sdk'))) {
+export function pinRuntimeDependencies(projectRoot, sdkRoot = resolve(root, process.env.EXPO_HARMONY_SDK_ROOT || '../sdk')) {
   const project = resolve(projectRoot);
   const runtimePath = sdkRuntimePath(resolve(sdkRoot));
   const runtime = readJson(runtimePath);
@@ -113,7 +113,7 @@ function recordRegistryInstall(project, pins, install, cacheFailure = null) {
   return evidence;
 }
 
-export function seedDependencies(projectRoot, sdkRoot = resolve(process.env.EXPO_HARMONY_SDK_ROOT || join(root, '../devkit_sdk'))) {
+export function seedDependencies(projectRoot, sdkRoot = resolve(root, process.env.EXPO_HARMONY_SDK_ROOT || '../sdk')) {
   const project = resolve(projectRoot);
   const runtime = pinRuntimeDependencies(project, sdkRoot);
   const caches = configuredCaches();
@@ -181,7 +181,7 @@ export function syncDependencies(projectRoot) {
   return { resolution, installed: missing, installMs: install.ms };
 }
 
-export function stageHarmonyCli(projectRoot, sdkRoot = resolve(process.env.EXPO_HARMONY_SDK_ROOT || join(root, '../devkit_sdk'))) {
+export function stageHarmonyCli(projectRoot, sdkRoot = resolve(root, process.env.EXPO_HARMONY_SDK_ROOT || '../sdk')) {
   const project = resolve(projectRoot);
   const source = join(resolve(sdkRoot), 'packages/@expo/cli/harmony');
   const installedCli = join(project, 'node_modules/@expo/cli');
@@ -192,7 +192,7 @@ export function stageHarmonyCli(projectRoot, sdkRoot = resolve(process.env.EXPO_
   return join(target, 'expo-harmony.mjs');
 }
 
-export function exportHarmonyGo(projectRoot, outputRoot, sdkRoot = resolve(process.env.EXPO_HARMONY_SDK_ROOT || join(root, '../devkit_sdk'))) {
+export function exportHarmonyGo(projectRoot, outputRoot, sdkRoot = resolve(root, process.env.EXPO_HARMONY_SDK_ROOT || '../sdk')) {
   const project = resolve(projectRoot);
   const output = resolve(outputRoot);
   mkdirSync(output, { recursive: true });

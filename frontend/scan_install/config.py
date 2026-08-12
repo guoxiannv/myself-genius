@@ -6,6 +6,9 @@ from pathlib import Path
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 DEPLOY_DIR = APP_ROOT / "deploy"
+MONOREPO_ROOT = APP_ROOT.parent
+DEFAULT_EXPO_FAST_ROOT = (MONOREPO_ROOT / "runner").resolve()
+DEFAULT_EXPO_FAST_APP_ROOT = (MONOREPO_ROOT / "expo-app").resolve()
 
 
 def load_env_file(path: Path) -> None:
@@ -49,28 +52,22 @@ TARGET_WORKSPACE = (
 )
 
 EXPO_FAST_ROOT = (
-    Path(os.environ["HP_EXPO_FAST_ROOT"]).expanduser().resolve()
+    resolve_app_path(os.environ["HP_EXPO_FAST_ROOT"])
     if os.environ.get("HP_EXPO_FAST_ROOT", "").strip()
-    else None
+    else DEFAULT_EXPO_FAST_ROOT
 )
 EXPO_FAST_LAUNCHER = EXPO_FAST_ROOT / "start-livetest.sh" if EXPO_FAST_ROOT else None
 EXPO_FAST_APP_ROOT = (
-    Path(
+    resolve_app_path(
         os.environ.get("HP_EXPO_FAST_APP_ROOT")
         or os.environ.get("EXPO_FAST_APP_ROOT")
-        or (str(EXPO_FAST_ROOT.parent / "expo-app") if EXPO_FAST_ROOT else "")
-    ).expanduser().resolve()
-    if (
-        os.environ.get("HP_EXPO_FAST_APP_ROOT")
-        or os.environ.get("EXPO_FAST_APP_ROOT")
-        or EXPO_FAST_ROOT
+        or str(DEFAULT_EXPO_FAST_APP_ROOT)
     )
-    else None
 )
 EXPO_FAST_ENV_FILE = (
-    Path(os.environ["HP_EXPO_FAST_ENV_FILE"]).expanduser().resolve()
+    resolve_app_path(os.environ["HP_EXPO_FAST_ENV_FILE"])
     if os.environ.get("HP_EXPO_FAST_ENV_FILE", "").strip()
-    else None
+    else EXPO_FAST_ROOT / ".env"
 )
 
 EXPO_PUBLIC_SERVE_ENABLED = os.environ.get("HP_EXPO_PUBLIC_SERVE_ENABLED", "1").strip().lower() in {

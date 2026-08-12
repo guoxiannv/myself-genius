@@ -12,11 +12,11 @@ stage, ArkTS, `harmony/`, `.expo/`, or a subagent lane.
 
 ## Required setup
 
-Run from the new orchestration root and use the same Node 22+ runtime for install,
-Claude, and the Expo Harmony CLI. Set:
+Run from `runner/` and use the same Node 22+ runtime for install, Claude, and the
+Expo Harmony CLI. The Genius checkout uses `../sdk` by default, so normally only
+the machine-specific DevEco path needs an override:
 
 ```sh
-export EXPO_HARMONY_SDK_ROOT=/Users/stefan/Workspaces/fe-project/devkit_sdk
 export DEVECO_PATH=/Applications/DevEco-Studio.app
 ```
 

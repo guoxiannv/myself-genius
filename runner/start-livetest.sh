@@ -3,6 +3,9 @@ set -euo pipefail
 
 ORCH_ROOT=${0:A:h}
 LOCAL_ENV=${EXPO_FAST_ENV_FILE:-$ORCH_ROOT/.env}
+if [[ "$LOCAL_ENV" != /* ]]; then
+  LOCAL_ENV="$ORCH_ROOT/$LOCAL_ENV"
+fi
 
 if [[ -f "$LOCAL_ENV" ]]; then
   set -a
@@ -16,7 +19,9 @@ if [[ -z "$NODE_RUNTIME" ]]; then
   print -u2 "Expo Harmony Fast requires Node.js 22.13 or newer. Set EXPO_FAST_NODE in $LOCAL_ENV."
   exit 1
 fi
-if [[ "$NODE_RUNTIME" != /* ]]; then
+if [[ "$NODE_RUNTIME" != /* && "$NODE_RUNTIME" == */* ]]; then
+  NODE_RUNTIME="$ORCH_ROOT/$NODE_RUNTIME"
+elif [[ "$NODE_RUNTIME" != /* ]]; then
   NODE_RUNTIME=$(command -v "$NODE_RUNTIME" 2>/dev/null || true)
 fi
 if [[ -z "$NODE_RUNTIME" || ! -x "$NODE_RUNTIME" ]]; then

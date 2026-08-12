@@ -2,13 +2,14 @@
 
 import { createServer } from 'node:net';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline/promises';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const localEnvFile = resolve(process.env.EXPO_FAST_ENV_FILE || join(root, '.env'));
+const resolveRunnerPath = (value) => isAbsolute(value) ? resolve(value) : resolve(root, value);
+const localEnvFile = resolveRunnerPath(process.env.EXPO_FAST_ENV_FILE || '.env');
 if (existsSync(localEnvFile)) process.loadEnvFile(localEnvFile);
 const runner = join(root, 'scripts/run-livetest.mjs');
 const defaultPrompt = join(root, 'prompts/learning-goals.md');
@@ -16,7 +17,7 @@ const candidateConfig = JSON.parse(readFileSync(join(root, 'config/candidates.js
 const defaults = {
   appRoot: resolve(root, '../expo-app'),
   node: process.execPath,
-  sdk: resolve(root, '../devkit_sdk'),
+  sdk: resolve(root, '../sdk'),
   deveco: '/Applications/DevEco-Studio.app',
   claude: 'claude',
   candidate: 'repair',
@@ -199,7 +200,7 @@ function executable(command, args = ['--version']) {
 }
 
 function commandOrPath(value) {
-  return value.includes('/') ? resolve(value) : value;
+  return value.includes('/') ? resolveRunnerPath(value) : value;
 }
 
 function portAvailable(port) {
@@ -279,7 +280,7 @@ async function main() {
   const raw = parse(process.argv.slice(2));
   if (raw.help) { console.log(usage()); return; }
   const prompt = await resolvePrompt(raw);
-  const appRoot = resolve(raw.appRoot || process.env.EXPO_FAST_APP_ROOT || defaults.appRoot);
+  const appRoot = resolveRunnerPath(raw.appRoot || process.env.EXPO_FAST_APP_ROOT || defaults.appRoot);
   const autoName = `${prompt.kind === 'default' ? 'learning-goals' : 'custom'}-${timestamp()}`;
   const project = await chooseProject(raw, appRoot, autoName);
   const projectName = basename(project);
@@ -291,11 +292,15 @@ async function main() {
   const models = resolveModels({ ...raw, candidate });
   const promptInputDir = join(dirname(project), '.expo-fast-inputs');
   const requestPath = prompt.path || join(promptInputDir, `${slug(projectName)}.md`);
-  const node = resolve(process.env.EXPO_FAST_NODE || defaults.node);
-  const sdk = resolve(process.env.EXPO_HARMONY_SDK_ROOT || defaults.sdk);
-  const deveco = resolve(process.env.DEVECO_PATH || defaults.deveco);
+  const node = resolveRunnerPath(process.env.EXPO_FAST_NODE || defaults.node);
+  const sdk = resolveRunnerPath(process.env.EXPO_HARMONY_SDK_ROOT || defaults.sdk);
+  const deveco = resolveRunnerPath(process.env.DEVECO_PATH || defaults.deveco);
   const claude = commandOrPath(process.env.CLAUDE_BIN || defaults.claude);
-  const moduleCache = process.env.EXPO_FAST_MODULE_CACHE || '';
+  const moduleCache = (process.env.EXPO_FAST_MODULE_CACHE || '')
+    .split(delimiter)
+    .filter(Boolean)
+    .map(resolveRunnerPath)
+    .join(delimiter);
   const sessionLog = join(root, '.expo-fast/session-logs', `${slug(session)}.log`);
   const plan = {
     root, configFile: existsSync(localEnvFile) ? localEnvFile : '', project, requestPath, promptKind: prompt.kind, promptSource: prompt.path || '',

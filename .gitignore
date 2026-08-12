@@ -1,2 +1,5 @@
 .DS_Store
 **/.DS_Store
+
+# Default workspace for generated Expo applications in the monorepo.
+/expo-app/

@@ -167,16 +167,61 @@ test('one machine-local env file configures every portable launcher path', () =>
   assert.equal(plan.claude, 'portable-claude');
 });
 
+test('monorepo defaults and relative env paths resolve from the runner root', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-relative-config-'));
+  const launcher = join(root, 'scripts/start-livetest.mjs');
+  const missingEnv = join(workspace, 'missing.env');
+  const cleanEnv = { ...process.env, EXPO_FAST_ENV_FILE: missingEnv };
+  for (const key of ['EXPO_FAST_APP_ROOT', 'EXPO_FAST_NODE', 'EXPO_HARMONY_SDK_ROOT', 'EXPO_FAST_MODULE_CACHE', 'DEVECO_PATH', 'CLAUDE_BIN']) delete cleanEnv[key];
+
+  const defaultsResult = spawnSync(process.execPath, [launcher, '--dry-run', '--name', 'default-app', '--launch', 'false'], {
+    cwd: workspace,
+    encoding: 'utf8',
+    env: cleanEnv,
+  });
+  assert.equal(defaultsResult.status, 0, defaultsResult.stderr);
+  const defaultsPlan = JSON.parse(defaultsResult.stdout);
+  assert.equal(defaultsPlan.project, resolve(root, '../expo-app/default-app'));
+  assert.equal(defaultsPlan.sdk, resolve(root, '../sdk'));
+
+  const relativeEnv = join(workspace, 'relative.env');
+  writeFileSync(relativeEnv, [
+    'EXPO_FAST_APP_ROOT="../generated-apps"',
+    `EXPO_FAST_NODE="${process.execPath}"`,
+    'EXPO_HARMONY_SDK_ROOT="../sdk"',
+    'EXPO_FAST_MODULE_CACHE="../cache-one/node_modules:../cache-two/node_modules"',
+    'DEVECO_PATH="../DevEco-Studio.app"',
+    'CLAUDE_BIN="../bin/claude"',
+    '',
+  ].join('\n'));
+  const relativeEnvVars = { ...cleanEnv, EXPO_FAST_ENV_FILE: relativeEnv };
+  const relativeResult = spawnSync(process.execPath, [launcher, '--dry-run', '--name', 'relative-app', '--launch', 'false'], {
+    cwd: workspace,
+    encoding: 'utf8',
+    env: relativeEnvVars,
+  });
+  assert.equal(relativeResult.status, 0, relativeResult.stderr);
+  const relativePlan = JSON.parse(relativeResult.stdout);
+  assert.equal(relativePlan.project, resolve(root, '../generated-apps/relative-app'));
+  assert.equal(relativePlan.sdk, resolve(root, '../sdk'));
+  assert.equal(relativePlan.moduleCache, `${resolve(root, '../cache-one/node_modules')}:${resolve(root, '../cache-two/node_modules')}`);
+  assert.equal(relativePlan.deveco, resolve(root, '../DevEco-Studio.app'));
+  assert.equal(relativePlan.claude, resolve(root, '../bin/claude'));
+});
+
 test('portable launchers contain no user-specific path and keep machine config outside skills', () => {
   const shell = readFileSync(join(root, 'start-livetest.sh'), 'utf8');
   const launcher = readFileSync(join(root, 'scripts/start-livetest.mjs'), 'utf8');
   const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
+  const dependencies = readFileSync(join(root, 'scripts/dependencies.mjs'), 'utf8');
+  const helper = readFileSync(join(root, 'skills/expo-harmony-fast/scripts/fast-harmony.mjs'), 'utf8');
+  const skill = readFileSync(join(root, 'skills/expo-harmony-fast/SKILL.md'), 'utf8');
   const example = readFileSync(join(root, '.env.example'), 'utf8');
-  assert.doesNotMatch(`${shell}\n${launcher}\n${runner}`, /\/Users\/stefan/);
+  assert.doesNotMatch(`${shell}\n${launcher}\n${runner}\n${dependencies}\n${helper}\n${skill}`, /\/Users\/stefan/);
   assert.match(shell, /source "\$LOCAL_ENV"/);
   assert.match(launcher, /process\.loadEnvFile\(localEnvFile\)/);
   for (const key of ['EXPO_FAST_APP_ROOT', 'EXPO_FAST_NODE', 'EXPO_HARMONY_SDK_ROOT', 'EXPO_FAST_MODULE_CACHE', 'DEVECO_PATH', 'CLAUDE_BIN']) assert.match(example, new RegExp(key));
-  assert.doesNotMatch(readFileSync(join(root, 'skills/expo-harmony-fast/SKILL.md'), 'utf8'), /EXPO_FAST_APP_ROOT/);
+  assert.doesNotMatch(skill, /EXPO_FAST_APP_ROOT/);
 });
 
 test('external controller atomically records live generation, repair, and completion state', () => {

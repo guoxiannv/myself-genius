@@ -121,13 +121,16 @@ tmux 模式默认使用 `remote-ui-local` session，可通过
 
 - `HP_TMUX_RUNNER`: `harmony-pilot/scripts/tmux-runner.cjs` 的绝对路径
 - `HP_TARGET_WORKSPACE`: HarmonyOS 工程根目录，例如 `~/devecoProject/demo`
-- `HP_EXPO_FAST_ROOT`: Expo Harmony Fast Runtime 仓库绝对路径
-- `HP_EXPO_FAST_APP_ROOT`: Expo 任务独立工作目录的父目录；每次构建会在这里创建新工程与对应的 Markdown Prompt
+- `HP_EXPO_FAST_ROOT`: Expo Harmony Fast Runtime 路径；Genius 仓内默认是 `../runner`
+- `HP_EXPO_FAST_APP_ROOT`: Expo 任务独立工作目录的父目录；默认是 `../expo-app`，每次构建会在这里创建新工程与对应的 Markdown Prompt
+- `HP_EXPO_FAST_ENV_FILE`: Runner 本机配置；默认是 `../runner/.env`
 - `HP_EXPO_PUBLIC_SERVE_PORT`: Harmony Go 公网预览 Gateway 端口，默认 `3456`
 - `HP_EXPO_PUBLIC_ORIGIN`: Harmony Go 中输入的公网前缀，当前默认 `https://devkit-go.yorha2b.cc`
 - Profile 池模式：签名材料放 `deploy/signing/`，路径在 `deploy/profile-pool.json` 中配置；密码在 `deploy/server.env` 的 `HP_HPACK_*`
 - 单 Profile 模式：在 `deploy/server.env` 中配置 `HP_HPACK_CERT` / `HP_HPACK_PROFILE` / `HP_HPACK_KEYSTORE` 等
 - `CLOUDFLARE_TUNNEL_TOKEN`: Cloudflare Tunnel token（公网访问时需要）
+
+以上 Expo 相对路径都以 `frontend/` 为基准解析，不依赖启动命令所在目录。
 
 ### Expo Harmony Go 公网预览
 

@@ -5,8 +5,9 @@ import { tmpdir } from 'node:os';
 import { basename, delimiter, dirname, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-const sdk = resolve(process.env.EXPO_HARMONY_SDK_ROOT || '/Users/stefan/Workspaces/fe-project/devkit_sdk');
 const skillRoot = resolve(new URL('..', import.meta.url).pathname);
+const runnerRoot = resolve(skillRoot, '../..');
+const sdk = resolve(runnerRoot, process.env.EXPO_HARMONY_SDK_ROOT || '../sdk');
 const template = join(skillRoot, 'assets/expo-harmony-template');
 const scaffoldCapabilityPackages = ['react-native-svg'];
 const harmonyGoRuntimeOverrides = {
@@ -211,9 +212,8 @@ function assertCoreCache(cache, fingerprint) {
   if (mismatches.length) throw new Error(`module cache does not match selected SDK:\n${mismatches.map(([name, expected, actual]) => `- ${name}: expected ${expected}, found ${actual || 'missing'}`).join('\n')}`);
 }
 function moduleCaches() {
-  const configured = (process.env.EXPO_FAST_MODULE_CACHE || '').split(delimiter).filter(Boolean).map((value) => resolve(value));
-  if (configured.length) return configured;
-  return ['/Users/stefan/Workspaces/fe-project/expo-app/test-project-go/node_modules', '/Users/stefan/Workspaces/fe-project/expo-app/expo-runner-livetest-go/node_modules'];
+  const configured = (process.env.EXPO_FAST_MODULE_CACHE || '').split(delimiter).filter(Boolean).map((value) => resolve(runnerRoot, value));
+  return configured;
 }
 function resolveCapabilities(projectDir) {
   const pkg = json(join(projectDir, 'package.json'), {});

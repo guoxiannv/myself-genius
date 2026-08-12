@@ -17,7 +17,7 @@ body:
       label: 影响范围
       description: 请选择所有受影响的部分。
       options:
-        - label: Web
+        - label: Frontend
         - label: Runner
         - label: SDK
         - label: CI、文档或公共配置
@@ -26,4 +26,3 @@ body:
     attributes:
       label: 补充信息
       description: 可附上截图、日志、相关链接或其他信息。
-

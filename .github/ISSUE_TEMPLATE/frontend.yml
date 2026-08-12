@@ -1,8 +1,8 @@
-name: Web Issue
-description: 报告 Web 前端相关问题或需求
-title: "[web] "
+name: Frontend Issue
+description: 报告 Frontend 相关问题或需求
+title: "[frontend] "
 labels:
-  - web
+  - frontend
 body:
   - type: textarea
     id: description
@@ -21,4 +21,3 @@ body:
     attributes:
       label: 补充信息
       description: 可附上截图、日志、相关链接或其他信息。
-

@@ -1,12 +1,12 @@
 # Genius
 
-Genius 仓库用于统一管理 Web、Runner 和 SDK 三个部分。
+Genius 仓库用于统一管理 Frontend、Runner 和 SDK 三个部分。
 
 ## 目录说明
 
 | 目录 | 用途 |
 | --- | --- |
-| `web/` | Web 前端相关代码、资源和配置。 |
+| `frontend/` | Frontend 相关代码、资源和配置。 |
 | `runner/` | Runner 执行端相关代码、脚本和配置。 |
 | `sdk/` | DevKit SDK。该目录是 Git submodule，关联 [`BitFun-Platform/devkit_sdk`](https://github.com/BitFun-Platform/devkit_sdk)，不是直接存放在本仓库中的普通目录。 |
 
@@ -45,7 +45,7 @@ git push
 默认分支为 `main`。除 `main` 外，其他分支必须使用以下格式：
 
 ```text
-web/<分支名>
+frontend/<分支名>
 runner/<分支名>
 sdk/<分支名>
 global/<分支名>
@@ -54,7 +54,7 @@ global/<分支名>
 分支名使用小写英文、数字和连字符，名称应简短并能说明改动目的。例如：
 
 ```text
-web/add-login-page
+frontend/add-login-page
 runner/fix-task-timeout
 sdk/update-device-api
 global/update-ci-config
@@ -67,13 +67,13 @@ global/update-ci-config
 Issue 标题使用 `[范围] 简短描述` 的格式，范围与目录保持一致：
 
 ```text
-[web] 登录页面在移动端显示异常
+[frontend] 登录页面在移动端显示异常
 [runner] 修复任务执行超时
 [sdk] 增加设备状态接口
 [global] 更新项目 CI 配置
 ```
 
-- `[web]`：仅涉及 Web。
+- `[frontend]`：仅涉及 Frontend。
 - `[runner]`：仅涉及 Runner。
 - `[sdk]`：仅涉及 SDK。
 - `[global]`：涉及多个部分或仓库级事项。
@@ -82,7 +82,7 @@ Issue 标题使用 `[范围] 简短描述` 的格式，范围与目录保持一�
 
 ## 当前进展
 
-- 已建立 `web/`、`runner/` 和 `sdk/` 三个目录的基础结构。
+- 已建立 `frontend/`、`runner/` 和 `sdk/` 三个目录的基础结构。
 - 已接入 `BitFun-Platform/devkit_sdk` submodule，并配置跟踪 `dev/SupportOH` 分支。
 - 已启用 Issue 模板和标题规范校验 Workflow。
 - 已在 `GeniusProjectTrack` 中创建并转换 Issue `#1`：`[global] 更新项目 README 进展说明`，本次 README 更新通过 Pull Request 合并。

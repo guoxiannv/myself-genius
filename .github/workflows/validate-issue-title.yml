@@ -20,7 +20,7 @@ jobs:
         with:
           script: |
             const issue = context.payload.issue;
-            const validTitle = /^\[(web|runner|sdk|global)\]\s+\S.*$/;
+            const validTitle = /^\[(frontend|runner|sdk|global)\]\s+\S.*$/;
             const invalidLabel = "invalid-title";
             const labels = issue.labels.map((label) =>
               typeof label === "string" ? label : label.name
@@ -72,7 +72,7 @@ jobs:
                 body: [
                   "Issue 标题不符合命名规范，请修改为以下格式之一：",
                   "",
-                  "- `[web] 简短描述`",
+                  "- `[frontend] 简短描述`",
                   "- `[runner] 简短描述`",
                   "- `[sdk] 简短描述`",
                   "- `[global] 简短描述`",

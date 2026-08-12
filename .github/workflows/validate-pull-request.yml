@@ -23,18 +23,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          title_pattern='^\[(web|runner|sdk|global)\][[:space:]]+[^[:space:]].*$'
-          branch_pattern='^(web|runner|sdk|global)/[^/[:space:]][^[:space:]]*$'
+          title_pattern='^\[(frontend|runner|sdk|global)\][[:space:]]+[^[:space:]].*$'
+          branch_pattern='^(frontend|runner|sdk|global)/[^/[:space:]][^[:space:]]*$'
 
           if [[ ! "$PR_TITLE" =~ $title_pattern ]]; then
             echo "::error::Invalid PR title: $PR_TITLE"
-            echo "Expected format: [web|runner|sdk|global] description"
+            echo "Expected format: [frontend|runner|sdk|global] description"
             exit 1
           fi
 
           if [[ ! "$PR_BRANCH" =~ $branch_pattern ]]; then
             echo "::error::Invalid PR source branch: $PR_BRANCH"
-            echo "Expected format: web/*, runner/*, sdk/*, or global/*"
+            echo "Expected format: frontend/*, runner/*, sdk/*, or global/*"
             exit 1
           fi
 

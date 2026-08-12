@@ -1,6 +1,6 @@
 # 扫码直装改动总结 & 工程化差距分析
 
-本文档汇总 Genius 的 `frontend/` 与 `runner/` 为支持 **HPack 扫码直装 + Profile 池并发** 所做的改动，并列出距离工程化交付仍欠缺的部分。
+本文档汇总 `harmony-pilot-remote-ui` 与 `harmony-pilot` 两个仓库为支持 **HPack 扫码直装 + Profile 池并发** 所做的改动，并列出距离工程化交付仍欠缺的部分。
 
 更新时间：2026-06-11
 
@@ -10,7 +10,7 @@
 
 ```text
 用户在 Remote UI 提交 Build
-  → Genius/runner tmux-runner（scaffold + Agent 开发 + hvigor 构建）
+  → harmony-pilot tmux-runner（scaffold + Agent 开发 + hvigor 构建）
   → 检测到 entry-default-unsigned.hap
   → [可选] hdc 预览采集（GIF/MP4）
   → hpack_packager.py 签名 + 发布安装页到 static/hpack/
@@ -20,7 +20,7 @@
 
 ---
 
-## 二、`Genius/frontend` 改动清单
+## 二、`harmony-pilot-remote-ui` 改动清单
 
 ### 1. 新增模块（扫码直装逻辑从 app.py 抽出）
 
@@ -77,7 +77,7 @@ deploy/profile-pool-state.json      # Profile 租约状态
 
 ---
 
-## 三、`Genius/runner` 配套改动
+## 三、`harmony-pilot` 配套改动（单独仓库提交）
 
 | 文件 | 作用 |
 |------|------|
@@ -86,7 +86,7 @@ deploy/profile-pool-state.json      # Profile 租约状态
 | `skills/create-atomic-service/scripts/create_project.py` | 同上 |
 | 相关 `SKILL.md` | 文档补充 env 变量 |
 
-Remote UI Profile 池注入的 bundleName **必须**经 Genius/runner scaffold 写入 `app.json5`，否则签名校验会失败。
+Remote UI Profile 池注入的 bundleName **必须**经 harmony-pilot scaffold 写入 `app.json5`，否则签名校验会失败。
 
 ---
 
@@ -132,7 +132,7 @@ python3 scripts/preflight_verify.py
 
 ## 六、服务器部署 Checklist
 
-1. 克隆 Genius，并初始化 `runner/` 所需内容
+1. 克隆 `harmony-pilot-remote-ui` 与 `harmony-pilot`
 2. 按第四节配置 `deploy/server.env` 与 Profile 池
 3. 安装 DevEco 工具链（Java、hvigorw、hpack、hdc）
 4. `python3 scripts/preflight_verify.py` → `scripts/run_dev.sh`

@@ -1,6 +1,6 @@
 # AskUserQuestion Remote UI 实现说明
 
-本文档说明当前 `AskUserQuestion` 能力在 Genius 的 `runner/` 和 `frontend/` 中的实现方式、数据流、文件协议、接口、UI 展示和已知注意事项。
+本文档说明当前 `AskUserQuestion` 能力在 `harmony-pilot` 后端插件仓库和 `harmony-pilot-remote-ui` 前端仓库里的实现方式、数据流、文件协议、接口、UI 展示和已知注意事项。
 
 ## 1. 目标
 
@@ -17,7 +17,7 @@
 
 ## 2. 涉及仓库和主要文件
 
-### `Genius/runner`
+### `harmony-pilot`
 
 这个仓库负责 Claude Code 插件、hook 和 workflow prompt。
 
@@ -41,7 +41,7 @@
   - 把原来的 “ask focused follow-up questions” 改成必须调用 `AskUserQuestion`。
   - 同步写明参数格式。
 
-### `Genius/frontend`
+### `harmony-pilot-remote-ui`
 
 这个仓库负责 Web 后端接口和 React UI 展示。
 
@@ -76,7 +76,7 @@ Claude design lane
   |
   | calls AskUserQuestion tool
   v
-Genius/runner/hooks/ask-user-question-pretooluse.cjs
+harmony-pilot/hooks/ask-user-question-pretooluse.cjs
   |
   | writes request-<toolUseId>.json
   v
@@ -197,7 +197,7 @@ completed-<question_id>.json
 实现文件：
 
 ```text
-/path/to/Genius/runner/hooks/ask-user-question-pretooluse.cjs
+/Users/m2/Desktop/code/harmony-pilot/hooks/ask-user-question-pretooluse.cjs
 ```
 
 核心逻辑：
@@ -274,7 +274,7 @@ poll interval: 300ms
 实现文件：
 
 ```text
-/path/to/Genius/frontend/app.py
+/Users/m2/Desktop/code/harmony-pilot-remote-ui/app.py
 ```
 
 ### 目录定位
@@ -551,7 +551,7 @@ api.answerQuestion(runId, request.id, answers)
 文件：
 
 ```text
-/path/to/Genius/runner/scripts/lib/workflow-prompts.mjs
+/Users/m2/Desktop/code/harmony-pilot/scripts/lib/workflow-prompts.mjs
 ```
 
 plan/design lane 会附加：
@@ -717,7 +717,7 @@ const request = pending[0]
 启动服务：
 
 ```bash
-cd /path/to/Genius/frontend
+cd /Users/m2/Desktop/code/harmony-pilot-remote-ui
 scripts/restart_local.sh
 ```
 

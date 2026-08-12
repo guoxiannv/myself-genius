@@ -29,7 +29,7 @@ except ImportError:  # pragma: no cover
 APP_ROOT = Path(__file__).resolve().parents[1]
 DATA_ROOT = APP_ROOT / "data"
 DEFAULT_VIDEO_ROOT = DATA_ROOT / "artifacts" / "videos"
-DEFAULT_REMOTE_TMP_DIR = "/data/local/tmp/genius/frontend"
+DEFAULT_REMOTE_TMP_DIR = "/data/local/tmp/harmony-pilot-remote-ui"
 EXPECTED_HAP_RELATIVE_PATH = Path("entry/build/default/outputs/default/entry-default-unsigned.hap")
 SCREENSHOT_SUFFIX = ".png"
 REMOTE_SCREENSHOT_SUFFIX = ".jpeg"

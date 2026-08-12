@@ -28,7 +28,7 @@ DEFAULT_HDC_CANDIDATES = [
     ),
     "/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony/toolchains/hdc",
 ]
-REMOTE_TMP_DIR = "/data/local/tmp/genius/frontend/live-preview"
+REMOTE_TMP_DIR = "/data/local/tmp/harmony-pilot-remote-ui/live-preview"
 ALLOWED_KEYS = {"BACK", "HOME"}
 ALLOWED_SCROLL_DIRECTIONS = {"up", "down"}
 MIN_SWIPE_VELOCITY = 200

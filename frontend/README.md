@@ -1,6 +1,6 @@
 # Harmony Pilot Remote UI
 
-Genius 仓库中的 Frontend 服务，用来远程触发 `../runner` 提供的本地 `tmux-runner`，并在网页中展示简化后的执行轨迹、运行预览与扫码安装结果。
+一个独立于 `harmony-pilot` 主仓库的 Python Web 小项目，用来远程触发本地 `tmux-runner`，并在网页中展示简化后的执行轨迹、运行预览与扫码安装结果。
 
 后端是标准库实现的纯 JSON API（不依赖 FastAPI、Flask 等第三方框架）；前端是位于 `web/` 的独立 **Vite + React + TypeScript + Tailwind CSS** 工程，通过 `/api` 与后端通信。前端单独调试方式见 [`web/README.md`](./web/README.md)。
 
@@ -27,7 +27,7 @@ Genius 仓库中的 Frontend 服务，用来远程触发 `../runner` 提供的�
 ## 运行
 
 ```bash
-cd Genius/frontend
+cd harmony-pilot-remote-ui
 cp deploy/server.env.example deploy/server.env
 cp deploy/profile-pool.example.json deploy/profile-pool.json
 # 编辑 deploy/server.env：填入路径、签名密码、CLOUDFLARE_TUNNEL_TOKEN
@@ -63,7 +63,7 @@ cd web && npm run build                # 产物在 web/dist
 改完代码或需要重启 Bitfun UI 服务时，用 `scripts/restart_dev.sh`。它只会停止自己管理的 `remote-ui-dev` tmux session，确认 `8080` 和 `8081` 端口已释放，再重新启动新 UI 栈并做 health 检查。若端口被其它进程占用，脚本会报错并列出占用者，不会主动杀掉其它生成中的 tmux 会话或无关进程。
 
 ```bash
-cd /path/to/Genius/frontend
+cd /path/to/harmony-pilot-remote-ui
 
 # 默认后台启动到 tmux session remote-ui-dev，并自动 curl health 验证
 scripts/restart_dev.sh
@@ -119,7 +119,7 @@ tmux 模式默认使用 `remote-ui-local` session，可通过
 
 `app.py` 启动时会自动读取 `deploy/server.env`（`.env.local` 仅作可选覆盖）。验证时至少需要配置：
 
-- `HP_TMUX_RUNNER`: `Genius/runner/scripts/tmux-runner.cjs` 的绝对路径
+- `HP_TMUX_RUNNER`: `harmony-pilot/scripts/tmux-runner.cjs` 的绝对路径
 - `HP_TARGET_WORKSPACE`: HarmonyOS 工程根目录，例如 `~/devecoProject/demo`
 - `HP_EXPO_FAST_ROOT`: Expo Harmony Fast Runtime 仓库绝对路径
 - `HP_EXPO_FAST_APP_ROOT`: Expo 任务独立工作目录的父目录；每次构建会在这里创建新工程与对应的 Markdown Prompt
@@ -219,7 +219,7 @@ scripts/restart_dev.sh --foreground
 | 步骤 | 操作 | 说明 |
 |------|------|------|
 | 1 | `pip install -r requirements.txt` | 需要 `qrcode`、`Pillow`、`imageio-ffmpeg`（二维码与视频生成） |
-| 2 | 初始化并配置 `Genius/runner` | `HP_TMUX_RUNNER` 指向其 `scripts/tmux-runner.cjs`；需支持 `ARKPILOT_BUNDLE_NAME` 环境变量 |
+| 2 | 克隆并配置 `harmony-pilot` | `HP_TMUX_RUNNER` 指向其 `scripts/tmux-runner.cjs`；需支持 `ARKPILOT_BUNDLE_NAME` 环境变量 |
 | 3 | `cp deploy/server.env.example deploy/server.env` | 填写 tmux-runner 路径、workspace、HPack 公网 URL、签名密码、Tunnel token |
 | 4 | `cp deploy/profile-pool.example.json deploy/profile-pool.json` | 按本机 `.p7b` 文件名改 `slots[].profile` |
 | 5 | 签名材料放入 `deploy/signing/` | 可用 `scripts/sync_deploy_signing_assets.sh` 同步 |
@@ -373,7 +373,7 @@ data/artifacts/videos/<run_id>/demo.mp4
 ### 运行示例
 
 ```bash
-cd Genius/frontend
+cd harmony-pilot-remote-ui
 python3 scripts/hdc_runtime_capture.py \
   --workspace ~/devecoProject/demo \
   --run-id demo-run-001

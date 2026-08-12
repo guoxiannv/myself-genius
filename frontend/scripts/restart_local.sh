@@ -2,7 +2,6 @@
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-GENIUS_ROOT="$(CDPATH= cd -- "$ROOT/.." && pwd)"
 ENV_FILE="${HP_REMOTE_UI_ENV:-$ROOT/deploy/server.env}"
 LOCAL_ENV="$ROOT/.env.local"
 
@@ -15,7 +14,7 @@ STOP_ONLY=0
 INTERNAL_SERVICE=""
 OPENBITFUN_PROXY_SESSION="${OPENBITFUN_PROXY_SESSION:-openbitfun-proxy}"
 OPENBITFUN_PROXY_PORT="${OPENBITFUN_PROXY_PORT:-40363}"
-OPENBITFUN_PROXY_ROOT="${OPENBITFUN_PROXY_ROOT:-$GENIUS_ROOT/runner}"
+OPENBITFUN_PROXY_ROOT="${OPENBITFUN_PROXY_ROOT:-/Users/m2/Desktop/code/harmony-pilot}"
 OPENBITFUN_PROXY_HEALTH_URL="http://127.0.0.1:${OPENBITFUN_PROXY_PORT}/health"
 
 usage() {
@@ -41,7 +40,7 @@ Environment overrides:
   FRONTEND_PORT=8180 BACKEND_PORT=8181 HOST=127.0.0.1
   HP_EXPO_PUBLIC_SERVE_PORT=3456 HP_EXPO_PUBLIC_SERVE_ENABLED=1
   LOCAL_TMUX_SESSION=remote-ui-local
-  OPENBITFUN_PROXY_ROOT=/path/to/Genius/runner
+  OPENBITFUN_PROXY_ROOT=/Users/m2/Desktop/code/harmony-pilot
 EOF
 }
 

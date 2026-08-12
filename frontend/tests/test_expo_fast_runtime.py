@@ -1,0 +1,436 @@
+import http.client
+import importlib.util
+import json
+import sys
+import tempfile
+import threading
+import unittest
+from pathlib import Path
+from typing import Optional
+from urllib.parse import urlparse
+
+from scan_install.expo_gateway import ExpoPublicGateway
+from tests.test_expo_public_gateway import write_harmony_go_export
+
+
+MODULE_PATH = Path(__file__).resolve().parents[1] / "app.py"
+SPEC = importlib.util.spec_from_file_location("remote_ui_expo_app", MODULE_PATH)
+remote_ui_app = importlib.util.module_from_spec(SPEC)
+assert SPEC is not None and SPEC.loader is not None
+sys.modules[SPEC.name] = remote_ui_app
+SPEC.loader.exec_module(remote_ui_app)
+
+
+class ExpoFastRuntimeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        root = Path(self.temp_dir.name)
+        self.original_runs_dir = remote_ui_app.RUNS_DIR
+        self.original_expo_root = remote_ui_app.EXPO_FAST_ROOT
+        self.original_expo_launcher = remote_ui_app.EXPO_FAST_LAUNCHER
+        self.original_expo_app_root = remote_ui_app.EXPO_FAST_APP_ROOT
+        self.original_run_expo = remote_ui_app.run_expo_fast_in_background
+        self.original_trace_cache = dict(remote_ui_app.EXPO_TRACE_CACHE)
+
+        remote_ui_app.RUNS_DIR = root / "runs"
+        remote_ui_app.RUNS_DIR.mkdir()
+        remote_ui_app.EXPO_FAST_ROOT = root / "runtime"
+        remote_ui_app.EXPO_FAST_ROOT.mkdir()
+        remote_ui_app.EXPO_FAST_LAUNCHER = remote_ui_app.EXPO_FAST_ROOT / "start-livetest.sh"
+        remote_ui_app.EXPO_FAST_LAUNCHER.write_text("#!/bin/sh\n", encoding="utf-8")
+        remote_ui_app.EXPO_FAST_APP_ROOT = root / "apps"
+        remote_ui_app.EXPO_TRACE_CACHE.clear()
+        self.started: list[str] = []
+        self.start_event = threading.Event()
+
+        def fake_start(record) -> None:
+            self.started.append(record.run_id)
+            self.start_event.set()
+
+        remote_ui_app.run_expo_fast_in_background = fake_start
+        self.server = remote_ui_app.ThreadingHTTPServer(("127.0.0.1", 0), remote_ui_app.RemoteUIHandler)
+        self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.server_thread.start()
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server_thread.join()
+        self.server.server_close()
+        remote_ui_app.RUNS_DIR = self.original_runs_dir
+        remote_ui_app.EXPO_FAST_ROOT = self.original_expo_root
+        remote_ui_app.EXPO_FAST_LAUNCHER = self.original_expo_launcher
+        remote_ui_app.EXPO_FAST_APP_ROOT = self.original_expo_app_root
+        remote_ui_app.run_expo_fast_in_background = self.original_run_expo
+        remote_ui_app.EXPO_TRACE_CACHE.clear()
+        remote_ui_app.EXPO_TRACE_CACHE.update(self.original_trace_cache)
+        self.temp_dir.cleanup()
+
+    def request(self, method: str, path: str, *, body: Optional[dict] = None, cookie: str = ""):
+        connection = http.client.HTTPConnection(*self.server.server_address)
+        headers = {"Content-Type": "application/json"}
+        if cookie:
+            headers["Cookie"] = cookie
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        connection.request(method, path, body=data, headers=headers)
+        response = connection.getresponse()
+        payload = json.loads(response.read() or b"{}")
+        result = response.status, dict(response.getheaders()), payload
+        connection.close()
+        return result
+
+    def test_create_expo_run_creates_empty_workspace_and_markdown_prompt(self) -> None:
+        prompt = "做一个支持每日打卡与连续天数统计的应用"
+        status, headers, payload = self.request(
+            "POST",
+            "/api/runs",
+            body={
+                "prompt": prompt,
+                "runtime": "expo",
+                "interactive_questions": True,
+            },
+        )
+
+        self.assertEqual(status, 201)
+        self.assertEqual(payload["runtime"], "expo")
+        self.assertTrue(self.start_event.wait(timeout=1))
+        self.assertEqual(self.started, [payload["run_id"]])
+        self.assertIn("harmony_pilot_visitor=", headers["Set-Cookie"])
+
+        record = remote_ui_app.load_run(payload["run_id"])
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record.runtime, "expo")
+        self.assertEqual(record.variant, "expo-fast")
+        self.assertFalse(record.interactive_questions)
+        self.assertEqual(list(Path(record.workspace).iterdir()), [])
+        self.assertEqual(Path(record.prompt_file).read_text(encoding="utf-8"), f"{prompt}\n")
+        self.assertEqual(
+            remote_ui_app.build_expo_fast_command(record),
+            [
+                str(remote_ui_app.EXPO_FAST_LAUNCHER),
+                "--project",
+                record.workspace,
+                "--prompt-file",
+                record.prompt_file,
+                "--session",
+                record.session_name,
+            ],
+        )
+
+    def test_completed_state_maps_to_package_placeholder_and_launch_preview(self) -> None:
+        workspace = remote_ui_app.EXPO_FAST_APP_ROOT / "completed-app"
+        state_dir = workspace / ".expo-fast"
+        state_dir.mkdir(parents=True)
+        (state_dir / "launch-screenshot.jpeg").write_bytes(b"jpeg")
+        state = {
+            "state": "completed",
+            "label": "Completed",
+            "status": "completed",
+            "detail": "done",
+            "detailLabel": "Done",
+            "updatedAt": "2026-08-11T00:04:00.000Z",
+            "history": [
+                {
+                    "state": "generating_code",
+                    "label": "Generating Code",
+                    "detail": "preparing",
+                    "detailLabel": "Preparing",
+                    "at": "2026-08-11T00:00:00.000Z",
+                },
+                {
+                    "state": "generating_code",
+                    "label": "Generating Code",
+                    "detail": "model_generation",
+                    "detailLabel": "Model Generation",
+                    "at": "2026-08-11T00:01:00.000Z",
+                },
+                {
+                    "state": "repairing",
+                    "label": "Repairing",
+                    "detail": "verification",
+                    "detailLabel": "Verification",
+                    "at": "2026-08-11T00:02:00.000Z",
+                },
+                {
+                    "state": "generating_code",
+                    "label": "Generating Code",
+                    "detail": "launching",
+                    "detailLabel": "Launching",
+                    "at": "2026-08-11T00:03:00.000Z",
+                },
+                {
+                    "state": "completed",
+                    "label": "Completed",
+                    "detail": "done",
+                    "detailLabel": "Done",
+                    "at": "2026-08-11T00:04:00.000Z",
+                },
+            ],
+        }
+        (state_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        now = remote_ui_app.to_iso()
+        record = remote_ui_app.RunRecord(
+            run_id="e6f6a000000000000000000000000006",
+            session_name="expo-fast-completed",
+            prompt="完成态测试",
+            workspace=str(workspace),
+            variant="expo-fast",
+            created_at=now,
+            updated_at=now,
+            runtime="expo",
+            status="running",
+        )
+        remote_ui_app.save_run(record)
+
+        payload = remote_ui_app.build_progress_payload(record)
+
+        self.assertEqual(payload["runtime"], "expo")
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["stage"], "done")
+        self.assertEqual(payload["expo"]["package"]["status"], "not_implemented")
+        self.assertEqual(payload["artifacts"]["distribution_status"], "not_implemented")
+        self.assertTrue(payload["artifacts"]["media_ready"])
+        self.assertEqual(
+            payload["artifacts"]["media_path"],
+            "/api/runs/e6f6a000000000000000000000000006/media",
+        )
+        self.assertEqual(payload["ui"]["waiting_message"], "Expo 生成已完成，等待打包实现。")
+        self.assertEqual(payload["events"][-1]["summary"], "生成流程已结束，等待打包实现。")
+
+        saved = remote_ui_app.load_run(record.run_id)
+        self.assertIsNotNone(saved)
+        assert saved is not None
+        self.assertEqual(saved.expo_package_status, "not_implemented")
+        self.assertIn("等待打包实现", saved.notes)
+
+    def test_claude_trace_is_incremental_grouped_and_redacted(self) -> None:
+        workspace = remote_ui_app.EXPO_FAST_APP_ROOT / "trace-app"
+        trace_dir = workspace / ".expo-fast"
+        trace_dir.mkdir(parents=True)
+        state = {
+            "state": "generating_code",
+            "detail": "model_generation",
+            "startedAt": "2026-08-11T00:00:00.000Z",
+        }
+        trace_path = trace_dir / "agent-trace.jsonl"
+        init_row = {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "claude-session-1",
+            "model": "k3-256k",
+        }
+        assistant_row = {
+            "type": "assistant",
+            "timestamp": "2026-08-11T00:01:00.000Z",
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "PRIVATE THINKING MUST NOT LEAK"},
+                    {
+                        "type": "tool_use",
+                        "id": "tool-1",
+                        "name": "Write",
+                        "input": {
+                            "file_path": str(workspace / "src/App.tsx"),
+                            "content": "SECRET FILE CONTENT MUST NOT LEAK",
+                        },
+                    },
+                    {"type": "text", "text": "  已完成首页和本地存储。  "},
+                ]
+            },
+        }
+        assistant_json = json.dumps(assistant_row, ensure_ascii=False)
+        midpoint = len(assistant_json) // 2
+        trace_path.write_text(
+            json.dumps(init_row) + "\n" + assistant_json[:midpoint],
+            encoding="utf-8",
+        )
+
+        first_groups = remote_ui_app.load_expo_claude_trace_groups(workspace, state)
+        self.assertEqual(len(first_groups), 1)
+        self.assertEqual(first_groups[0]["status"], "running")
+        self.assertEqual(first_groups[0]["event_count"], 1)
+        self.assertEqual(first_groups[0]["events"][0]["kind"], "session")
+
+        with trace_path.open("a", encoding="utf-8") as stream:
+            stream.write(assistant_json[midpoint:] + "\n")
+
+        running_groups = remote_ui_app.load_expo_claude_trace_groups(workspace, state)
+        generation = running_groups[0]
+        self.assertEqual(generation["label"], "代码生成")
+        self.assertEqual(generation["action_count"], 1)
+        self.assertEqual(generation["message_count"], 1)
+        self.assertEqual(generation["event_count"], 3)
+        action = next(event for event in generation["events"] if event["kind"] == "action")
+        self.assertEqual(action["summary"], "写入 · src/App.tsx")
+        self.assertEqual(action["target"], "src/App.tsx")
+        serialized = json.dumps(running_groups, ensure_ascii=False)
+        self.assertNotIn("SECRET FILE CONTENT", serialized)
+        self.assertNotIn("PRIVATE THINKING", serialized)
+
+        unchanged = remote_ui_app.load_expo_claude_trace_groups(workspace, state)
+        self.assertEqual(unchanged[0]["event_count"], 3)
+        self.assertEqual(unchanged[0]["events"], generation["events"])
+
+        result_row = {
+            "type": "result",
+            "subtype": "success",
+            "num_turns": 4,
+            "duration_ms": 12_400,
+            "is_error": False,
+        }
+        with trace_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(result_row) + "\n")
+
+        completed = remote_ui_app.load_expo_claude_trace_groups(workspace, state)[0]
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["event_count"], 4)
+        self.assertEqual(completed["events"][-1]["summary"], "Claude 会话完成 · 4 轮 · 12 秒")
+
+        repair_path = trace_dir / "agent-repair-trace.jsonl"
+        repair_rows = [
+            {
+                "type": "system",
+                "subtype": "init",
+                "session_id": "claude-session-1",
+                "model": "k3-256k",
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2026-08-11T00:02:00.000Z",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tool-2",
+                            "name": "Edit",
+                            "input": {"file_path": str(workspace / "src/store.tsx")},
+                        },
+                        {"type": "text", "text": "已修复验证阶段发现的类型问题。"},
+                    ]
+                },
+            },
+            {"type": "result", "subtype": "success", "num_turns": 2, "duration_ms": 3_000},
+        ]
+        repair_path.write_text(
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in repair_rows),
+            encoding="utf-8",
+        )
+
+        grouped = remote_ui_app.load_expo_claude_trace_groups(
+            workspace,
+            {**state, "state": "repairing", "detail": "model_repair"},
+        )
+        self.assertEqual([group["id"] for group in grouped], ["generation", "repair-1"])
+        self.assertEqual(grouped[1]["label"], "自动修复 #1")
+        self.assertEqual(grouped[1]["action_count"], 1)
+        self.assertEqual(grouped[1]["message_count"], 1)
+
+    def test_expo_package_endpoint_is_an_explicit_placeholder(self) -> None:
+        status, headers, payload = self.request(
+            "POST",
+            "/api/runs",
+            body={"prompt": "打包占位测试", "runtime": "expo"},
+        )
+        self.assertEqual(status, 201)
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        self.assertTrue(self.start_event.wait(timeout=1))
+
+        status, _, package_payload = self.request(
+            "POST",
+            f"/api/runs/{payload['run_id']}/package",
+            body={},
+            cookie=cookie,
+        )
+
+        self.assertEqual(status, 501)
+        self.assertEqual(package_payload["code"], "expo_package_not_implemented")
+        self.assertEqual(package_payload["status"], "not_implemented")
+
+    def test_completed_expo_run_can_publish_and_revoke_gateway_preview(self) -> None:
+        status, headers, payload = self.request(
+            "POST",
+            "/api/runs",
+            body={"prompt": "外网预览测试", "runtime": "expo"},
+        )
+        self.assertEqual(status, 201)
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        record = remote_ui_app.load_run(payload["run_id"])
+        self.assertIsNotNone(record)
+        assert record is not None
+
+        status, _, not_ready = self.request(
+            "POST",
+            f"/api/runs/{record.run_id}/expo-serve",
+            body={},
+            cookie=cookie,
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(not_ready["code"], "expo_run_not_ready")
+
+        state_root = Path(record.workspace) / ".expo-fast"
+        state_root.mkdir(parents=True)
+        (state_root / "state.json").write_text(
+            json.dumps({"state": "completed", "detail": "done", "updatedAt": "2026-08-11T00:00:00Z"}),
+            encoding="utf-8",
+        )
+        write_harmony_go_export(Path(record.workspace))
+
+        original_gateway = remote_ui_app.EXPO_PUBLIC_GATEWAY
+        gateway = ExpoPublicGateway(
+            enabled=True,
+            host="127.0.0.1",
+            port=0,
+            public_origin="https://devkit.yorha2b.cc/",
+            state_path=Path(self.temp_dir.name) / "expo-publications.json",
+            allowed_root=remote_ui_app.EXPO_FAST_APP_ROOT,
+        )
+        self.assertTrue(gateway.start())
+        remote_ui_app.EXPO_PUBLIC_GATEWAY = gateway
+        try:
+            status, _, published = self.request(
+                "POST",
+                f"/api/runs/{record.run_id}/expo-serve",
+                body={},
+                cookie=cookie,
+            )
+            self.assertEqual(status, 201)
+            self.assertTrue(published["accepted"])
+            self.assertEqual(published["serve"]["status"], "serving")
+            self.assertTrue(published["serve"]["public_url"].startswith("https://devkit.yorha2b.cc/p/"))
+
+            local = urlparse(published["serve"]["local_url"])
+            connection = http.client.HTTPConnection(local.hostname, local.port)
+            connection.request("GET", local.path + "/catalog.json")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(json.loads(response.read())[0]["id"], "sample-app")
+            connection.close()
+
+            status, _, progress = self.request("GET", f"/api/runs/{record.run_id}", cookie=cookie)
+            self.assertEqual(status, 200)
+            self.assertEqual(progress["expo"]["serve"]["status"], "serving")
+
+            status, _, revoked = self.request(
+                "DELETE",
+                f"/api/runs/{record.run_id}/expo-serve",
+                body={},
+                cookie=cookie,
+            )
+            self.assertEqual(status, 200)
+            self.assertTrue(revoked["accepted"])
+            self.assertEqual(revoked["serve"]["status"], "stopped")
+            self.assertTrue(revoked["serve"]["can_publish"])
+
+            connection = http.client.HTTPConnection(local.hostname, local.port)
+            connection.request("GET", local.path + "/catalog.json")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 404)
+            response.read()
+            connection.close()
+        finally:
+            remote_ui_app.EXPO_PUBLIC_GATEWAY = original_gateway
+            gateway.stop()
+
+
+if __name__ == "__main__":
+    unittest.main()

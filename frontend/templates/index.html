@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="theme-dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0a0a0c" />
+    <title>Harmony Pilot · 一句话构建鸿蒙应用</title>
+    <meta
+      name="description"
+      content="通过对话生成 HarmonyOS 应用，自动构建并扫码直装到真机。"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700;900&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body class="landing-body">
+    <header class="top-nav">
+      <a class="brand" href="/">
+        <span class="brand-dot" aria-hidden="true"></span>
+        <span class="brand-name">Harmony<span class="brand-accent">Pilot</span></span>
+      </a>
+      <nav class="top-nav-links" aria-label="主导航">
+        <span class="nav-pill">扫码直装</span>
+        <span class="nav-pill">AI 自动构建</span>
+        <span class="nav-pill nav-pill--brand">For HarmonyOS</span>
+      </nav>
+    </header>
+
+    <main class="landing-shell">
+      <section class="hero-block">
+        <div class="hero-badge">
+          <span class="hero-badge-dot" aria-hidden="true"></span>
+          Harmony Pilot Remote UI
+        </div>
+        <h1 class="hero-title">
+          一句话，构建你的
+          <span class="hero-highlight" data-text="鸿蒙应用">鸿蒙应用</span>
+        </h1>
+        <p class="hero-subtitle">
+          用对话描述你的想法，AI 自动生成 HarmonyOS 应用，<br />
+          完成构建运行验证，并推送到手机扫码直装。
+        </p>
+      </section>
+
+      <form id="create-run-form" class="composer-card">
+        <textarea
+          id="prompt-input"
+          name="prompt"
+          rows="3"
+          placeholder="描述你想构建的鸿蒙应用，例如：为这个工程生成一个待办清单应用并完成构建运行验证"
+        >{{ default_prompt }}</textarea>
+        <input id="workspace-input" type="hidden" value="{{ workspace }}" />
+        <input id="plan-skill-input" type="hidden" value="a2ui-pro" />
+        <div class="composer-footer">
+          <div class="composer-footer-left">
+            <span class="plan-skill-label">Effort</span>
+            <div class="plan-skill-radio-group" role="radiogroup" aria-label="构建质量">
+              <label class="plan-skill-pill" data-skill="a2ui-fast" title="速度最快，质量基本">Fast</label>
+              <label class="plan-skill-pill" data-skill="a2ui-balanced" title="速度与质量均衡">Balanced</label>
+              <label class="plan-skill-pill active" data-skill="a2ui-pro" title="速度较慢，质量最佳">Pro</label>
+            </div>
+          </div>
+          <button id="submit-button" class="primary-cta" type="submit">
+            <span>开始构建</span>
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+              <path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+        </div>
+        <div id="submit-status" class="composer-status muted"></div>
+      </form>
+
+      <div class="suggestion-row" aria-label="灵感提示">
+        <button type="button" class="suggest-chip" data-prompt="为这个 HarmonyOS 工程实现一个番茄闹钟计时器，支持专注与休息循环及提示音，并完成构建运行验证">
+          <svg class="suggest-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
+            <circle cx="12" cy="13" r="8" stroke="currentColor" stroke-width="2" />
+            <path d="M12 9v4l2 2M9 2h6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          番茄闹钟
+        </button>
+        <button type="button" class="suggest-chip" data-prompt="为这个 HarmonyOS 工程实现一个简洁的待办清单应用，支持增删改与本地存储，并完成构建运行验证">
+          <svg class="suggest-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
+            <path d="M9 11l3 3L22 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          待办清单应用
+        </button>
+        <button type="button" class="suggest-chip" data-prompt="为这个 HarmonyOS 工程实现一个记账应用，支持收支记录与分类统计，并完成构建运行验证">
+          <svg class="suggest-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
+            <path d="M12 1v22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          记账应用
+        </button>
+        <button type="button" class="suggest-chip" data-prompt="为这个 HarmonyOS 工程做一个相册心情拼贴 App，从相册选多张图，添加心情标签，生成本地日记卡片，并完成构建运行验证">
+          <svg class="suggest-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
+            <rect x="4" y="6" width="14" height="13" rx="2" stroke="currentColor" stroke-width="2" />
+            <path d="M7 4h11a2 2 0 0 1 2 2v10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M7 16l3.2-3.4 2.3 2.4 1.5-1.5 2 2.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+            <circle cx="9" cy="10" r="1" fill="currentColor" />
+          </svg>
+          相册心情拼贴
+        </button>
+      </div>
+
+      <ol class="flow-steps" aria-label="工作流程">
+        <li><span class="flow-num">1</span> 描述需求</li>
+        <li><span class="flow-num">2</span> AI 构建与验证</li>
+        <li><span class="flow-num">3</span> 扫码直装真机</li>
+      </ol>
+    </main>
+
+    <script src="/static/app.js"></script>
+    <script>
+      window.RemoteUI.initLandingPage();
+    </script>
+  </body>
+</html>

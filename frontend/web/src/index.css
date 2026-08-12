@@ -1,0 +1,206 @@
+@import "tailwindcss";
+
+/* ── 设计系统 Token（rork 风格：近黑底 + 单一暖橙强调色 + 中性灰阶）── */
+@theme {
+  --color-background: #09090b;
+  --color-surface: #111114;
+  --color-surface-raised: #17171c;
+  --color-border: #232329;
+  --color-border-strong: #303038;
+
+  --color-foreground: #f4f4f5;
+  --color-muted: #b4b4bd;
+  --color-subtle: #8b8b95;
+
+  --color-accent: #ff7a18;
+  --color-accent-soft: #ff9d4d;
+  --color-accent-strong: #ff5e0e;
+
+  --color-success: #34d399;
+  --color-warning: #fbbf24;
+  --color-danger: #f87171;
+  --color-info: #60a5fa;
+
+  --font-sans: "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei",
+    "Segoe UI", Arial, sans-serif;
+  --font-serif: "Noto Serif SC", "Songti SC", "SimSun", Georgia, serif;
+  /* 产品界面不使用超过 400 的字重；保留语义类，但统一映射为常规字重。 */
+  --font-weight-medium: 400;
+  --font-weight-semibold: 400;
+  --font-weight-bold: 400;
+  --font-weight-extrabold: 400;
+  --font-weight-black: 400;
+
+  --radius-card: 1.25rem;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+  font-weight: 400;
+  -webkit-font-smoothing: auto;
+  -moz-osx-font-smoothing: auto;
+  text-rendering: optimizeLegibility;
+}
+
+b,
+strong {
+  font-weight: 400;
+}
+
+/* 全局氛围光：顶部一抹暖橙极光，呼应 rork 的发光质感 */
+.aurora-bg::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(60% 50% at 50% -10%, rgba(255, 122, 24, 0.18), transparent 70%),
+    radial-gradient(40% 40% at 85% 10%, rgba(255, 94, 14, 0.1), transparent 70%);
+  z-index: 0;
+}
+
+/* 文字渐变高亮 */
+.text-glow {
+  background: linear-gradient(120deg, var(--color-accent-soft), var(--color-accent-strong));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* 玻璃质感卡片 */
+.glass {
+  background: color-mix(in oklab, var(--color-surface) 88%, transparent);
+  backdrop-filter: blur(18px);
+  border: 1px solid var(--color-border);
+}
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 122, 24, 0.45);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(255, 122, 24, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 122, 24, 0);
+  }
+}
+
+.live-dot {
+  animation: pulse-ring 2s infinite;
+}
+
+@keyframes generation-dot {
+  0%,
+  60%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-1px);
+  }
+}
+
+.generation-dot {
+  animation: generation-dot 1.2s ease-in-out infinite;
+}
+
+.generation-dot:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.generation-dot:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+@keyframes trace-action-wave {
+  0% {
+    background-position: 150% 50%;
+  }
+  100% {
+    background-position: -110% 50%;
+  }
+}
+
+/* Codex 风格的运行态：一束灰白亮光从 Action 文字前端向后扫过。 */
+.trace-action-wave {
+  color: transparent;
+  background: linear-gradient(
+    105deg,
+    var(--color-subtle) 0%,
+    var(--color-subtle) 36%,
+    var(--color-muted) 43%,
+    var(--color-foreground) 50%,
+    var(--color-muted) 57%,
+    var(--color-subtle) 64%,
+    var(--color-subtle) 100%
+  );
+  background-size: 220% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: trace-action-wave 1.65s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .trace-action-wave {
+    color: var(--color-muted);
+    background: none;
+    -webkit-text-fill-color: currentColor;
+    animation: none;
+  }
+}
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.92) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--color-surface-raised) 25%,
+    var(--color-border-strong) 37%,
+    var(--color-surface-raised) 63%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+}
+
+/* 滚动条 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}

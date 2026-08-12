@@ -1,0 +1,48 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pycache/
+.pytest_cache/
+
+# macOS
+.DS_Store
+._*
+
+# JetBrains IDE
+.idea/
+
+# Runtime data (keep package __init__.py)
+data/logs/*
+!data/logs/__init__.py
+data/runs/*
+!data/runs/__init__.py
+data/artifacts/*
+!data/artifacts/__init__.py
+data/signing-pool-state.json
+scripts/__pycache__/*
+static/hpack/*
+workspace/
+.claude/
+
+# Local debug / verification artifacts
+faultlogs/
+
+# Local config (never commit secrets)
+.env
+.env.local
+.env.*.local
+config.local.json
+
+# deploy/ runtime config & signing materials (commit *.example only)
+deploy/server.env
+deploy/profile-pool.json
+deploy/profile-pool-state.json
+deploy/signing/*
+!deploy/signing/.gitkeep
+.bitfun/
+.idea/
+/.arkpilot/logs/*
+/deploy/hpack-out/*
+/data/pids/local-backend.pid
+/data/pids/local-frontend.pid

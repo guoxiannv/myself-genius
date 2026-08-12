@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="theme-dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0a0a0c" />
+    <title>执行详情 · Harmony Pilot</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700;900&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css?v={{ static_asset_version }}" />
+  </head>
+  <body class="detail-body" data-run-id="{{ run.run_id }}" data-poll-ms="{{ poll_interval_ms }}">
+    <header class="detail-nav">
+      <a class="brand" href="/">
+        <span class="brand-dot" aria-hidden="true"></span>
+        <span class="brand-name">Harmony<span class="brand-accent">Pilot</span></span>
+      </a>
+      <div class="detail-nav-status">
+        <span id="run-status-chip" class="status-chip">等待中</span>
+        <span id="stage-chip" class="stage-chip">waiting</span>
+      </div>
+      <a class="ghost-btn" href="/">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
+          <path d="M15 18l-6-6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+        新建任务
+      </a>
+    </header>
+
+    <main class="detail-shell">
+      <section class="left-panel panel-card">
+        <div class="panel-head">
+          <div class="eyebrow">Session</div>
+          <h1 class="panel-title">执行详情</h1>
+        </div>
+
+        <div class="prompt-block">
+          <div class="prompt-avatar" aria-hidden="true">你</div>
+          <div class="prompt-bubble">{{ run.prompt }}</div>
+        </div>
+
+        <dl class="meta-grid">
+          <div class="meta-item">
+            <dt class="label">Session</dt>
+            <dd id="session-name">{{ run.session_name }}</dd>
+          </div>
+          <div class="meta-item">
+            <dt class="label">Workspace</dt>
+            <dd id="workspace-path">{{ run.workspace }}</dd>
+          </div>
+          <div class="meta-item">
+            <dt class="label">状态</dt>
+            <dd id="poll-hint">轮询中…</dd>
+          </div>
+        </dl>
+
+        <div class="timeline-panel">
+          <div class="timeline-header">
+            <div class="eyebrow">Execution Trail</div>
+            <span class="timeline-tag">实时</span>
+          </div>
+          <div id="timeline-list" class="timeline-list"></div>
+        </div>
+      </section>
+
+      <section class="right-panel panel-card">
+        <div class="preview-head">
+          <div>
+            <div class="eyebrow">Preview</div>
+            <h2 class="panel-title">运行预览</h2>
+          </div>
+          <div id="artifact-chip" class="artifact-chip" data-state="waiting">QR Waiting</div>
+        </div>
+
+        <div class="preview-grid">
+          <div id="simulator-stage" class="simulator-stage">
+            <div id="waiting-state" class="waiting-state">
+              <div class="device-frame">
+                <div class="device-notch"></div>
+                <div class="device-screen">
+                  <div class="loader"></div>
+                  <p id="waiting-copy" class="device-copy">
+                    等待本地后台检测到 .hap、完成安装与截图，再生成预览渲染。
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div id="media-state" class="media-state hidden">
+              <div class="device-frame ready">
+                <div class="device-notch"></div>
+                <div class="device-screen media-screen">
+                  <img id="media-image" alt="HarmonyOS 运行预览" class="hidden" />
+                  <video id="media-video" class="hidden" autoplay muted loop playsinline></video>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <aside id="qr-panel" class="qr-panel" data-state="waiting">
+            <div class="qr-panel-head">
+              <div class="eyebrow">HPack Install</div>
+              <h3>扫码安装</h3>
+            </div>
+            <p id="qr-copy" class="qr-copy">
+              检测到 .hap 后，这里会自动签名并显示安装二维码。
+            </p>
+
+            <div class="qr-card">
+              <div id="qr-placeholder" class="qr-placeholder">
+                <div class="loader qr-loader"></div>
+                <span>Waiting for HAP</span>
+              </div>
+              <img id="qr-image" class="qr-image hidden" alt="扫码安装二维码" />
+            </div>
+
+            <a
+              id="hap-download-link"
+              class="hap-download-link hidden"
+              href="#"
+              target="_blank"
+              rel="noreferrer"
+            >
+              下载原始 HAP
+            </a>
+
+            <div class="preview-artifacts">
+              <span class="label">HAP 路径</span>
+              <span id="hap-path">未检测到</span>
+            </div>
+          </aside>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/app.js?v={{ static_asset_version }}"></script>
+    <script>
+      window.RemoteUI.initDetailPage();
+    </script>
+  </body>
+</html>

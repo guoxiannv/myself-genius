@@ -1,0 +1,3831 @@
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import html
+import json
+import os
+import re
+import secrets
+import signal
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta, timezone
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, quote, urlparse
+from uuid import uuid4
+
+LOCAL_DEPS = Path(__file__).resolve().parent / ".venv" / "deps"
+if LOCAL_DEPS.is_dir():
+    sys.path.insert(0, str(LOCAL_DEPS))
+
+try:
+    import qrcode
+except ImportError:  # pragma: no cover - optional at runtime until deps are installed
+    qrcode = None
+DEFAULT_PLAN_SKILL = os.environ.get("HP_TMUX_PLAN_SKILL", "a2ui-pro")
+SKIP_PIPELINE_QA = os.environ.get("HP_TMUX_SKIP_QA", "").strip().lower() in {"1", "true", "yes", "on"}
+VISITOR_COOKIE_NAME = "harmony_pilot_visitor"
+ROOT_SESSION_COOKIE_NAME = "harmony_pilot_root"
+VISITOR_COOKIE_MAX_AGE_SEC = 365 * 24 * 60 * 60
+ROOT_SESSION_MAX_AGE_SEC = 8 * 60 * 60
+VISITOR_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
+LOGIN_MAX_ATTEMPTS = 5
+LOGIN_WINDOW_SEC = 10 * 60
+LOGIN_ATTEMPTS: dict[str, list[float]] = {}
+LOGIN_ATTEMPTS_LOCK = threading.Lock()
+TMUX_SESSION_NAME_MAX_LENGTH = 48
+from scan_install.config import (
+    ALLOWED_MEDIA_EXTENSIONS,
+    APP_ROOT,
+    CAPTURE_POLL_INTERVAL_SEC,
+    CAPTURE_PYTHON_BIN,
+    CAPTURE_WAIT_TIMEOUT_SEC,
+    DATA_DIR,
+    DEFAULT_POLL_INTERVAL_MS,
+    DEFAULT_VARIANT,
+    EXPECTED_HAP_RELATIVE_PATH,
+    EXPO_FAST_APP_ROOT,
+    EXPO_FAST_ENV_FILE,
+    EXPO_FAST_LAUNCHER,
+    EXPO_FAST_ROOT,
+    EXPO_PUBLIC_ORIGIN,
+    EXPO_PUBLIC_SERVE_ENABLED,
+    EXPO_PUBLIC_SERVE_HOST,
+    EXPO_PUBLIC_SERVE_PORT,
+    EXPO_PUBLIC_SERVE_STATE_PATH,
+    HDC_CAPTURE_SCRIPT_PATH,
+    HDC_CAPTURE_TARGET,
+    HPACK_ENABLED,
+    HPACK_PACKAGER_SCRIPT_PATH,
+    HPACK_STATIC_ROOT,
+    HPACK_WAIT_TIMEOUT_SEC,
+    LOG_DIR,
+    MEDIA_DIR,
+    PROFILE_POOL_ISOLATE_WORKSPACE,
+    RUNS_DIR,
+    TARGET_WORKSPACE,
+    TMUX_RUNNER_PATH,
+)
+from scan_install.expo_gateway import (
+    ExpoExportValidationError,
+    ExpoGatewayError,
+    ExpoPublicGateway,
+)
+from scan_install.hpack import (
+    build_install_qr_content,
+    build_install_store_url,
+    content_type_for_path,
+    hpack_manifest_path,
+    load_hpack_manifest as _load_hpack_manifest,
+    serve_hpack_static,
+    summarize_hpack_events,
+    wait_for_hap_and_package as _wait_for_hap_and_package,
+)
+from scan_install.live_preview import (
+    LiveInputRateLimitError,
+    LiveInputValidationError,
+    LivePreviewError,
+    LocalLivePreview,
+)
+try:
+    from scan_install.webrtc_preview import WebRTCPreviewError, WebRTCPreviewManager
+except ImportError:  # pragma: no cover - REST remains available without aiortc
+    WebRTCPreviewError = RuntimeError  # type: ignore[assignment,misc]
+    WebRTCPreviewManager = None  # type: ignore[assignment,misc]
+from scan_install.profile_pool import (
+    apply_signing_slot_to_record,
+    build_signing_payload,
+    build_tmux_env,
+    get_signing_pool,
+    maybe_release_signing_slot as _maybe_release_signing_slot,
+    profile_pool_status_payload,
+    release_signing_slot_for_record,
+    signing_pool_status_payload,
+)
+from scan_install.time_utils import parse_iso, to_iso
+
+
+LIVE_PREVIEW = LocalLivePreview(
+    preferred_target=HDC_CAPTURE_TARGET,
+)
+LIVE_PREVIEW_LATENCY_LOG_PATH = LOG_DIR / "live-preview-latency.jsonl"
+LIVE_PREVIEW_LOG_MAX_BYTES = 20 * 1024 * 1024
+LIVE_PREVIEW_LOG_LOCK = threading.Lock()
+WEBRTC_PREVIEW: Any = None
+EXPO_TRACE_EVENT_LIMIT = 160
+EXPO_TRACE_CACHE_LIMIT = 256
+EXPO_TRACE_CACHE: dict[str, dict[str, Any]] = {}
+EXPO_TRACE_CACHE_LOCK = threading.Lock()
+EXPO_PUBLIC_GATEWAY = ExpoPublicGateway(
+    enabled=EXPO_PUBLIC_SERVE_ENABLED,
+    host=EXPO_PUBLIC_SERVE_HOST,
+    port=EXPO_PUBLIC_SERVE_PORT,
+    public_origin=EXPO_PUBLIC_ORIGIN,
+    state_path=EXPO_PUBLIC_SERVE_STATE_PATH,
+    allowed_root=EXPO_FAST_APP_ROOT,
+)
+
+
+def preview_server_timing(timings: dict[str, float | int]) -> str:
+    metrics = []
+    for name, value in timings.items():
+        if not name.endswith("_ms") or isinstance(value, bool):
+            continue
+        metrics.append(f"{name[:-3].replace('_', '-')};dur={float(value):.3f}")
+    return ", ".join(metrics)
+
+
+def append_live_preview_log(payload: dict[str, Any]) -> None:
+    try:
+        line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        with LIVE_PREVIEW_LOG_LOCK:
+            if (
+                LIVE_PREVIEW_LATENCY_LOG_PATH.is_file()
+                and LIVE_PREVIEW_LATENCY_LOG_PATH.stat().st_size >= LIVE_PREVIEW_LOG_MAX_BYTES
+            ):
+                rotated_path = LIVE_PREVIEW_LATENCY_LOG_PATH.with_suffix(".jsonl.1")
+                rotated_path.unlink(missing_ok=True)
+                LIVE_PREVIEW_LATENCY_LOG_PATH.replace(rotated_path)
+            with LIVE_PREVIEW_LATENCY_LOG_PATH.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+    except OSError:
+        pass
+
+
+def append_webrtc_preview_log(payload: dict[str, Any]) -> None:
+    append_live_preview_log({"timestamp": to_iso(), **payload})
+
+
+if WebRTCPreviewManager is not None:
+    WEBRTC_PREVIEW = WebRTCPreviewManager(
+        LIVE_PREVIEW,
+        logger=append_webrtc_preview_log,
+    )
+
+
+def base64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def base64url_decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def root_auth_secret() -> bytes:
+    return os.environ.get("HP_AUTH_SIGNING_SECRET", "").encode("utf-8")
+
+
+def root_auth_enabled() -> bool:
+    return bool(os.environ.get("HP_ROOT_PASSWORD_HASH", "").strip() and len(root_auth_secret()) >= 32)
+
+
+def verify_root_password(password: str) -> bool:
+    encoded = os.environ.get("HP_ROOT_PASSWORD_HASH", "").strip()
+    try:
+        algorithm, iterations, salt_text, digest_text = encoded.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        expected = base64url_decode(digest_text)
+        actual = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt=base64url_decode(salt_text),
+            iterations=int(iterations),
+            dklen=len(expected),
+        )
+    except (TypeError, ValueError, UnicodeError):
+        return False
+    return hmac.compare_digest(actual, expected)
+
+
+def create_root_session() -> str:
+    payload = json.dumps(
+        {"role": "root", "expires_at": int(time.time()) + ROOT_SESSION_MAX_AGE_SEC},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    encoded_payload = base64url_encode(payload)
+    signature = hmac.new(root_auth_secret(), encoded_payload.encode("ascii"), hashlib.sha256).digest()
+    return f"{encoded_payload}.{base64url_encode(signature)}"
+
+
+def root_session_is_valid(value: str) -> bool:
+    if not root_auth_enabled() or "." not in value:
+        return False
+    encoded_payload, encoded_signature = value.rsplit(".", 1)
+    expected = hmac.new(root_auth_secret(), encoded_payload.encode("ascii"), hashlib.sha256).digest()
+    try:
+        signature = base64url_decode(encoded_signature)
+        payload = json.loads(base64url_decode(encoded_payload).decode("utf-8"))
+    except (ValueError, UnicodeError, json.JSONDecodeError):
+        return False
+    return (
+        hmac.compare_digest(signature, expected)
+        and isinstance(payload, dict)
+        and payload.get("role") == "root"
+        and int(payload.get("expires_at") or 0) > int(time.time())
+    )
+
+
+def login_is_limited(client_ip: str) -> bool:
+    now = time.monotonic()
+    with LOGIN_ATTEMPTS_LOCK:
+        attempts = [item for item in LOGIN_ATTEMPTS.get(client_ip, []) if now - item < LOGIN_WINDOW_SEC]
+        LOGIN_ATTEMPTS[client_ip] = attempts
+        return len(attempts) >= LOGIN_MAX_ATTEMPTS
+
+
+def record_failed_login(client_ip: str) -> None:
+    now = time.monotonic()
+    with LOGIN_ATTEMPTS_LOCK:
+        attempts = [item for item in LOGIN_ATTEMPTS.get(client_ip, []) if now - item < LOGIN_WINDOW_SEC]
+        attempts.append(now)
+        LOGIN_ATTEMPTS[client_ip] = attempts
+
+
+def clear_failed_logins(client_ip: str) -> None:
+    with LOGIN_ATTEMPTS_LOCK:
+        LOGIN_ATTEMPTS.pop(client_ip, None)
+
+
+def safe_slug(value: str, fallback: str = "run") -> str:
+    slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", value.strip().lower()).strip("-_")
+    return slug[:TMUX_SESSION_NAME_MAX_LENGTH] or fallback
+
+
+def build_tmux_session_name(run_id: str) -> str:
+    """Build a short, stable runner name independent of user prompt text."""
+    return f"hp-{run_id[:12]}"
+
+
+def normalize_tmux_session_name(session_name: str) -> str:
+    """Mirror tmux-runner's normalization for records created before the name fix."""
+    normalized = re.sub(r"[^a-z0-9_-]+", "-", session_name.strip().lower()).strip("-")
+    return normalized[:TMUX_SESSION_NAME_MAX_LENGTH].strip("-")
+
+
+def relative_to_root(path: Path, root: Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
+def read_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def list_candidate_files(root: Path, suffixes: set[str]) -> list[Path]:
+    if not root.exists():
+        return []
+    ignored = {".git", "node_modules", ".next", "dist", "build", "__pycache__"}
+    results: list[Path] = []
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(current.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.is_dir():
+                if entry.name in ignored:
+                    continue
+                stack.append(entry)
+                continue
+            if entry.suffix.lower() in suffixes:
+                results.append(entry)
+    results.sort(key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True)
+    return results
+
+
+def list_workspace_directories(root: Path, limit: int = 50) -> list[str]:
+    if not root.is_dir():
+        return []
+    try:
+        directories = sorted(
+            entry.name for entry in root.iterdir() if entry.is_dir() and not entry.name.startswith(".")
+        )
+    except OSError:
+        return []
+    return directories[:limit]
+
+
+def validate_workspace_cleanup_root(workspace: Path) -> None:
+    workspace = workspace.expanduser().resolve()
+    protected_paths = {Path("/"), Path.home().resolve(), APP_ROOT.resolve()}
+    app_parent = APP_ROOT.resolve().parent
+    while app_parent != app_parent.parent:
+        protected_paths.add(app_parent)
+        app_parent = app_parent.parent
+    if TARGET_WORKSPACE.parts:
+        target_root = TARGET_WORKSPACE.expanduser().resolve()
+        protected_paths.add(target_root)
+        parent = target_root.parent
+        while parent != parent.parent:
+            protected_paths.add(parent)
+            parent = parent.parent
+    if workspace in protected_paths:
+        raise ValueError(f"拒绝清空受保护目录: {workspace}")
+    if (workspace / ".git").exists():
+        raise ValueError(f"拒绝清空 Git 仓库根目录: {workspace}")
+    if len(workspace.parts) < 3:
+        raise ValueError(f"拒绝清空路径层级过浅的目录: {workspace}")
+
+
+def clear_workspace_contents(workspace: Path) -> None:
+    validate_workspace_cleanup_root(workspace)
+    if not workspace.exists():
+        workspace.mkdir(parents=True, exist_ok=True)
+        return
+    if not workspace.is_dir():
+        raise ValueError(f"目标工作目录不存在或不是文件夹: {workspace}")
+
+    for entry in workspace.iterdir():
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+
+
+def iter_run_records() -> list[RunRecord]:
+    records: list[RunRecord] = []
+    for path in RUNS_DIR.glob("*.json"):
+        payload = read_json(path)
+        if not payload:
+            continue
+        try:
+            records.append(RunRecord(**payload))
+        except TypeError:
+            continue
+    return records
+
+
+def stop_process_group_or_pid(pid: int | None, timeout_sec: float = 3.0) -> bool:
+    if not pid:
+        return True
+    if not process_alive(pid):
+        return True
+
+    def send(sig: int) -> None:
+        try:
+            os.killpg(pid, sig)
+        except ProcessLookupError:
+            return
+        except OSError:
+            os.kill(pid, sig)
+
+    try:
+        send(signal.SIGTERM)
+    except (PermissionError, ProcessLookupError):
+        return not process_alive(pid)
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        if not process_alive(pid):
+            return True
+        time.sleep(0.1)
+
+    try:
+        send(signal.SIGKILL)
+    except (PermissionError, ProcessLookupError):
+        return not process_alive(pid)
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if not process_alive(pid):
+            return True
+        time.sleep(0.1)
+    return not process_alive(pid)
+
+
+def stop_tmux_session(session_name: str) -> bool:
+    if not session_name:
+        return True
+    try:
+        result = subprocess.run(
+            ["tmux", "kill-session", "-t", session_name],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def stop_existing_workspace_runs(workspace: Path) -> None:
+    target_workspace = workspace.expanduser().resolve()
+    failures: list[str] = []
+
+    for record in iter_run_records():
+        try:
+            record_workspace = Path(record.workspace).expanduser().resolve()
+        except OSError:
+            continue
+        if record_workspace != target_workspace:
+            continue
+
+        active_run = (
+            record.status in {"queued", "running"}
+            or record.capture_status in {"waiting_hap", "running"}
+            or record.distribution_status in {"waiting_hap", "packaging"}
+            or process_alive(record.process_pid)
+            or process_alive(record.capture_process_pid)
+            or process_alive(record.distribution_process_pid)
+        )
+        if not active_run:
+            continue
+
+        touched = False
+
+        if record.capture_process_pid and process_alive(record.capture_process_pid):
+            touched = True
+            if stop_process_group_or_pid(record.capture_process_pid):
+                pass
+            else:
+                failures.append(f"capture pid={record.capture_process_pid}")
+            record.capture_process_pid = None
+            if record.capture_status not in {"complete", "failed"}:
+                record.capture_status = "failed"
+
+        if record.process_pid and process_alive(record.process_pid):
+            touched = True
+            if stop_process_group_or_pid(record.process_pid):
+                pass
+            else:
+                failures.append(f"tmux-runner pid={record.process_pid}")
+            record.process_pid = None
+            if record.status in {"queued", "running"}:
+                record.status = "failed"
+
+        if record.distribution_process_pid and process_alive(record.distribution_process_pid):
+            touched = True
+            if stop_process_group_or_pid(record.distribution_process_pid):
+                pass
+            else:
+                failures.append(f"hpack pid={record.distribution_process_pid}")
+            record.distribution_process_pid = None
+            if record.distribution_status not in {"ready", "failed", "disabled"}:
+                record.distribution_status = "failed"
+
+        if record.session_name:
+            touched = stop_tmux_session(record.session_name) or touched
+
+        if record.capture_status in {"waiting_hap", "running"}:
+            touched = True
+            record.capture_status = "failed"
+        if record.distribution_status in {"waiting_hap", "packaging"}:
+            touched = True
+            record.distribution_status = "failed"
+        if record.status in {"queued", "running"}:
+            touched = True
+            record.status = "failed"
+
+        if touched:
+            note = "检测到新的 Build 请求，已停止旧任务并准备清空工作目录。"
+            if failures:
+                note = f"{note} 停止过程中有失败项。"
+            record.notes = note
+            release_signing_slot_for_record(record)
+            save_run(record)
+
+    if failures:
+        raise RuntimeError("；".join(failures))
+
+
+def recent_threshold(created_at: str | None) -> datetime | None:
+    timestamp = parse_iso(created_at)
+    if not timestamp:
+        return None
+    return timestamp - timedelta(seconds=5)
+
+
+def pick_recent_file(candidates: list[Path], created_at: str | None) -> Path | None:
+    threshold = recent_threshold(created_at)
+    if not threshold:
+        return candidates[0] if candidates else None
+    for candidate in candidates:
+        try:
+            modified_at = datetime.fromtimestamp(candidate.stat().st_mtime, tz=timezone.utc)
+        except OSError:
+            continue
+        if modified_at >= threshold:
+            return candidate
+    return None
+
+
+def extract_jsonl_text(entry: dict[str, Any]) -> str:
+    message = entry.get("message", {})
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text") or item.get("content") or ""))
+        return "\n".join(part for part in parts if part)
+    return ""
+
+
+def is_assistant_entry(entry: dict[str, Any]) -> bool:
+    if entry.get("type") == "assistant":
+        return True
+    message = entry.get("message", {})
+    return message.get("role") == "assistant"
+
+
+def extract_recent_transcript_events(transcript_path: Path, limit: int = 6) -> list[dict[str, Any]]:
+    if not transcript_path.exists():
+        return []
+    events: list[dict[str, Any]] = []
+    try:
+        for raw_line in transcript_path.read_text(encoding="utf-8").splitlines():
+            if not raw_line.strip():
+                continue
+            try:
+                entry = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if not is_assistant_entry(entry):
+                continue
+            text = extract_jsonl_text(entry).strip()
+            if not text:
+                continue
+            text = re.sub(r"\s+", " ", text)
+            events.append(
+                {
+                    "kind": "assistant",
+                    "timestamp": entry.get("timestamp"),
+                    "summary": text[:240],
+                }
+            )
+    except OSError:
+        return []
+    return events[-limit:]
+
+
+def extract_follow_up_trace_events(transcript_path: Path, limit: int = 60) -> list[dict[str, Any]]:
+    """Return a safe, compact follow-up trace without exposing raw JSONL or tool inputs."""
+    if not transcript_path.is_file():
+        return []
+    events: list[dict[str, Any]] = []
+    try:
+        with transcript_path.open(encoding="utf-8") as handle:
+            for raw_line in handle:
+                if not raw_line.strip():
+                    continue
+                try:
+                    entry = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(entry, dict) or not is_assistant_entry(entry):
+                    continue
+                timestamp = str(entry.get("timestamp") or "")
+                message = entry.get("message") if isinstance(entry.get("message"), dict) else {}
+                content = message.get("content")
+                if isinstance(content, str):
+                    content = [{"type": "text", "text": content}]
+                if not isinstance(content, list):
+                    continue
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    item_type = str(item.get("type") or "")
+                    if item_type == "text":
+                        text = re.sub(r"\s+", " ", str(item.get("text") or "")).strip()
+                        if text:
+                            events.append({"kind": "assistant", "timestamp": timestamp, "summary": text[:800]})
+    except OSError:
+        return []
+    return events[-limit:]
+
+
+def load_follow_up_trace(follow_up: dict[str, Any]) -> list[dict[str, Any]]:
+    """Resolve the trusted controller-provided path server-side; never send it to the browser."""
+    transcript_path = str(follow_up.get("transcript_path") or "")
+    return extract_follow_up_trace_events(Path(transcript_path)) if transcript_path else []
+
+
+def redact_follow_up_transcript_path(follow_up: dict[str, Any]) -> dict[str, Any]:
+    """The controller path is an implementation detail and must not reach the browser."""
+    public = dict(follow_up)
+    public.pop("transcript_path", None)
+    return public
+
+
+def redact_follow_up_response(response: dict[str, Any]) -> dict[str, Any]:
+    public = dict(response)
+    follow_up = public.get("follow_up")
+    if isinstance(follow_up, dict):
+        public["follow_up"] = redact_follow_up_transcript_path(follow_up)
+    return public
+
+
+def summarize_stage_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for item in history[-6:]:
+        stage = str(item.get("stage") or "unknown")
+        items.append(
+            {
+                "kind": "stage",
+                "timestamp": item.get("at"),
+                "summary": f"进入阶段: {stage}",
+            }
+        )
+    return items
+
+
+def summarize_compact_events(diagnostics: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not diagnostics:
+        return []
+    items: list[dict[str, Any]] = []
+    for item in diagnostics.get("recent_events", [])[-6:]:
+        stage = item.get("stage_id") or "unknown"
+        source = item.get("source") or item.get("hook_event_name") or "compact"
+        items.append(
+            {
+                "kind": "compact",
+                "timestamp": item.get("compact_at"),
+                "summary": f"{stage} 阶段发生 compact: {source}",
+            }
+        )
+    return items
+
+
+@dataclass
+class RunRecord:
+    run_id: str
+    session_name: str
+    prompt: str
+    workspace: str
+    variant: str
+    created_at: str
+    updated_at: str
+    status: str = "queued"
+    runtime: str = "arkpilot"
+    plan_skill: str = DEFAULT_PLAN_SKILL
+    interactive_questions: bool = False
+    owner_id: str = ""
+    share_token: str = ""
+    process_pid: int | None = None
+    command: list[str] = field(default_factory=list)
+    capture_status: str = "waiting_hap"
+    capture_process_pid: int | None = None
+    capture_command: list[str] = field(default_factory=list)
+    # 最近一次触发预览采集的 unsigned HAP 修改时间；用于续跑出新包后的重新采集。
+    capture_hap_mtime: float = 0.0
+    distribution_status: str = "waiting_hap"
+    distribution_process_pid: int | None = None
+    distribution_command: list[str] = field(default_factory=list)
+    # 首版本扫码安装信息（首次签名成功时持久化，之后不再覆盖）
+    first_install_url: str = ""
+    first_install_store_url: str = ""
+    first_manifest_url: str = ""
+    first_ready_at: str = ""
+    # Remote UI 成功提交的最近一次调整时间。即使控制器暂时不可用或服务重启，
+    # 也能立即判定已有二维码过期，避免把首版本误显示为最新版本。
+    latest_adjustment_at: str = ""
+    # 最近一次签名任务启动时对应的调整版本。签名期间若又提交调整，
+    # 即使新 manifest 完成时间更晚，也不能把该包误判为包含了新调整。
+    package_source_adjustment_at: str = ""
+    # 仅兼容旧 run JSON；新版续跑状态由 ArkPilot follow-up-control 管理。
+    pending_follow_up_at: str = ""
+    notes: str = ""
+    prompt_file: str = ""
+    expo_package_status: str = ""
+    expo_package_updated_at: str = ""
+    signing_slot_id: str = ""
+    signing_bundle_name: str = ""
+    signing_cert_path: str = ""
+    signing_profile_path: str = ""
+    signing_keystore_path: str = ""
+    signing_alias: str = ""
+    signing_leased_at: str = ""
+    signing_released_at: str = ""
+
+    @property
+    def path(self) -> Path:
+        return RUNS_DIR / f"{self.run_id}.json"
+
+
+def load_run(run_id: str) -> RunRecord | None:
+    payload = read_json(RUNS_DIR / f"{run_id}.json")
+    return RunRecord(**payload) if payload else None
+
+
+def save_run(record: RunRecord) -> RunRecord:
+    record.updated_at = to_iso()
+    write_json(record.path, asdict(record))
+    return record
+
+
+def build_tmux_command(record: RunRecord) -> list[str]:
+    command = [
+        "node",
+        str(TMUX_RUNNER_PATH),
+        "--cwd",
+        record.workspace,
+        "--session",
+        record.session_name,
+        "--variant",
+        record.variant,
+    ]
+    if record.plan_skill:
+        command.extend(["--plan-skill", record.plan_skill])
+    # 本地续跑联调可跳过 UI/core-flow QA；默认关闭，不影响常规生成任务。
+    if SKIP_PIPELINE_QA:
+        command.extend(["--no-ui-qa", "--no-core-flow-qa"])
+    command.append(record.prompt)
+    return command
+
+
+def build_expo_fast_command(record: RunRecord) -> list[str]:
+    if EXPO_FAST_LAUNCHER is None:
+        return []
+    return [
+        str(EXPO_FAST_LAUNCHER),
+        "--project",
+        record.workspace,
+        "--prompt-file",
+        record.prompt_file,
+        "--session",
+        record.session_name,
+    ]
+
+
+def expo_fast_state_path(workspace: Path) -> Path:
+    return workspace / ".expo-fast" / "state.json"
+
+
+def load_expo_fast_state(workspace: Path) -> dict[str, Any] | None:
+    return read_json(expo_fast_state_path(workspace))
+
+
+def expo_fast_run_status(record: RunRecord, state: dict[str, Any] | None) -> str:
+    state_name = str((state or {}).get("state") or "").strip().lower()
+    if state_name == "completed":
+        return "completed"
+    if state_name == "failed":
+        return "failed"
+    if record.status in {"failed", "error"}:
+        return "failed"
+    if state_name in {"generating_code", "repairing"} or record.status == "running":
+        return "running"
+    return "queued"
+
+
+def mark_expo_package_placeholder(record: RunRecord) -> RunRecord:
+    """Record the intentionally unimplemented packaging hand-off for Expo runs."""
+    if record.expo_package_status == "not_implemented":
+        return record
+    latest = load_run(record.run_id) or record
+    latest.expo_package_status = "not_implemented"
+    latest.expo_package_updated_at = to_iso()
+    latest.notes = "Expo 生成与启动已完成，等待打包实现。"
+    return save_run(latest)
+
+
+def summarize_expo_fast_events(state: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not state:
+        return []
+    events: list[dict[str, Any]] = []
+    for item in state.get("history") or []:
+        if not isinstance(item, dict):
+            continue
+        detail_label = str(item.get("detailLabel") or "").strip()
+        label = str(item.get("label") or "").strip()
+        summary = detail_label or label or str(item.get("detail") or item.get("state") or "状态更新")
+        if detail_label and label and detail_label != label:
+            summary = f"{label}：{detail_label}"
+        events.append(
+            {
+                "kind": "expo",
+                "timestamp": item.get("at"),
+                "summary": summary,
+            }
+        )
+    error = str(state.get("error") or "").strip()
+    if error:
+        events.append(
+            {
+                "kind": "error",
+                "timestamp": state.get("updatedAt"),
+                "summary": error[:800],
+            }
+        )
+    return events
+
+
+def expo_trace_descriptor(path: Path) -> dict[str, Any] | None:
+    name = path.name
+    if name == "agent-trace.jsonl":
+        return {"id": "generation", "label": "代码生成", "kind": "generation", "order": 0}
+    repair = re.fullmatch(r"agent-repair-trace(?:-(\d+))?\.jsonl", name)
+    if repair:
+        attempt = int(repair.group(1) or "1")
+        return {
+            "id": f"repair-{attempt}",
+            "label": f"自动修复 #{attempt}",
+            "kind": "repair",
+            "attempt": attempt,
+            "order": 100 + attempt,
+        }
+    runtime_repair = re.fullmatch(r"agent-runtime-repair-trace(?:-(\d+))?\.jsonl", name)
+    if runtime_repair:
+        attempt = int(runtime_repair.group(1) or "1")
+        return {
+            "id": f"runtime-repair-{attempt}",
+            "label": f"运行修复 #{attempt}",
+            "kind": "runtime_repair",
+            "attempt": attempt,
+            "order": 200 + attempt,
+        }
+    if re.fullmatch(r"smoke-agent-trace(?:-resume)?\.jsonl", name):
+        return {"id": name.removesuffix(".jsonl"), "label": "运行验收", "kind": "smoke", "order": 300}
+    return None
+
+
+def expo_trace_target(workspace: Path, tool_input: dict[str, Any]) -> str:
+    raw_target = tool_input.get("file_path") or tool_input.get("path")
+    if not isinstance(raw_target, str) or not raw_target.strip():
+        return ""
+    try:
+        workspace_root = workspace.resolve()
+        candidate = Path(raw_target).expanduser()
+        if not candidate.is_absolute():
+            candidate = workspace_root / candidate
+        return candidate.resolve().relative_to(workspace_root).as_posix()
+    except (OSError, RuntimeError, ValueError):
+        return ""
+
+
+def summarize_expo_claude_row(
+    row: dict[str, Any],
+    workspace: Path,
+    trace_name: str,
+    first_index: int,
+) -> list[dict[str, Any]]:
+    row_type = str(row.get("type") or "")
+    timestamp = str(row.get("timestamp") or "")
+    events: list[dict[str, Any]] = []
+
+    def append(kind: str, summary: str, **extra: Any) -> None:
+        index = first_index + len(events)
+        events.append(
+            {
+                "id": f"{trace_name}:{index}",
+                "kind": kind,
+                "timestamp": timestamp,
+                "summary": summary,
+                **extra,
+            }
+        )
+
+    if row_type == "system" and row.get("subtype") == "init":
+        model = str(row.get("model") or "").strip()
+        append(
+            "session",
+            f"Claude 会话已启动{f' · {model}' if model else ''}",
+            model=model,
+        )
+        return events
+
+    if row_type == "assistant":
+        message = row.get("message") if isinstance(row.get("message"), dict) else {}
+        content = message.get("content") or []
+        if not isinstance(content, list):
+            return events
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "tool_use":
+                tool_name = str(block.get("name") or "Action").strip() or "Action"
+                tool_input = block.get("input") if isinstance(block.get("input"), dict) else {}
+                target = expo_trace_target(workspace, tool_input)
+                action_label = {"Read": "读取", "Write": "写入", "Edit": "修改"}.get(tool_name, tool_name)
+                append(
+                    "action",
+                    f"{action_label}{f' · {target}' if target else ''}",
+                    tool_name=tool_name,
+                    target=target,
+                )
+            elif block_type == "text":
+                text = re.sub(r"\s+", " ", str(block.get("text") or "")).strip()
+                if text:
+                    append("assistant", text[:500])
+        return events
+
+    if row_type == "result":
+        try:
+            turns = int(row.get("num_turns") or 0)
+        except (TypeError, ValueError):
+            turns = 0
+        try:
+            duration_seconds = round(float(row.get("duration_ms") or 0) / 1000)
+        except (TypeError, ValueError):
+            duration_seconds = 0
+        failed = bool(row.get("is_error")) or str(row.get("subtype") or "").lower() in {
+            "error",
+            "failed",
+        }
+        append(
+            "result",
+            f"Claude 会话{'失败' if failed else '完成'} · {turns} 轮 · {duration_seconds} 秒",
+            status="failed" if failed else "completed",
+        )
+    return events
+
+
+def read_expo_claude_trace(path: Path, workspace: Path) -> dict[str, Any]:
+    key = str(path.resolve())
+    try:
+        stat = path.stat()
+    except OSError:
+        return {"events": [], "event_count": 0, "status": "waiting", "updated_at": ""}
+
+    with EXPO_TRACE_CACHE_LOCK:
+        cache = EXPO_TRACE_CACHE.get(key)
+        identity = (stat.st_dev, stat.st_ino)
+        if cache is None or cache.get("identity") != identity or stat.st_size < int(cache.get("offset") or 0):
+            cache = {
+                "identity": identity,
+                "offset": 0,
+                "pending": b"",
+                "events": [],
+                "event_count": 0,
+                "status": "running",
+                "updated_at": "",
+                "last_access": time.monotonic(),
+            }
+            EXPO_TRACE_CACHE[key] = cache
+
+        with path.open("rb") as stream:
+            stream.seek(int(cache["offset"]))
+            chunk = stream.read()
+            cache["offset"] = stream.tell()
+
+        data = bytes(cache.get("pending") or b"") + chunk
+        lines = data.split(b"\n")
+        cache["pending"] = lines.pop() if lines else b""
+        for raw_line in lines:
+            if not raw_line.strip():
+                continue
+            try:
+                row = json.loads(raw_line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(row, dict):
+                continue
+            summarized = summarize_expo_claude_row(
+                row,
+                workspace,
+                path.name,
+                int(cache["event_count"]),
+            )
+            cache["event_count"] = int(cache["event_count"]) + len(summarized)
+            cache["events"].extend(summarized)
+            if summarized:
+                cache["updated_at"] = next(
+                    (event["timestamp"] for event in reversed(summarized) if event.get("timestamp")),
+                    datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                )
+            if len(cache["events"]) > EXPO_TRACE_EVENT_LIMIT:
+                cache["events"] = cache["events"][-EXPO_TRACE_EVENT_LIMIT:]
+            result = next((event for event in reversed(summarized) if event["kind"] == "result"), None)
+            if result:
+                cache["status"] = result.get("status") or "completed"
+
+        cache["last_access"] = time.monotonic()
+        if len(EXPO_TRACE_CACHE) > EXPO_TRACE_CACHE_LIMIT:
+            stale_keys = sorted(
+                EXPO_TRACE_CACHE,
+                key=lambda item: float(EXPO_TRACE_CACHE[item].get("last_access") or 0),
+            )[: len(EXPO_TRACE_CACHE) - EXPO_TRACE_CACHE_LIMIT]
+            for stale_key in stale_keys:
+                if stale_key != key:
+                    EXPO_TRACE_CACHE.pop(stale_key, None)
+
+        return {
+            "events": [dict(event) for event in cache["events"]],
+            "event_count": int(cache["event_count"]),
+            "status": str(cache["status"]),
+            "updated_at": str(cache.get("updated_at") or ""),
+        }
+
+
+def load_expo_claude_trace_groups(
+    workspace: Path,
+    state: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    trace_root = workspace / ".expo-fast"
+    if not trace_root.is_dir():
+        return []
+    traces: list[tuple[dict[str, Any], Path]] = []
+    for path in trace_root.glob("*.jsonl"):
+        descriptor = expo_trace_descriptor(path)
+        if descriptor:
+            traces.append((descriptor, path))
+    traces.sort(key=lambda item: (int(item[0]["order"]), item[1].name))
+    state_name = str((state or {}).get("state") or "").strip().lower()
+    state_started_at = str((state or {}).get("startedAt") or "")
+    groups: list[dict[str, Any]] = []
+    for index, (descriptor, path) in enumerate(traces):
+        trace = read_expo_claude_trace(path, workspace)
+        status = trace["status"]
+        if status == "running" and index < len(traces) - 1:
+            status = "completed"
+        elif status == "running" and state_name == "completed":
+            status = "completed"
+        elif status == "running" and state_name == "failed":
+            status = "failed"
+
+        events = trace["events"]
+        actual_timestamps = [event["timestamp"] for event in events if event.get("timestamp")]
+        first_timestamp = actual_timestamps[0] if actual_timestamps else state_started_at
+        last_timestamp = actual_timestamps[-1] if actual_timestamps else trace["updated_at"]
+        for event in events:
+            if not event.get("timestamp"):
+                event["timestamp"] = last_timestamp if event["kind"] == "result" else first_timestamp
+
+        groups.append(
+            {
+                **{key: value for key, value in descriptor.items() if key != "order"},
+                "trace_file": path.name,
+                "status": status,
+                "event_count": trace["event_count"],
+                "action_count": sum(event["kind"] == "action" for event in events),
+                "message_count": sum(event["kind"] == "assistant" for event in events),
+                "truncated": trace["event_count"] > len(events),
+                "updated_at": trace["updated_at"],
+                "events": events,
+            }
+        )
+    return groups
+
+
+def build_capture_command(record: RunRecord) -> list[str]:
+    capture_python = CAPTURE_PYTHON_BIN if Path(CAPTURE_PYTHON_BIN).is_file() else sys.executable
+    command = [
+        capture_python,
+        str(HDC_CAPTURE_SCRIPT_PATH),
+        "--workspace",
+        record.workspace,
+        "--run-id",
+        record.run_id,
+    ]
+    if HDC_CAPTURE_TARGET:
+        command.extend(["--target", HDC_CAPTURE_TARGET])
+    return command
+
+
+def find_latest_hap(workspace: Path, _created_at: str | None = None) -> Path | None:
+    hap_path = workspace / EXPECTED_HAP_RELATIVE_PATH
+    return hap_path if hap_path.is_file() else None
+
+
+def file_mtime(path: Path | None) -> float:
+    try:
+        return path.stat().st_mtime if path else 0.0
+    except OSError:
+        return 0.0
+
+
+def find_latest_media(run_id: str, workspace: Path, created_at: str | None = None) -> Path | None:
+    expo_launch_screenshot = workspace / ".expo-fast" / "launch-screenshot.jpeg"
+    if pick_recent_file([expo_launch_screenshot] if expo_launch_screenshot.is_file() else [], created_at):
+        return expo_launch_screenshot
+    run_dir = MEDIA_DIR / run_id
+    local_media = pick_recent_file(list_candidate_files(run_dir, ALLOWED_MEDIA_EXTENSIONS), created_at)
+    if local_media:
+        return local_media
+    return pick_recent_file(list_candidate_files(workspace, ALLOWED_MEDIA_EXTENSIONS), created_at)
+
+
+def find_first_screenshot(run_id: str) -> Path | None:
+    manifest = load_capture_manifest(run_id)
+    manifest_paths: list[Any] = []
+    if manifest:
+        manifest_paths.extend(manifest.get("unique_screenshots") or [])
+        manifest_paths.extend(manifest.get("screenshots") or [])
+
+    for item in manifest_paths:
+        path = Path(str(item))
+        if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
+            return path
+
+    screenshots_dir = MEDIA_DIR / run_id / "screenshots"
+    if screenshots_dir.is_dir():
+        screenshots = [
+            item
+            for item in sorted(screenshots_dir.iterdir(), key=lambda value: value.name)
+            if item.is_file() and item.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+        ]
+        if screenshots:
+            return screenshots[0]
+
+    return None
+
+
+def state_root(workspace: Path) -> Path:
+    return workspace / ".arkpilot" / "state"
+
+
+def ask_user_question_dir(workspace: Path) -> Path:
+    return state_root(workspace) / "ask-user-question"
+
+
+def safe_question_id(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9._-]+", "_", str(value or "unknown"))
+
+
+ASK_USER_QUESTION_TIMEOUT_SEC = int(os.environ.get("ASK_USER_WEB_HOOK_TIMEOUT_SEC", "600"))
+
+
+def ask_user_question_deadline(request: dict[str, Any]) -> datetime | None:
+    explicit = parse_iso(str(request.get("expiresAt") or ""))
+    if explicit:
+        if explicit.tzinfo is None:
+            explicit = explicit.replace(tzinfo=timezone.utc)
+        return explicit
+    created_at = parse_iso(str(request.get("createdAt") or ""))
+    if not created_at:
+        return None
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return created_at + timedelta(seconds=ASK_USER_QUESTION_TIMEOUT_SEC)
+
+
+def load_ask_user_questions(workspace: Path) -> dict[str, Any]:
+    directory = ask_user_question_dir(workspace)
+    if not directory.is_dir():
+        return {"pending": [], "answered": [], "stale": []}
+
+    pending: list[dict[str, Any]] = []
+    answered: list[dict[str, Any]] = []
+    stale: list[dict[str, Any]] = []
+    active = read_json(directory / "active.json") or {}
+    active_id = safe_question_id(str(active.get("id") or active.get("toolUseId") or ""))
+    now = datetime.now(timezone.utc)
+    try:
+        request_paths = sorted(directory.glob("request-*.json"), key=lambda item: item.stat().st_mtime)
+    except OSError:
+        return {"pending": [], "answered": [], "stale": []}
+
+    for request_path in request_paths:
+        request = read_json(request_path)
+        if not request:
+            continue
+        question_id = safe_question_id(str(request.get("id") or request.get("toolUseId") or ""))
+        if not question_id:
+            continue
+        response = read_json(directory / f"response-{question_id}.json")
+        completed = read_json(directory / f"completed-{question_id}.json")
+        deadline = ask_user_question_deadline(request)
+        is_active = question_id == active_id
+        is_expired = bool(deadline and deadline < now)
+        is_stale = not response and (is_expired or (active_id and not is_active))
+        status = "answered" if response else "stale" if is_stale else "pending"
+        item = {
+            "id": question_id,
+            "toolUseId": request.get("toolUseId") or question_id,
+            "sessionId": request.get("sessionId") or "",
+            "agentId": request.get("agentId") or "",
+            "agentType": request.get("agentType") or "",
+            "audience": request.get("audience") or "end_user",
+            "status": status,
+            "active": is_active,
+            "stale": is_stale,
+            "createdAt": request.get("createdAt"),
+            "expiresAt": request.get("expiresAt") or (deadline.isoformat() if deadline else None),
+            "answeredAt": response.get("answeredAt") if response else None,
+            "completedAt": completed.get("completedAt") if completed else None,
+            "toolInput": request.get("toolInput") or {},
+            "answers": response.get("answers") if response else {},
+            "_sortAt": request_path.stat().st_mtime,
+        }
+        if response:
+            answered.append(item)
+        elif is_stale:
+            stale.append(item)
+        else:
+            pending.append(item)
+
+    pending.sort(key=lambda item: (0 if item.get("active") else 1, -float(item.get("_sortAt") or 0)))
+    answered.sort(key=lambda item: float(item.get("_sortAt") or 0))
+    stale.sort(key=lambda item: float(item.get("_sortAt") or 0))
+    for collection in (pending, answered, stale):
+        for item in collection:
+            item.pop("_sortAt", None)
+
+    return {
+        "pending": pending[:5],
+        "answered": answered[-10:],
+        "stale": stale[-10:],
+    }
+
+
+def capture_run_dir(run_id: str) -> Path:
+    return MEDIA_DIR / run_id
+
+
+def capture_manifest_path(run_id: str) -> Path:
+    return capture_run_dir(run_id) / "capture-manifest.json"
+
+
+def load_capture_manifest(run_id: str) -> dict[str, Any] | None:
+    return read_json(capture_manifest_path(run_id))
+
+
+def effective_capture_status(
+    record: RunRecord,
+    capture_manifest: dict[str, Any] | None = None,
+) -> str:
+    manifest = capture_manifest if capture_manifest is not None else load_capture_manifest(record.run_id)
+    manifest_current = bool(
+        manifest
+        and file_mtime(capture_manifest_path(record.run_id)) >= float(record.capture_hap_mtime or 0)
+    )
+    if manifest_current and manifest and manifest.get("status"):
+        return str(manifest["status"])
+    if record.capture_status == "running" and not process_alive(record.capture_process_pid):
+        return "failed"
+    return record.capture_status
+
+
+def load_hpack_manifest(run_id: str) -> dict[str, Any] | None:
+    return _load_hpack_manifest(run_id, read_json=read_json)
+
+
+class FollowUpControlError(RuntimeError):
+    def __init__(self, message: str, *, code: str = "internal_error", details: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
+
+
+def follow_up_cli_path() -> Path:
+    """Resolve the deployment-controlled ArkPilot follow-up CLI next to tmux-runner."""
+    return TMUX_RUNNER_PATH.parent / "follow-up-control.cjs"
+
+
+def call_follow_up_control(record: RunRecord, action: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Invoke ArkPilot's stable follow-up CLI without putting user text in argv."""
+    cli_path = follow_up_cli_path()
+    if not cli_path.is_file():
+        raise FollowUpControlError("follow-up 控制器未部署", code="follow_up_unavailable")
+    command = ["node", str(cli_path), action, "--cwd", record.workspace, "--run", record.session_name]
+    payload_text = ""
+    if body is not None:
+        command.append("--json-stdin")
+        payload_text = json.dumps(body, ensure_ascii=False)
+    try:
+        result = subprocess.run(
+            command,
+            input=payload_text,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise FollowUpControlError("follow-up 控制器调用失败", code="control_unavailable") from exc
+    try:
+        response = json.loads(result.stdout.strip())
+    except json.JSONDecodeError as exc:
+        raise FollowUpControlError("follow-up 控制器返回无效响应") from exc
+    if not isinstance(response, dict):
+        raise FollowUpControlError("follow-up 控制器返回无效响应")
+    if result.returncode == 0 and response.get("ok") is True:
+        return response
+    raise FollowUpControlError(
+        str(response.get("error") or "follow-up 控制器请求失败"),
+        code=str(response.get("code") or "internal_error"),
+        details=response.get("details") if isinstance(response.get("details"), dict) else {},
+    )
+
+
+def unavailable_follow_up(message: str = "续跑会话尚未就绪") -> dict[str, Any]:
+    return {
+        "status": "unavailable",
+        "queue_length": 0,
+        "active_command_id": None,
+        "interrupt_command_id": None,
+        "last_error": message,
+        "active_command": None,
+        "interrupt_command": None,
+        "queue": [],
+    }
+
+
+def load_follow_up_status(record: RunRecord, run_state: dict[str, Any] | None) -> dict[str, Any]:
+    """Read the ArkPilot status mirror through its CLI; never write state files directly."""
+    if not isinstance(run_state, dict) or not isinstance(run_state.get("follow_up"), dict):
+        return unavailable_follow_up()
+    try:
+        response = call_follow_up_control(record, "status")
+        follow_up = response.get("follow_up")
+        return follow_up if isinstance(follow_up, dict) else unavailable_follow_up("续跑状态响应无效")
+    except FollowUpControlError as exc:
+        return unavailable_follow_up(str(exc))
+
+
+def newer_hap_available(run_id: str, workspace: Path, created_at: str | None = None) -> bool:
+    """判断是否存在比当前已签名安装包（hpack manifest）更新的 HAP。"""
+    manifest_path = hpack_manifest_path(run_id)
+    if not manifest_path.is_file():
+        return False
+    hap_path = find_latest_hap(workspace, created_at)
+    if not hap_path or not hap_path.is_file():
+        return False
+    try:
+        return hap_path.stat().st_mtime > manifest_path.stat().st_mtime + 1.0
+    except OSError:
+        return False
+
+
+def follow_up_changed_after_manifest(
+    follow_up: dict[str, Any],
+    hpack_manifest: dict[str, Any] | None,
+    latest_adjustment_at: str | None = None,
+) -> bool:
+    """Return whether a submitted adjustment is newer than the signed package."""
+    if not hpack_manifest or hpack_manifest.get("status") != "ready":
+        return False
+    packaged_at = parse_iso(str(hpack_manifest.get("created_at") or ""))
+    if not packaged_at:
+        return False
+    persisted_adjustment_at = parse_iso(str(latest_adjustment_at or ""))
+    if persisted_adjustment_at and persisted_adjustment_at > packaged_at:
+        return True
+    commands: list[dict[str, Any]] = []
+    active = follow_up.get("active_command")
+    if (
+        isinstance(active, dict)
+        and active.get("type") == "message"
+        and not active.get("interrupted_before_assistant_activity")
+    ):
+        commands.append(active)
+    for key in ("queue", "history"):
+        items = follow_up.get(key)
+        if isinstance(items, list):
+            commands.extend(
+                command
+                for command in items
+                if (
+                    isinstance(command, dict)
+                    and command.get("type") == "message"
+                    and not command.get("interrupted_before_assistant_activity")
+                )
+            )
+    for command in commands:
+        command_at = parse_iso(str(command.get("created_at") or ""))
+        if command_at and command_at > packaged_at:
+            return True
+    return False
+
+
+def newest_follow_up_message_at(follow_up: dict[str, Any]) -> str:
+    """Return the newest message timestamp from active, queue and history."""
+    commands: list[dict[str, Any]] = []
+    active = follow_up.get("active_command")
+    if (
+        isinstance(active, dict)
+        and active.get("type") == "message"
+        and not active.get("interrupted_before_assistant_activity")
+    ):
+        commands.append(active)
+    for key in ("queue", "history"):
+        items = follow_up.get(key)
+        if isinstance(items, list):
+            commands.extend(
+                command
+                for command in items
+                if (
+                    isinstance(command, dict)
+                    and command.get("type") == "message"
+                    and not command.get("interrupted_before_assistant_activity")
+                )
+            )
+    newest_text = ""
+    newest_at = None
+    for command in commands:
+        created_text = str(command.get("created_at") or "")
+        created_at = parse_iso(created_text)
+        if created_at and (newest_at is None or created_at > newest_at):
+            newest_at = created_at
+            newest_text = created_text
+    return newest_text
+
+
+def persist_latest_adjustment(
+    record: RunRecord,
+    response: dict[str, Any],
+    *,
+    replace_from_state: bool = False,
+) -> RunRecord:
+    """Persist the newest accepted message timestamp from a controller response."""
+    command = response.get("command")
+    candidate_text = (
+        str(command.get("created_at") or "")
+        if isinstance(command, dict) and command.get("type") == "message"
+        else ""
+    )
+    follow_up = response.get("follow_up")
+    state_text = newest_follow_up_message_at(follow_up) if isinstance(follow_up, dict) else ""
+    candidate_at = parse_iso(candidate_text)
+    state_at = parse_iso(state_text)
+    if state_at and (not candidate_at or state_at > candidate_at):
+        candidate_text = state_text
+        candidate_at = state_at
+    if not candidate_at and not replace_from_state:
+        candidate_text = to_iso()
+        candidate_at = parse_iso(candidate_text)
+    latest = load_run(record.run_id) or record
+    if replace_from_state:
+        latest.latest_adjustment_at = state_text
+        return save_run(latest)
+    previous_at = parse_iso(latest.latest_adjustment_at)
+    if candidate_at and (not previous_at or candidate_at > previous_at):
+        latest.latest_adjustment_at = candidate_text
+        latest = save_run(latest)
+    return latest
+
+
+def package_revision_outdated(latest_adjustment_at: str, package_source_adjustment_at: str) -> bool:
+    """Return whether code adjustments advanced after the signed build started."""
+    return bool(
+        (latest_adjustment_at or package_source_adjustment_at)
+        and latest_adjustment_at != package_source_adjustment_at
+    )
+
+
+def package_qa_gate_ready(package_outdated: bool, qa_status: str) -> bool:
+    """Only the automatic first package waits for QA; follow-up packages skip it."""
+    return package_outdated or qa_status in {"complete", "disabled"}
+
+
+HPACK_PACKAGE_LOCK = threading.Lock()
+HPACK_PACKAGE_IN_FLIGHT: set[str] = set()
+
+
+def start_hpack_packaging(
+    record: RunRecord,
+    *,
+    replace_manifest: bool = False,
+) -> bool:
+    """Start one HPack build for the latest stable workspace state."""
+    if not HPACK_ENABLED:
+        return False
+    if not find_latest_hap(Path(record.workspace), record.created_at):
+        return False
+    with HPACK_PACKAGE_LOCK:
+        latest = load_run(record.run_id) or record
+        if latest.run_id in HPACK_PACKAGE_IN_FLIGHT or process_alive(latest.distribution_process_pid):
+            return False
+        manifest_path = hpack_manifest_path(latest.run_id)
+        if manifest_path.is_file():
+            if not replace_manifest:
+                return False
+            try:
+                manifest_path.unlink()
+            except OSError:
+                return False
+        latest.distribution_status = "waiting_hap"
+        latest.distribution_process_pid = None
+        latest.distribution_command = []
+        latest.package_source_adjustment_at = latest.latest_adjustment_at
+        latest.notes = "正在编译、签名并生成安装二维码。"
+        record = save_run(latest)
+        HPACK_PACKAGE_IN_FLIGHT.add(record.run_id)
+
+    def run() -> None:
+        try:
+            wait_for_hap_and_package(record)
+        finally:
+            with HPACK_PACKAGE_LOCK:
+                HPACK_PACKAGE_IN_FLIGHT.discard(record.run_id)
+
+    threading.Thread(target=run, daemon=True).start()
+    return True
+
+
+INITIAL_PACKAGE_MONITOR_LOCK = threading.Lock()
+INITIAL_PACKAGE_MONITORS_IN_FLIGHT: set[str] = set()
+
+
+def wait_for_initial_package(record: RunRecord) -> None:
+    """Wait for QA and preview to settle, then sign the first version once."""
+    started_at = time.monotonic()
+    while time.monotonic() - started_at < HPACK_WAIT_TIMEOUT_SEC:
+        latest = load_run(record.run_id)
+        if not latest or latest.first_install_url:
+            return
+        workspace = Path(latest.workspace)
+        hap_path = find_latest_hap(workspace, latest.created_at)
+        qa_status = load_ui_qa_status(workspace, latest.session_name)
+        capture_settled = latest.capture_status in {"complete", "failed"}
+        if hap_path and qa_status in {"complete", "disabled"} and capture_settled:
+            start_hpack_packaging(latest)
+            return
+        if qa_status in {"failed", "error", "cancelled", "canceled"}:
+            return
+        time.sleep(CAPTURE_POLL_INTERVAL_SEC)
+
+
+def start_initial_package_monitor(record: RunRecord) -> bool:
+    """Start exactly one automatic first-version signing monitor per run."""
+    if not HPACK_ENABLED or record.first_install_url:
+        return False
+    with INITIAL_PACKAGE_MONITOR_LOCK:
+        if record.run_id in INITIAL_PACKAGE_MONITORS_IN_FLIGHT:
+            return False
+        INITIAL_PACKAGE_MONITORS_IN_FLIGHT.add(record.run_id)
+
+    def run() -> None:
+        try:
+            wait_for_initial_package(record)
+        finally:
+            with INITIAL_PACKAGE_MONITOR_LOCK:
+                INITIAL_PACKAGE_MONITORS_IN_FLIGHT.discard(record.run_id)
+
+    threading.Thread(target=run, daemon=True).start()
+    return True
+
+
+def process_alive(pid: int | None) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def maybe_release_signing_slot(record: RunRecord) -> None:
+    _maybe_release_signing_slot(
+        record,
+        process_alive=process_alive,
+        load_hpack_manifest=load_hpack_manifest,
+        save_run=save_run,
+    )
+
+
+def wait_for_hap_and_package(record: RunRecord) -> None:
+    _wait_for_hap_and_package(
+        record,
+        find_latest_hap=find_latest_hap,
+        load_ui_qa_status=load_ui_qa_status,
+        load_run=load_run,
+        save_run=save_run,
+        maybe_release_signing_slot=maybe_release_signing_slot,
+        read_json=read_json,
+    )
+
+
+def load_tmux_run_state(workspace: Path, session_name: str) -> dict[str, Any] | None:
+    tmux_runs_dir = state_root(workspace) / "tmux-runs"
+    run_state = read_json(tmux_runs_dir / f"{session_name}.json")
+    if run_state is not None:
+        return run_state
+
+    normalized_name = normalize_tmux_session_name(session_name)
+    if normalized_name and normalized_name != session_name:
+        return read_json(tmux_runs_dir / f"{normalized_name}.json")
+    return None
+
+
+def ui_qa_status(run_state: dict[str, Any] | None) -> str:
+    """Return the tmux runner's UI QA state used to gate HPack signing."""
+    if not run_state:
+        return "waiting"
+    ui_qa = run_state.get("ui_qa")
+    if not isinstance(ui_qa, dict):
+        return "waiting"
+    if ui_qa.get("enabled") is False:
+        return "disabled"
+    return str(ui_qa.get("status") or "waiting").strip().lower()
+
+
+def load_ui_qa_status(workspace: Path, session_name: str) -> str:
+    return ui_qa_status(load_tmux_run_state(workspace, session_name))
+
+
+def load_autopilot_state(workspace: Path, session_id: str | None) -> dict[str, Any] | None:
+    if not session_id:
+        return None
+    return read_json(state_root(workspace) / "sessions" / session_id / "autopilot-state.json")
+
+
+def load_compact_diagnostics(workspace: Path, session_id: str | None) -> dict[str, Any] | None:
+    if not session_id:
+        return None
+    return read_json(state_root(workspace) / "sessions" / session_id / "compact-diagnostics.json")
+
+
+def current_lane(run_state: dict[str, Any] | None) -> dict[str, Any]:
+    if not run_state:
+        return {}
+    lanes = run_state.get("lanes") or {}
+    lane = lanes.get(run_state.get("active_lane"))
+    return lane if isinstance(lane, dict) else {}
+
+
+def summarize_capture_events(capture_manifest: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not capture_manifest:
+        return []
+    items = [
+        {
+            "kind": "capture",
+            "timestamp": capture_manifest.get("started_at"),
+            "summary": "开始采集应用演示并生成预览渲染。",
+        }
+    ]
+    screenshots = capture_manifest.get("screenshots") or []
+    if capture_manifest.get("status") == "complete":
+        items.append(
+            {
+                "kind": "capture",
+                "timestamp": capture_manifest.get("completed_at"),
+                "summary": f"预览渲染已生成，共采集 {len(screenshots)} 张截图。",
+            }
+        )
+    elif capture_manifest.get("status") == "failed":
+        items.append(
+            {
+                "kind": "capture",
+                "timestamp": capture_manifest.get("completed_at"),
+                "summary": f"预览渲染生成失败: {capture_manifest.get('error') or '未知错误'}",
+            }
+        )
+    return items
+
+
+def monitor_tmux_process(record: RunRecord, process: subprocess.Popen[Any], log_path: Path) -> None:
+    exit_code = process.wait()
+    for _ in range(3):
+        if load_tmux_run_state(Path(record.workspace), record.session_name):
+            return
+        time.sleep(0.5)
+
+    latest = load_run(record.run_id)
+    if not latest or latest.status not in {"queued", "running"}:
+        return
+    latest.status = "failed"
+    latest.notes = (
+        f"tmux-runner 已退出，但没有生成状态文件。exit_code={exit_code}, log={log_path}"
+    )
+    save_run(latest)
+    maybe_release_signing_slot(latest)
+
+
+CAPTURE_MONITOR_LOCK = threading.Lock()
+CAPTURE_MONITORS_IN_FLIGHT: set[str] = set()
+
+
+def media_matches_capture_hap(record: RunRecord, workspace: Path) -> bool:
+    media_path = find_latest_media(record.run_id, workspace, record.created_at)
+    return bool(media_path and file_mtime(media_path) >= record.capture_hap_mtime)
+
+
+def wait_for_hap_and_capture(record: RunRecord) -> None:
+    workspace = Path(record.workspace)
+    if not HDC_CAPTURE_SCRIPT_PATH.exists():
+        latest = load_run(record.run_id)
+        if latest:
+            latest.capture_status = "failed"
+            latest.notes = f"hdc_runtime_capture.py 不存在: {HDC_CAPTURE_SCRIPT_PATH}"
+            save_run(latest)
+        return
+
+    started_at = time.monotonic()
+    while time.monotonic() - started_at < CAPTURE_WAIT_TIMEOUT_SEC:
+        latest = load_run(record.run_id)
+        if not latest:
+            return
+        if media_matches_capture_hap(latest, workspace):
+            latest.capture_status = "complete"
+            save_run(latest)
+            return
+        if latest.capture_status in {"running", "complete"}:
+            return
+        hap_path = find_latest_hap(workspace, latest.created_at)
+        if hap_path:
+            latest.capture_hap_mtime = file_mtime(hap_path)
+            command = build_capture_command(latest)
+            latest.capture_status = "running"
+            latest.capture_command = command
+            save_run(latest)
+            log_path = LOG_DIR / f"{latest.run_id}.capture.log"
+            log_stream = None
+            try:
+                log_stream = log_path.open("ab")
+                log_stream.write(f"$ {' '.join(command)}\n".encode("utf-8", errors="ignore"))
+                log_stream.flush()
+                process = subprocess.Popen(
+                    command,
+                    cwd=str(APP_ROOT),
+                    stdout=log_stream,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                latest.capture_process_pid = process.pid
+                latest.notes = f"已检测到 HAP，开始生成预览渲染。日志: {log_path}"
+                save_run(latest)
+                exit_code = process.wait()
+            except OSError as exc:
+                latest = load_run(record.run_id) or latest
+                latest.capture_status = "failed"
+                latest.capture_process_pid = None
+                latest.notes = f"启动演示采集失败: {exc}"
+                save_run(latest)
+                return
+            finally:
+                if log_stream is not None and not log_stream.closed:
+                    log_stream.close()
+
+            latest = load_run(record.run_id) or latest
+            latest.capture_process_pid = None
+            # 采集脚本可能会自行重建 HAP。把最终 mtime 记录为本轮采集基线，
+            # 避免将采集自身产生的包误判为“调整后的新版本”并再次触发采集。
+            final_hap = find_latest_hap(workspace, latest.created_at)
+            latest.capture_hap_mtime = max(
+                latest.capture_hap_mtime,
+                file_mtime(final_hap),
+            )
+            capture_manifest = load_capture_manifest(latest.run_id)
+            if exit_code == 0 and capture_manifest and capture_manifest.get("status") == "complete":
+                latest.capture_status = "complete"
+                latest.notes = (
+                    f"预览渲染已生成: "
+                    f"{capture_manifest.get('video_path') or capture_manifest.get('media_path') or capture_run_dir(latest.run_id) / 'demo.mp4'}"
+                )
+            else:
+                latest.capture_status = "failed"
+                latest.notes = f"预览渲染生成失败: {capture_manifest.get('error') if capture_manifest else f'exit_code={exit_code}'}"
+            save_run(latest)
+            return
+        time.sleep(CAPTURE_POLL_INTERVAL_SEC)
+
+    latest = load_run(record.run_id)
+    if latest and latest.capture_status not in {"complete", "failed"}:
+        latest.capture_status = "failed"
+        latest.notes = f"等待 HAP 超时，未启动演示采集。超时 {int(CAPTURE_WAIT_TIMEOUT_SEC)} 秒。"
+        save_run(latest)
+
+
+def run_capture_monitor(record: RunRecord) -> None:
+    try:
+        wait_for_hap_and_capture(record)
+    finally:
+        with CAPTURE_MONITOR_LOCK:
+            CAPTURE_MONITORS_IN_FLIGHT.discard(record.run_id)
+
+
+def maybe_start_capture_monitor(record: RunRecord, hap_path: Path | None = None) -> bool:
+    """Start one capture monitor per run; restart only when a newer HAP is present."""
+    latest = load_run(record.run_id) or record
+    current_hap = hap_path or find_latest_hap(Path(latest.workspace), latest.created_at)
+    current_mtime = file_mtime(current_hap)
+    if current_mtime and current_mtime <= latest.capture_hap_mtime + 0.01:
+        return False
+    with CAPTURE_MONITOR_LOCK:
+        if latest.run_id in CAPTURE_MONITORS_IN_FLIGHT or process_alive(latest.capture_process_pid):
+            return False
+        if current_mtime:
+            latest.capture_hap_mtime = current_mtime
+            latest.capture_status = "waiting_hap"
+            latest.capture_process_pid = None
+            latest.capture_command = []
+            latest.notes = "检测到新 HAP，正在刷新预览截图。"
+            latest = save_run(latest)
+        CAPTURE_MONITORS_IN_FLIGHT.add(latest.run_id)
+    threading.Thread(target=run_capture_monitor, args=(latest,), daemon=True).start()
+    return True
+
+
+def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
+    workspace = Path(record.workspace)
+    expo_state = load_expo_fast_state(workspace)
+    run_status = expo_fast_run_status(record, expo_state)
+    if run_status == "completed":
+        record = mark_expo_package_placeholder(record)
+
+    launch_screenshot = workspace / ".expo-fast" / "launch-screenshot.jpeg"
+    media_path = launch_screenshot if launch_screenshot.is_file() else None
+    package_status = record.expo_package_status or (
+        "not_implemented" if run_status == "completed" else "waiting_generation"
+    )
+    state_name = str((expo_state or {}).get("state") or "").strip().lower()
+    detail = str((expo_state or {}).get("detail") or "").strip().lower()
+    detail_label = str((expo_state or {}).get("detailLabel") or "").strip()
+    trace_groups = load_expo_claude_trace_groups(workspace, expo_state)
+    serve_state = EXPO_PUBLIC_GATEWAY.describe(
+        record.run_id,
+        can_publish=run_status == "completed",
+    )
+    events = [
+        {
+            "kind": "run",
+            "timestamp": record.created_at,
+            "summary": f"已提交 Expo 任务并启动后端会话: {record.session_name}",
+        },
+        *summarize_expo_fast_events(expo_state),
+    ]
+    if package_status == "not_implemented":
+        events.append(
+            {
+                "kind": "package",
+                "timestamp": record.expo_package_updated_at or (expo_state or {}).get("updatedAt"),
+                "summary": "生成流程已结束，等待打包实现。",
+            }
+        )
+
+    waiting_message = {
+        "preparing": "正在准备 Expo 工程与能力索引…",
+        "model_generation": "Expo Runtime 正在生成应用代码…",
+        "verification": "正在验证 Expo 生成结果…",
+        "model_repair": "正在修复 Expo 应用…",
+        "repair_verification": "正在验证修复结果…",
+        "launching": "正在 Harmony Go 中启动并检查应用…",
+        "done": "Expo 生成已完成，等待打包实现。",
+        "error": "Expo 生成失败，请查看左侧状态。",
+    }.get(detail, detail_label or "Expo Runtime 正在启动…")
+
+    empty_follow_up = {
+        "status": "unavailable",
+        "queue_length": 0,
+        "queue": [],
+        "history": [],
+        "last_error": "Expo Runtime 暂不支持续跑调整。",
+    }
+    distribution_status = "not_implemented" if package_status == "not_implemented" else "waiting_generation"
+    return {
+        "run": asdict(record),
+        "runtime": "expo",
+        "workspace": {
+            "path": str(workspace),
+            "configured": workspace.is_dir(),
+        },
+        "tmux": {
+            "session_name": record.session_name,
+            "state": None,
+            "active_lane": None,
+        },
+        "expo": {
+            "state": expo_state,
+            "trace_groups": trace_groups,
+            "package": {
+                "status": package_status,
+                "label": "等待打包实现" if package_status == "not_implemented" else "等待生成完成",
+                "updated_at": record.expo_package_updated_at,
+            },
+            "serve": serve_state,
+        },
+        "autopilot": None,
+        "compact": None,
+        "capture": {
+            "status": "complete" if media_path else "waiting_launch",
+            "process_pid": None,
+            "command": [],
+            "manifest": None,
+        },
+        "distribution": {
+            "enabled": False,
+            "status": distribution_status,
+            "process_pid": None,
+            "command": [],
+            "manifest": None,
+        },
+        "signing": {
+            "pool_enabled": False,
+            "slot_id": "",
+            "bundle_name": "",
+            "leased_at": "",
+            "released_at": "",
+            "lease": None,
+        },
+        "status": run_status,
+        "stage": detail or state_name or "waiting",
+        "events": events[-20:],
+        "questions": {"pending": [], "answered": [], "stale": []},
+        "artifacts": {
+            "hap_found": False,
+            "hap_path": "",
+            "hap_display_path": "",
+            "hap_download_path": "",
+            "hap_qr_path": "",
+            "install_ready": False,
+            "install_url": "",
+            "install_store_url": "",
+            "manifest_url": "",
+            "install_qr_path": "",
+            "first_install_ready": False,
+            "first_install_url": "",
+            "first_install_store_url": "",
+            "first_manifest_url": "",
+            "first_install_qr_path": "",
+            "signed_hap_path": "",
+            "signed_hap_url": "",
+            "distribution_status": distribution_status,
+            "distribution_error": str((expo_state or {}).get("error") or "") if run_status == "failed" else "",
+            "package_can_start": False,
+            "package_current": False,
+            "package_outdated": False,
+            "media_ready": bool(media_path),
+            "media_path": f"/api/runs/{record.run_id}/media" if media_path else "",
+            "media_source_path": str(media_path) if media_path else "",
+            "media_type": media_path.suffix.lower().lstrip(".") if media_path else "",
+            "live_ready": False,
+            "live_frame_path": "",
+            "live_input_path": "",
+            "live_webrtc_config_path": "",
+            "newer_hap_available": False,
+        },
+        "follow_up": empty_follow_up,
+        "follow_up_trace": [],
+        "ui": {
+            "poll_interval_ms": 1000,
+            "waiting_message": waiting_message,
+        },
+    }
+
+
+def build_progress_payload(record: RunRecord) -> dict[str, Any]:
+    if record.runtime == "expo":
+        return build_expo_progress_payload(record)
+    workspace = Path(record.workspace)
+    # 服务重启后也能恢复尚未完成的首版本自动签名监视。
+    if not record.first_install_url:
+        start_initial_package_monitor(record)
+    run_state = load_tmux_run_state(workspace, record.session_name)
+    lane = current_lane(run_state)
+    session_id = None
+    if run_state:
+        session_id = lane.get("claude_session_id") or run_state.get("claude_session_id")
+    autopilot_state = load_autopilot_state(workspace, session_id)
+    compact_diagnostics = load_compact_diagnostics(workspace, session_id)
+    capture_manifest = load_capture_manifest(record.run_id)
+    hpack_manifest = load_hpack_manifest(record.run_id)
+    questions = load_ask_user_questions(workspace)
+
+    transcript_path = None
+    if run_state:
+        transcript_str = lane.get("transcript_path") or run_state.get("transcript_path")
+        if transcript_str:
+            transcript_path = Path(transcript_str)
+
+    events = [
+        {
+            "kind": "run",
+            "timestamp": record.created_at,
+            "summary": f"已提交任务并启动后端会话: {record.session_name}",
+        }
+    ]
+    if run_state:
+        events.append(
+            {
+                "kind": "status",
+                "timestamp": run_state.get("updated_at"),
+                "summary": (
+                    f"当前 lane: {run_state.get('active_lane') or 'planning'}，"
+                    f"阶段: {run_state.get('current_stage') or lane.get('current_stage') or 'unknown'}，"
+                    f"状态: {run_state.get('status') or 'active'}"
+                ),
+            }
+        )
+    if autopilot_state:
+        events.extend(summarize_stage_history(autopilot_state.get("stage_history") or []))
+    events.extend(summarize_compact_events(compact_diagnostics))
+    events.extend(summarize_capture_events(capture_manifest))
+    events.extend(summarize_hpack_events(hpack_manifest))
+    for item in questions.get("pending", []):
+        tool_input = item.get("toolInput") if isinstance(item, dict) else {}
+        question_count = len(tool_input.get("questions") or []) if isinstance(tool_input, dict) else 0
+        events.append(
+            {
+                "kind": "question",
+                "timestamp": item.get("createdAt"),
+                "summary": f"等待用户回答 {question_count or 1} 个问题。",
+            }
+        )
+    if transcript_path:
+        events.extend(extract_recent_transcript_events(transcript_path))
+
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[Any, Any, Any]] = set()
+    for item in sorted(events, key=lambda value: value.get("timestamp") or ""):
+        key = (item.get("kind"), item.get("timestamp"), item.get("summary"))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+
+    # Runtime capture produces preview media. The tmux runner's UI QA state is
+    # the source of truth for the HPack signing gate.
+    capture_status = effective_capture_status(record, capture_manifest)
+
+    hap_path = find_latest_hap(workspace, record.created_at)
+    # Follow-up may rebuild the HAP after the original capture completed or failed.
+    # A newer HAP starts a fresh capture monitor and therefore refreshes the device preview.
+    if hap_path:
+        maybe_start_capture_monitor(record, hap_path)
+        record = load_run(record.run_id) or record
+    media_path = find_latest_media(record.run_id, workspace, record.created_at)
+    if media_path and file_mtime(media_path) < record.capture_hap_mtime:
+        media_path = None
+
+    run_status = record.status
+    if run_state and run_state.get("status"):
+        run_status = str(run_state.get("status"))
+    elif record.status == "running" and not process_alive(record.process_pid):
+        run_status = "failed"
+
+    # ArkPilot owns follow-up 的 FIFO、空闲确认和中断恢复。Remote UI 只读取 CLI 状态镜像。
+    follow_up_private = load_follow_up_status(record, run_state)
+    follow_up_trace = load_follow_up_trace(follow_up_private)
+    follow_up = redact_follow_up_transcript_path(follow_up_private)
+
+    manifest_ready = bool(hpack_manifest and hpack_manifest.get("status") == "ready")
+    newer_hap = newer_hap_available(record.run_id, workspace, record.created_at)
+    follow_up_changed = follow_up_changed_after_manifest(
+        follow_up_private,
+        hpack_manifest,
+        record.latest_adjustment_at,
+    )
+    # 预览采集和 HPack 都可能为同一份源码重建 unsigned HAP，mtime 变化本身
+    # 不能说明二维码已过期。只有签名之后确实提交过续跑调整，才将安装包标旧。
+    package_outdated = bool(
+        manifest_ready
+        and (
+            follow_up_changed
+            or package_revision_outdated(
+                record.latest_adjustment_at,
+                record.package_source_adjustment_at,
+            )
+        )
+    )
+    package_tracked = record.run_id in HPACK_PACKAGE_IN_FLIGHT
+    package_process_alive = process_alive(record.distribution_process_pid)
+    package_in_flight = bool(
+        package_tracked or package_process_alive
+    )
+    install_ready = manifest_ready and not package_outdated and not package_in_flight
+    qa_status = load_ui_qa_status(workspace, record.session_name)
+    qa_gate_ready = package_qa_gate_ready(package_outdated, qa_status)
+    follow_up_busy = str(follow_up.get("status") or "") in {"starting", "running", "interrupting"}
+    preview_ready = bool(media_path)
+    latest_unsigned_ready = bool(hap_path and (not manifest_ready or newer_hap))
+    package_can_start = bool(
+        HPACK_ENABLED
+        and latest_unsigned_ready
+        and qa_gate_ready
+        and preview_ready
+        and not follow_up_busy
+        and not package_in_flight
+        and not install_ready
+    )
+
+    if not HPACK_ENABLED:
+        distribution_status = "disabled"
+    elif package_in_flight:
+        distribution_status = "packaging"
+    elif install_ready:
+        distribution_status = "ready"
+    elif record.distribution_status in {"failed", "packaging"} or (
+        hpack_manifest and hpack_manifest.get("status") == "failed"
+    ):
+        distribution_status = "failed"
+    elif package_outdated and not newer_hap:
+        distribution_status = "waiting_update"
+    elif hap_path and qa_gate_ready and preview_ready:
+        distribution_status = "ready_to_package"
+    elif hap_path and qa_gate_ready:
+        distribution_status = "waiting_preview"
+    else:
+        distribution_status = "waiting_hap"
+
+    # 首版本二维码：首次签名成功时持久化 install 信息，之后不再覆盖
+    if manifest_ready and not record.first_install_url:
+        first_url = str(hpack_manifest.get("install_url") or "")
+        if first_url:
+            record.first_install_url = first_url
+            record.first_manifest_url = str(hpack_manifest.get("manifest_url") or "")
+            record.first_install_store_url = (
+                str(hpack_manifest.get("install_store_url") or "")
+                or build_install_store_url(record.first_manifest_url)
+            )
+            record.first_ready_at = to_iso()
+            record = save_run(record)
+
+    stage = None
+    if autopilot_state:
+        pipeline = autopilot_state.get("pipeline") or {}
+        index = pipeline.get("currentStageIndex")
+        stages = pipeline.get("stages") or []
+        if isinstance(index, int) and 0 <= index < len(stages):
+            stage = stages[index].get("id")
+    if run_state and not stage:
+        stage = run_state.get("current_stage")
+
+    return {
+        "run": asdict(record),
+        "workspace": {
+            "path": str(workspace),
+            "configured": workspace.is_dir(),
+        },
+        "tmux": {
+            "session_name": record.session_name,
+            "state": run_state,
+            "active_lane": lane,
+        },
+        "autopilot": autopilot_state,
+        "compact": compact_diagnostics,
+        "capture": {
+            "status": capture_status,
+            "process_pid": record.capture_process_pid,
+            "command": record.capture_command,
+            "manifest": capture_manifest,
+        },
+        "distribution": {
+            "enabled": HPACK_ENABLED,
+            "status": distribution_status,
+            "process_pid": record.distribution_process_pid,
+            "command": record.distribution_command,
+            "manifest": hpack_manifest,
+        },
+        "signing": build_signing_payload(record),
+        "status": run_status,
+        "stage": stage or "waiting",
+        "events": deduped[-20:],
+        "questions": questions,
+        "artifacts": {
+            "hap_found": bool(hap_path),
+            "hap_path": str(hap_path) if hap_path else "",
+            "hap_display_path": relative_to_root(hap_path, workspace) if hap_path else "",
+            "hap_download_path": f"/api/runs/{record.run_id}/hap" if hap_path else "",
+            "hap_qr_path": f"/api/runs/{record.run_id}/hap-qr" if hap_path else "",
+            "install_ready": install_ready,
+            "install_url": str(hpack_manifest.get("install_url") or "") if hpack_manifest else "",
+            "install_store_url": str(hpack_manifest.get("install_store_url") or "")
+            if hpack_manifest and hpack_manifest.get("manifest_url")
+            else build_install_store_url(str(hpack_manifest.get("manifest_url") or ""))
+            if hpack_manifest
+            else "",
+            "manifest_url": str(hpack_manifest.get("manifest_url") or "") if hpack_manifest else "",
+            "install_qr_path": f"/api/runs/{record.run_id}/install-qr"
+            if install_ready
+            else "",
+            "first_install_ready": bool(record.first_install_url),
+            "first_install_url": record.first_install_url,
+            "first_install_store_url": record.first_install_store_url,
+            "first_manifest_url": record.first_manifest_url,
+            "first_install_qr_path": f"/api/runs/{record.run_id}/install-qr?version=first"
+            if record.first_install_url
+            else "",
+            "signed_hap_path": str(hpack_manifest.get("signed_hap_path") or "") if hpack_manifest else "",
+            "signed_hap_url": str(hpack_manifest.get("signed_hap_url") or "") if hpack_manifest else "",
+            "distribution_status": distribution_status,
+            "distribution_error": str(hpack_manifest.get("error") or "") if hpack_manifest else "",
+            "package_can_start": package_can_start,
+            "package_current": install_ready,
+            "package_outdated": package_outdated,
+            "media_ready": bool(media_path),
+            "media_path": f"/api/runs/{record.run_id}/media" if media_path else "",
+            "media_source_path": str(media_path) if media_path else "",
+            "media_type": media_path.suffix.lower().lstrip(".") if media_path else "",
+            "live_ready": capture_status == "complete",
+            "live_frame_path": f"/api/runs/{record.run_id}/live/frame" if capture_status == "complete" else "",
+            "live_input_path": f"/api/runs/{record.run_id}/live/input" if capture_status == "complete" else "",
+            "live_webrtc_config_path": f"/api/runs/{record.run_id}/live/webrtc/config"
+            if capture_status == "complete" and WEBRTC_PREVIEW is not None
+            else "",
+            "newer_hap_available": newer_hap,
+        },
+        "follow_up": follow_up,
+        "follow_up_trace": follow_up_trace,
+        "ui": {
+            "poll_interval_ms": DEFAULT_POLL_INTERVAL_MS,
+            "waiting_message": (
+                "已检测到 HAP，正在安装应用并生成预览渲染。"
+                if capture_status == "running"
+                else f"预览渲染生成失败：{capture_manifest.get('error') or '请查看日志'}"
+                if capture_status == "failed" and capture_manifest
+                else "Building"
+                if not media_path
+                else "已检测到演示媒体，右侧已切换为真实效果。"
+            ),
+        },
+    }
+
+
+def run_tmux_in_background(record: RunRecord) -> None:
+    workspace = Path(record.workspace)
+    if not TMUX_RUNNER_PATH.exists():
+        record.status = "failed"
+        record.notes = f"tmux-runner 不存在: {TMUX_RUNNER_PATH}"
+        release_signing_slot_for_record(record)
+        save_run(record)
+        return
+    if not workspace.is_dir():
+        record.status = "failed"
+        record.notes = f"目标工作目录不存在或不是文件夹: {workspace}"
+        release_signing_slot_for_record(record)
+        save_run(record)
+        return
+
+    command = build_tmux_command(record)
+    record.command = command
+    log_path = LOG_DIR / f"{record.run_id}.log"
+    log_stream = None
+    try:
+        log_stream = log_path.open("ab")
+        log_stream.write(f"$ {' '.join(command)}\n".encode("utf-8", errors="ignore"))
+        log_stream.flush()
+        process = subprocess.Popen(
+            command,
+            cwd=str(APP_ROOT),
+            stdout=log_stream,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            env=build_tmux_env(record),
+        )
+        log_stream.close()
+    except OSError as exc:
+        if log_stream is not None and not log_stream.closed:
+            log_stream.close()
+        record.status = "failed"
+        record.notes = f"启动失败: {exc}"
+        release_signing_slot_for_record(record)
+        save_run(record)
+        return
+
+    record.status = "running"
+    record.process_pid = process.pid
+    record.notes = f"tmux-runner 已启动，日志: {log_path}"
+    save_run(record)
+    threading.Thread(target=monitor_tmux_process, args=(record, process, log_path), daemon=True).start()
+
+
+def monitor_expo_fast_run(record: RunRecord, launcher: subprocess.Popen[Any], log_path: Path) -> None:
+    exit_code = launcher.wait()
+    latest = load_run(record.run_id) or record
+    latest.process_pid = None
+    state = load_expo_fast_state(Path(latest.workspace))
+    if exit_code != 0 and not state:
+        latest.status = "failed"
+        latest.notes = f"Expo 启动器退出且未生成状态文件。exit_code={exit_code}, log={log_path}"
+        save_run(latest)
+        return
+    save_run(latest)
+
+    while True:
+        latest = load_run(record.run_id)
+        if not latest:
+            return
+        state = load_expo_fast_state(Path(latest.workspace))
+        status = expo_fast_run_status(latest, state)
+        if status == "completed":
+            latest.status = "completed"
+            latest = save_run(latest)
+            mark_expo_package_placeholder(latest)
+            return
+        if status == "failed":
+            latest.status = "failed"
+            error = str((state or {}).get("error") or "").strip()
+            latest.notes = error[:1000] or f"Expo Runtime 执行失败，日志: {log_path}"
+            save_run(latest)
+            return
+        if latest.status != "running":
+            latest.status = "running"
+            save_run(latest)
+        time.sleep(1)
+
+
+def run_expo_fast_in_background(record: RunRecord) -> None:
+    workspace = Path(record.workspace)
+    command = build_expo_fast_command(record)
+    if EXPO_FAST_LAUNCHER is None or not EXPO_FAST_LAUNCHER.is_file():
+        record.status = "failed"
+        record.notes = f"Expo Fast 启动器不存在: {EXPO_FAST_LAUNCHER or '<未配置>'}"
+        save_run(record)
+        return
+    if not workspace.is_dir():
+        record.status = "failed"
+        record.notes = f"Expo 目标工作目录不存在或不是文件夹: {workspace}"
+        save_run(record)
+        return
+    if not record.prompt_file or not Path(record.prompt_file).is_file():
+        record.status = "failed"
+        record.notes = f"Expo Prompt 文件不存在: {record.prompt_file or '<未配置>'}"
+        save_run(record)
+        return
+
+    record.command = command
+    log_path = LOG_DIR / f"{record.run_id}.expo-fast.log"
+    log_stream = None
+    try:
+        log_stream = log_path.open("ab")
+        log_stream.write(f"$ {' '.join(command)}\n".encode("utf-8", errors="ignore"))
+        log_stream.flush()
+        env = os.environ.copy()
+        if EXPO_FAST_ENV_FILE is not None:
+            env["EXPO_FAST_ENV_FILE"] = str(EXPO_FAST_ENV_FILE)
+        process = subprocess.Popen(
+            command,
+            cwd=str(EXPO_FAST_ROOT or APP_ROOT),
+            stdout=log_stream,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            env=env,
+        )
+        log_stream.close()
+    except OSError as exc:
+        if log_stream is not None and not log_stream.closed:
+            log_stream.close()
+        record.status = "failed"
+        record.notes = f"Expo Runtime 启动失败: {exc}"
+        save_run(record)
+        return
+
+    record.status = "running"
+    record.process_pid = process.pid
+    record.notes = f"Expo Runtime 已启动，日志: {log_path}"
+    save_run(record)
+    threading.Thread(
+        target=monitor_expo_fast_run,
+        args=(record, process, log_path),
+        daemon=True,
+    ).start()
+
+
+def lookup_context_value(context: dict[str, Any], key: str) -> Any:
+    current: Any = context
+    for part in key.split("."):
+        if isinstance(current, dict):
+            current = current.get(part, "")
+        else:
+            current = getattr(current, part, "")
+    return current
+
+
+def render_template(template_name: str, context: dict[str, Any]) -> str:
+    template_path = APP_ROOT / "templates" / template_name
+    content = read_text(template_path)
+
+    def replace(match: re.Match[str]) -> str:
+        key = match.group(1).strip()
+        value = lookup_context_value(context, key)
+        return html.escape(str(value), quote=True)
+
+    return re.sub(r"\{\{\s*([^}]+?)\s*\}\}", replace, content)
+
+
+class RemoteUIHandler(BaseHTTPRequestHandler):
+    server_version = "HarmonyPilotRemoteUI/0.1"
+
+    def do_HEAD(self) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path == "/":
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            return
+        if path.startswith("/static/"):
+            return self.handle_static(path, head_only=True)
+        if path.startswith("/hpack/"):
+            return self.handle_hpack_static(path, head_only=True)
+        if path.startswith("/install/"):
+            return self.handle_install_static(path, head_only=True)
+        if path == "/api/health":
+            payload = json.dumps({"ok": True}, ensure_ascii=False).encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            return
+        if re.fullmatch(r"/runs/[a-f0-9]+", path):
+            if not self.load_accessible_run(path.rsplit("/", 1)[-1]):
+                return
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            return
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/media", path):
+            return self.handle_get_media(path.split("/")[-2], head_only=True)
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/thumbnail", path):
+            return self.handle_get_thumbnail(path.split("/")[-2], head_only=True)
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/hap", path):
+            return self.handle_get_hap(path.split("/")[-2], head_only=True)
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/(hap-qr|install-qr)", path):
+            if not self.load_accessible_run(path.split("/")[-2]):
+                return
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/png")
+            self.end_headers()
+            return
+        self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path == "/":
+            return self.handle_home()
+        if path.startswith("/static/"):
+            return self.handle_static(path)
+        if path.startswith("/hpack/"):
+            return self.handle_hpack_static(path)
+        if path.startswith("/install/"):
+            return self.handle_install_static(path)
+        if path == "/api/health":
+            return self.send_json(
+                {
+                    "ok": True,
+                    "tmux_runner_exists": TMUX_RUNNER_PATH.exists(),
+                    "capture_script_exists": HDC_CAPTURE_SCRIPT_PATH.exists(),
+                    "hpack_enabled": HPACK_ENABLED,
+                    "hpack_packager_exists": HPACK_PACKAGER_SCRIPT_PATH.exists(),
+                    "workspace_exists": TARGET_WORKSPACE.exists(),
+                    "workspace_is_dir": TARGET_WORKSPACE.is_dir(),
+                    "workspace": str(TARGET_WORKSPACE),
+                    "workspace_directories": list_workspace_directories(TARGET_WORKSPACE),
+                    "expo_fast": {
+                        "configured": bool(
+                            EXPO_FAST_ROOT
+                            and EXPO_FAST_LAUNCHER
+                            and EXPO_FAST_LAUNCHER.is_file()
+                            and EXPO_FAST_APP_ROOT
+                        ),
+                        "root": str(EXPO_FAST_ROOT) if EXPO_FAST_ROOT else "",
+                        "launcher": str(EXPO_FAST_LAUNCHER) if EXPO_FAST_LAUNCHER else "",
+                        "app_root": str(EXPO_FAST_APP_ROOT) if EXPO_FAST_APP_ROOT else "",
+                    },
+                    "expo_public_gateway": EXPO_PUBLIC_GATEWAY.health(),
+                    "qrcode_enabled": qrcode is not None,
+                    "webrtc_preview_enabled": WEBRTC_PREVIEW is not None,
+                    "profile_pool": profile_pool_status_payload(),
+                    "signing_pool": profile_pool_status_payload(),
+                }
+            )
+        if path == "/api/auth/me":
+            return self.handle_auth_me()
+        if path in {"/api/profile-pool", "/api/signing-pool"}:
+            return self.handle_profile_pool_status()
+        if path == "/api/runs":
+            return self.handle_list_runs()
+        if re.fullmatch(r"/runs/[a-f0-9]+", path):
+            return self.handle_detail(path.rsplit("/", 1)[-1])
+        if re.fullmatch(r"/api/runs/[a-f0-9]+", path):
+            return self.handle_get_run(path.rsplit("/", 1)[-1])
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/questions", path):
+            return self.handle_get_run_questions(path.split("/")[-2])
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/events", path):
+            return self.handle_run_events(path.split("/")[-2])
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/media", path):
+            return self.handle_get_media(path.split("/")[-2])
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/live/frame", path):
+            return self.handle_get_live_frame(
+                path.split("/")[-3],
+                query=parse_qs(parsed.query),
+            )
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/live/webrtc/config", path):
+            return self.handle_get_live_webrtc_config(path.split("/")[3])
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/thumbnail", path):
+            return self.handle_get_thumbnail(path.split("/")[-2])
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/hap", path):
+            return self.handle_get_hap(path.split("/")[-2])
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/hap-qr", path):
+            return self.handle_get_hap_qr(path.split("/")[-2])
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/install-qr", path):
+            version = (parse_qs(parsed.query).get("version") or ["latest"])[0]
+            return self.handle_get_install_qr(path.split("/")[-2], version=version)
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/follow-up", path):
+            return self.handle_get_follow_up(path.split("/")[-2])
+        self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/auth/login":
+            return self.handle_auth_login()
+        if parsed.path == "/api/auth/logout":
+            return self.handle_auth_logout()
+        if parsed.path == "/api/runs":
+            return self.handle_create_run()
+        if parsed.path in {"/api/profile-pool/release", "/api/signing-pool/release"}:
+            return self.handle_profile_pool_release()
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/questions/[a-zA-Z0-9._-]+/answer", parsed.path):
+            parts = parsed.path.split("/")
+            return self.handle_answer_run_question(parts[3], parts[5])
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/follow-up/messages", parsed.path):
+            return self.handle_enqueue_follow_up(parsed.path.split("/")[3])
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/follow-up/interrupt", parsed.path):
+            return self.handle_interrupt_follow_up(parsed.path.split("/")[3])
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/package", parsed.path):
+            return self.handle_package_run(parsed.path.split("/")[3])
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/expo-serve", parsed.path):
+            return self.handle_publish_expo_run(parsed.path.split("/")[3])
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/live/input", parsed.path):
+            return self.handle_live_input(parsed.path.split("/")[3])
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/live/webrtc/offer", parsed.path):
+            return self.handle_live_webrtc_offer(parsed.path.split("/")[3])
+        self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+
+    def do_PATCH(self) -> None:
+        parsed = urlparse(self.path)
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/follow-up/messages/[A-Za-z0-9._-]+", parsed.path):
+            parts = parsed.path.split("/")
+            return self.handle_update_queued_follow_up(parts[3], parts[6])
+        self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+
+    def do_DELETE(self) -> None:
+        parsed = urlparse(self.path)
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/follow-up/messages/[A-Za-z0-9._-]+", parsed.path):
+            parts = parsed.path.split("/")
+            return self.handle_remove_queued_follow_up(parts[3], parts[6])
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/expo-serve", parsed.path):
+            return self.handle_unpublish_expo_run(parsed.path.split("/")[3])
+        self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        return
+
+    def request_is_secure(self) -> bool:
+        proto = (self.headers.get("X-Forwarded-Proto") or "").split(",", 1)[0].strip().lower()
+        return proto == "https" or self.headers.get("X-Forwarded-Ssl") == "on"
+
+    def cookie_value(self, name: str) -> str:
+        for item in (self.headers.get("Cookie") or "").split(";"):
+            cookie_name, separator, value = item.strip().partition("=")
+            if separator and cookie_name == name:
+                return value
+        return ""
+
+    def queue_cookie(self, name: str, value: str, *, max_age: int) -> None:
+        queued = getattr(self, "_cookies_to_set", [])
+        parts = [name + "=" + value, "Path=/", "HttpOnly", "SameSite=Lax", f"Max-Age={max_age}"]
+        if self.request_is_secure():
+            parts.append("Secure")
+        queued.append("; ".join(parts))
+        self._cookies_to_set = queued
+
+    def send_pending_cookies(self) -> None:
+        for value in getattr(self, "_cookies_to_set", []):
+            self.send_header("Set-Cookie", value)
+        self._cookies_to_set = []
+
+    def visitor_id(self, *, create: bool = False) -> str:
+        visitor_id = self.cookie_value(VISITOR_COOKIE_NAME)
+        if VISITOR_ID_PATTERN.fullmatch(visitor_id):
+            return visitor_id
+        if not create:
+            return ""
+        visitor_id = secrets.token_urlsafe(32)
+        self.queue_cookie(VISITOR_COOKIE_NAME, visitor_id, max_age=VISITOR_COOKIE_MAX_AGE_SEC)
+        return visitor_id
+
+    def is_root(self) -> bool:
+        return root_session_is_valid(self.cookie_value(ROOT_SESSION_COOKIE_NAME))
+
+    def load_accessible_run(self, run_id: str, *, allow_share: bool = False) -> RunRecord | None:
+        record = load_run(run_id)
+        if not record:
+            self.send_error(HTTPStatus.NOT_FOUND, "Run not found")
+            return None
+        if self.is_root():
+            return record
+        if record.owner_id and hmac.compare_digest(record.owner_id, self.visitor_id()):
+            return record
+        share_token = (parse_qs(urlparse(self.path).query).get("share") or [""])[0]
+        if allow_share and record.share_token and hmac.compare_digest(record.share_token, share_token):
+            return record
+        self.send_error(HTTPStatus.NOT_FOUND, "Run not found")
+        return None
+
+    def read_body_json(self) -> dict[str, Any]:
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            payload = json.loads(body.decode("utf-8"))
+            return payload if isinstance(payload, dict) else {}
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+
+    def send_json(
+        self,
+        payload: dict[str, Any],
+        status: HTTPStatus = HTTPStatus.OK,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
+        self.send_pending_cookies()
+        self.end_headers()
+        self.wfile.write(data)
+
+    def send_html(self, html: str, status: HTTPStatus = HTTPStatus.OK) -> None:
+        data = html.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_pending_cookies()
+        self.end_headers()
+        self.wfile.write(data)
+
+    def send_bytes(
+        self,
+        data: bytes,
+        content_type: str,
+        status: HTTPStatus = HTTPStatus.OK,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
+        self.send_pending_cookies()
+        self.end_headers()
+        self.wfile.write(data)
+
+    def send_file(self, file_path: Path, download_name: str | None = None) -> None:
+        if not file_path.exists() or not file_path.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND, "File not found")
+            return
+        content_type = content_type_for_path(file_path)
+        size = file_path.stat().st_size
+        byte_range = self.parse_byte_range(size)
+        if byte_range == "invalid":
+            self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+            self.send_header("Content-Range", f"bytes */{size}")
+            self.send_header("Accept-Ranges", "bytes")
+            self.end_headers()
+            return
+        start = 0
+        end = size - 1
+        status = HTTPStatus.OK
+        if byte_range is not None:
+            start, end = byte_range
+            status = HTTPStatus.PARTIAL_CONTENT
+        length = max(0, end - start + 1)
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        if download_name:
+            self.send_header("Content-Disposition", f'attachment; filename="{download_name}"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Accept-Ranges", "bytes")
+        if status == HTTPStatus.PARTIAL_CONTENT:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.send_header("Content-Length", str(length))
+        self.end_headers()
+        with file_path.open("rb") as handle:
+            handle.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = handle.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
+
+    def send_file_head(self, file_path: Path, download_name: str | None = None) -> None:
+        if not file_path.exists() or not file_path.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND, "File not found")
+            return
+        content_type = content_type_for_path(file_path)
+        size = file_path.stat().st_size
+        byte_range = self.parse_byte_range(size)
+        if byte_range == "invalid":
+            self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+            self.send_header("Content-Range", f"bytes */{size}")
+            self.send_header("Accept-Ranges", "bytes")
+            self.end_headers()
+            return
+        start = 0
+        end = size - 1
+        status = HTTPStatus.OK
+        if byte_range is not None:
+            start, end = byte_range
+            status = HTTPStatus.PARTIAL_CONTENT
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        if download_name:
+            self.send_header("Content-Disposition", f'attachment; filename="{download_name}"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Accept-Ranges", "bytes")
+        if status == HTTPStatus.PARTIAL_CONTENT:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.send_header("Content-Length", str(max(0, end - start + 1)))
+        self.end_headers()
+
+    def parse_byte_range(self, size: int) -> tuple[int, int] | str | None:
+        range_header = (self.headers.get("Range") or "").strip()
+        if not range_header:
+            return None
+        if not range_header.startswith("bytes=") or "," in range_header:
+            return "invalid"
+        spec = range_header.removeprefix("bytes=").strip()
+        if "-" not in spec:
+            return "invalid"
+        start_text, end_text = spec.split("-", 1)
+        try:
+            if start_text == "":
+                suffix_length = int(end_text)
+                if suffix_length <= 0:
+                    return "invalid"
+                start = max(size - suffix_length, 0)
+                end = size - 1
+            else:
+                start = int(start_text)
+                end = int(end_text) if end_text else size - 1
+        except ValueError:
+            return "invalid"
+        if start < 0 or end < start or start >= size:
+            return "invalid"
+        return start, min(end, size - 1)
+
+    def request_origin(self) -> str:
+        proto = (self.headers.get("X-Forwarded-Proto") or "").split(",", 1)[0].strip()
+        if not proto:
+            proto = "https" if self.headers.get("X-Forwarded-Ssl") == "on" else "http"
+        host = (
+            (self.headers.get("X-Forwarded-Host") or "").split(",", 1)[0].strip()
+            or (self.headers.get("Host") or "").strip()
+        )
+        if not host:
+            host = f"{self.server.server_address[0]}:{self.server.server_address[1]}"
+        return f"{proto}://{host}"
+
+    def build_absolute_url(self, path: str) -> str:
+        return f"{self.request_origin()}{path}"
+
+    def generate_qr_png(self, content: str) -> bytes:
+        if qrcode is None:
+            raise RuntimeError("缺少 qrcode 依赖，请先执行 pip install -r requirements.txt")
+        qr = qrcode.QRCode(
+            version=None,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(content)
+        qr.make(fit=True)
+        image = qr.make_image(fill_color="black", back_color="white")
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    def handle_home(self) -> None:
+        html = render_template(
+            "index.html",
+            {
+                "default_prompt": "为这个 HarmonyOS 工程实现一个记账应用，并完成构建和运行验证",
+                "workspace": str(TARGET_WORKSPACE),
+                "variant": DEFAULT_VARIANT,
+            },
+        )
+        self.send_html(html)
+
+    def handle_detail(self, run_id: str) -> None:
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        html = render_template(
+            "detail.html",
+            {
+                "run": asdict(record),
+                "poll_interval_ms": DEFAULT_POLL_INTERVAL_MS,
+                "static_asset_version": int(time.time()),
+            },
+        )
+        self.send_html(html)
+
+    def handle_static(self, path: str, *, head_only: bool = False) -> None:
+        relative = path.removeprefix("/static/")
+        file_path = (APP_ROOT / "static" / relative).resolve()
+        static_root = (APP_ROOT / "static").resolve()
+        try:
+            file_path.relative_to(static_root)
+        except ValueError:
+            self.send_error(HTTPStatus.FORBIDDEN, "Forbidden")
+            return
+        if head_only:
+            self.send_file_head(file_path)
+        else:
+            self.send_file(file_path)
+
+    def handle_hpack_static(self, path: str, *, head_only: bool = False) -> None:
+        if HPACK_STATIC_ROOT is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "HPack static root is not configured")
+            return
+        serve_hpack_static(
+            HPACK_STATIC_ROOT,
+            path,
+            prefix="/hpack/",
+            send_file=self.send_file,
+            send_file_head=self.send_file_head,
+            send_error=lambda code, message: self.send_error(code, message),
+            head_only=head_only,
+        )
+
+    def handle_install_static(self, path: str, *, head_only: bool = False) -> None:
+        if HPACK_STATIC_ROOT is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "HPack static root is not configured")
+            return
+        serve_hpack_static(
+            HPACK_STATIC_ROOT,
+            path,
+            prefix="/install/",
+            send_file=self.send_file,
+            send_file_head=self.send_file_head,
+            send_error=lambda code, message: self.send_error(code, message),
+            head_only=head_only,
+        )
+
+    def handle_create_run(self) -> None:
+        payload = self.read_body_json()
+        prompt = str(payload.get("prompt") or "").strip()
+        if not prompt:
+            self.send_json({"error": "prompt is required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        runtime = str(payload.get("runtime") or "arkpilot").strip().lower()
+        if runtime not in {"arkpilot", "expo"}:
+            self.send_json({"error": f"unsupported runtime: {runtime}"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if runtime == "arkpilot" and not TARGET_WORKSPACE.parts:
+            self.send_json(
+                {"error": "ArkPilot 工作目录未配置，请设置 HP_TARGET_WORKSPACE。"},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+
+        pool = get_signing_pool() if runtime == "arkpilot" else None
+        if pool:
+            pool.cleanup_stale()
+
+        run_id = uuid4().hex
+        workspace = Path(str(payload.get("workspace") or TARGET_WORKSPACE)).expanduser().resolve()
+        variant = str(payload.get("variant") or DEFAULT_VARIANT).strip()
+        plan_skill = str(payload["plan_skill"]).strip() if "plan_skill" in payload else DEFAULT_PLAN_SKILL
+        interactive_questions = payload.get("interactive_questions") is True
+        owner_id = self.visitor_id(create=True)
+        session_name = build_tmux_session_name(run_id)
+        signing_slot = None
+        prompt_file = ""
+
+        if runtime == "expo":
+            if EXPO_FAST_ROOT is None or EXPO_FAST_LAUNCHER is None or not EXPO_FAST_LAUNCHER.is_file():
+                self.send_json(
+                    {"error": "Expo Runtime 未配置，请设置 HP_EXPO_FAST_ROOT。"},
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+                return
+            if EXPO_FAST_APP_ROOT is None:
+                self.send_json(
+                    {"error": "Expo 工作目录未配置，请设置 HP_EXPO_FAST_APP_ROOT。"},
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+                return
+            project_name = f"remote-ui-{run_id}"
+            workspace = (EXPO_FAST_APP_ROOT / project_name).resolve()
+            prompt_path = (EXPO_FAST_APP_ROOT / ".expo-fast-inputs" / f"{project_name}.md").resolve()
+            try:
+                EXPO_FAST_APP_ROOT.mkdir(parents=True, exist_ok=True)
+                workspace.mkdir(parents=False, exist_ok=False)
+                prompt_path.parent.mkdir(parents=True, exist_ok=True)
+                prompt_path.write_text(f"{prompt}\n", encoding="utf-8")
+            except FileExistsError:
+                self.send_json({"error": f"Expo 目标目录已存在: {workspace}"}, status=HTTPStatus.CONFLICT)
+                return
+            except OSError as exc:
+                self.send_json({"error": f"创建 Expo 工作目录或 Prompt 失败: {exc}"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            session_name = f"expo-fast-{project_name[:32]}"
+            variant = "expo-fast"
+            plan_skill = ""
+            interactive_questions = False
+            prompt_file = str(prompt_path)
+
+        if runtime == "arkpilot" and pool:
+            signing_slot = pool.acquire(run_id, session_name)
+            if not signing_slot:
+                status = profile_pool_status_payload()
+                self.send_json(
+                    {
+                        "error": "当前没有空闲 Profile，请稍后再试",
+                        "profile_pool": status,
+                        "signing_pool": status,
+                    },
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+                return
+            if PROFILE_POOL_ISOLATE_WORKSPACE:
+                workspace = (TARGET_WORKSPACE / run_id).resolve()
+            else:
+                workspace = (TARGET_WORKSPACE / "current").resolve()
+
+        if runtime == "arkpilot":
+            target_root = TARGET_WORKSPACE.expanduser().resolve()
+            if workspace == target_root:
+                workspace = (target_root / "current").resolve()
+            elif target_root not in workspace.parents:
+                self.send_json(
+                    {"error": f"ArkPilot 工作目录必须位于 HP_TARGET_WORKSPACE 下: {target_root}"},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                if pool and PROFILE_POOL_ISOLATE_WORKSPACE:
+                    clear_workspace_contents(workspace)
+                else:
+                    stop_existing_workspace_runs(workspace)
+                    clear_workspace_contents(workspace)
+            except RuntimeError as exc:
+                if pool and signing_slot:
+                    pool.release(run_id)
+                self.send_json({"error": f"停止旧构建失败: {exc}"}, status=HTTPStatus.CONFLICT)
+                return
+            except (OSError, ValueError) as exc:
+                if pool and signing_slot:
+                    pool.release(run_id)
+                self.send_json({"error": f"清空工作目录失败: {exc}"}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+        record = RunRecord(
+            run_id=run_id,
+            session_name=session_name,
+            prompt=prompt,
+            workspace=str(workspace),
+            variant=variant,
+            plan_skill=plan_skill,
+            interactive_questions=interactive_questions,
+            owner_id=owner_id,
+            share_token=secrets.token_urlsafe(24),
+            created_at=to_iso(),
+            updated_at=to_iso(),
+            status="queued",
+            runtime=runtime,
+            prompt_file=prompt_file,
+        )
+        if signing_slot:
+            try:
+                apply_signing_slot_to_record(record, signing_slot)
+            except ValueError as exc:
+                pool.release(run_id)
+                self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+        save_run(record)
+        if runtime == "expo":
+            threading.Thread(target=run_expo_fast_in_background, args=(record,), daemon=True).start()
+        else:
+            threading.Thread(target=run_tmux_in_background, args=(record,), daemon=True).start()
+            maybe_start_capture_monitor(record)
+            # 首版本等待 QA 与预览稳定后自动签名；后续调整仍由按钮手动更新。
+            start_initial_package_monitor(record)
+        response: dict[str, Any] = {
+            "run_id": run_id,
+            "detail_url": f"/runs/{run_id}",
+            "runtime": runtime,
+        }
+        if record.signing_slot_id:
+            response["signing_slot_id"] = record.signing_slot_id
+            response["signing_bundle_name"] = record.signing_bundle_name
+        self.send_json(response, status=HTTPStatus.CREATED)
+
+    def handle_auth_me(self) -> None:
+        self.send_json(
+            {
+                "role": "root" if self.is_root() else "guest",
+                "root_login_enabled": root_auth_enabled(),
+            }
+        )
+
+    def handle_auth_login(self) -> None:
+        if not root_auth_enabled():
+            self.send_json({"error": "管理员登录尚未配置"}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        client_ip = self.client_address[0]
+        if login_is_limited(client_ip):
+            self.send_json({"error": "登录尝试过多，请十分钟后重试"}, status=HTTPStatus.TOO_MANY_REQUESTS)
+            return
+        password = str(self.read_body_json().get("password") or "")
+        if not password or not verify_root_password(password):
+            record_failed_login(client_ip)
+            self.send_json({"error": "管理员密码错误"}, status=HTTPStatus.UNAUTHORIZED)
+            return
+        clear_failed_logins(client_ip)
+        self.queue_cookie(ROOT_SESSION_COOKIE_NAME, create_root_session(), max_age=ROOT_SESSION_MAX_AGE_SEC)
+        self.send_json({"role": "root", "root_login_enabled": True})
+
+    def handle_auth_logout(self) -> None:
+        self.queue_cookie(ROOT_SESSION_COOKIE_NAME, "", max_age=0)
+        self.send_json({"role": "guest", "root_login_enabled": root_auth_enabled()})
+
+    def handle_profile_pool_status(self) -> None:
+        self.send_json(profile_pool_status_payload())
+
+    handle_signing_pool_status = handle_profile_pool_status
+
+    def handle_profile_pool_release(self) -> None:
+        payload = self.read_body_json()
+        run_id = str(payload.get("run_id") or "").strip()
+        if not run_id:
+            self.send_json({"error": "run_id is required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        released = release_signing_slot_for_record(record)
+        if released:
+            save_run(record)
+        self.send_json(
+            {
+                "released": released,
+                "run_id": run_id,
+                "profile_pool": profile_pool_status_payload(),
+                "signing_pool": profile_pool_status_payload(),
+            }
+        )
+
+    handle_signing_pool_release = handle_profile_pool_release
+
+    def handle_list_runs(self) -> None:
+        visitor_id = self.visitor_id()
+        records = (
+            iter_run_records()
+            if self.is_root()
+            else [
+                record
+                for record in iter_run_records()
+                if visitor_id and record.owner_id and hmac.compare_digest(record.owner_id, visitor_id)
+            ]
+        )
+        summaries: list[dict[str, Any]] = []
+        for record in records:
+            run_status = record.status
+            capture_manifest = load_capture_manifest(record.run_id)
+            hpack_manifest = load_hpack_manifest(record.run_id)
+            if record.runtime == "expo":
+                try:
+                    run_status = expo_fast_run_status(
+                        record,
+                        load_expo_fast_state(Path(record.workspace)),
+                    )
+                except Exception:
+                    run_status = record.status
+            else:
+                try:
+                    run_state = load_tmux_run_state(Path(record.workspace), record.session_name)
+                    if run_state and run_state.get("status"):
+                        run_status = str(run_state.get("status"))
+                    elif record.status == "running" and not process_alive(record.process_pid):
+                        run_status = "failed"
+                except Exception:
+                    run_status = record.status
+            try:
+                media_path = find_latest_media(
+                    record.run_id, Path(record.workspace), record.created_at
+                )
+            except Exception:
+                media_path = None
+            try:
+                screenshot_path = find_first_screenshot(record.run_id)
+            except Exception:
+                screenshot_path = None
+            media_type = media_path.suffix.lower().lstrip(".") if media_path else ""
+            capture_status = str(capture_manifest.get("status") or "") if capture_manifest else ""
+            hpack_status = str(hpack_manifest.get("status") or "") if hpack_manifest else ""
+            status_key = run_status.lower()
+            # The list represents the end-to-end deliverable. A completed
+            # tmux run or preview capture only means the build/preview stage
+            # finished; it is not installable until HPack has signed and
+            # published it successfully.
+            package_outdated = package_revision_outdated(
+                record.latest_adjustment_at,
+                record.package_source_adjustment_at,
+            )
+            if record.runtime == "expo" and status_key in {"complete", "completed", "done", "succeeded"}:
+                display_status = "complete"
+            elif record.runtime == "expo" and status_key in {"failed", "error"}:
+                display_status = "failed"
+            elif record.runtime == "expo":
+                display_status = "queued" if status_key in {"queued", "waiting"} else "active"
+            elif hpack_status == "ready" and not package_outdated:
+                display_status = "complete"
+            elif status_key in {"failed", "error"} or capture_status == "failed" or hpack_status == "failed":
+                display_status = "failed"
+            elif status_key in {"queued", "waiting", "waiting_hap"}:
+                display_status = "queued"
+            else:
+                display_status = "active"
+            summaries.append(
+                {
+                    "run_id": record.run_id,
+                    "prompt": record.prompt,
+                    "status": display_status,
+                    "variant": getattr(record, "variant", "") or "",
+                    "runtime": getattr(record, "runtime", "arkpilot") or "arkpilot",
+                    "session_name": record.session_name,
+                    "created_at": record.created_at,
+                    "updated_at": record.updated_at,
+                    "notes": getattr(record, "notes", "") or "",
+                    "detail_url": f"/runs/{record.run_id}",
+                    "has_media": bool(media_path),
+                    "media_url": f"/api/runs/{record.run_id}/media" if media_path else "",
+                    "media_type": media_type,
+                    "has_thumbnail": bool(screenshot_path),
+                    "thumbnail_url": f"/api/runs/{record.run_id}/thumbnail" if screenshot_path else "",
+                }
+            )
+
+        summaries.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+        counts: dict[str, int] = {}
+        for item in summaries:
+            key = str(item.get("status") or "unknown")
+            counts[key] = counts.get(key, 0) + 1
+        self.send_json({"runs": summaries, "total": len(summaries), "counts": counts})
+
+    def handle_get_run(self, run_id: str) -> None:
+        if not self.load_accessible_run(run_id):
+            return
+        latest = self._compute_run_progress(run_id)
+        if latest is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "Run not found")
+            return
+        self.send_json(latest)
+
+    def handle_publish_expo_run(self, run_id: str) -> None:
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        if record.runtime != "expo":
+            self.send_json(
+                {"ok": False, "error": "只有 Expo Runtime 任务可以发布 Harmony Go 预览。", "code": "not_expo_run"},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        state = load_expo_fast_state(Path(record.workspace))
+        if expo_fast_run_status(record, state) != "completed":
+            self.send_json(
+                {"ok": False, "error": "Expo 生成与启动验证完成后才能开启外网预览。", "code": "expo_run_not_ready"},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        artifact_root = Path(record.workspace) / "dist" / "harmony-go"
+        try:
+            serve_state, created = EXPO_PUBLIC_GATEWAY.publish(record.run_id, artifact_root)
+        except ExpoExportValidationError as exc:
+            self.send_json(
+                {"ok": False, "error": str(exc), "code": "expo_export_invalid"},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        except ExpoGatewayError as exc:
+            self.send_json(
+                {"ok": False, "error": str(exc), "code": "expo_gateway_unavailable"},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+        self.send_json(
+            {"ok": True, "accepted": created, "serve": serve_state},
+            status=HTTPStatus.CREATED if created else HTTPStatus.OK,
+        )
+
+    def handle_unpublish_expo_run(self, run_id: str) -> None:
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        if record.runtime != "expo":
+            self.send_json(
+                {"ok": False, "error": "只有 Expo Runtime 任务可以撤销 Harmony Go 预览。", "code": "not_expo_run"},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        try:
+            state = load_expo_fast_state(Path(record.workspace))
+            serve_state, removed = EXPO_PUBLIC_GATEWAY.unpublish(
+                record.run_id,
+                can_publish=expo_fast_run_status(record, state) == "completed",
+            )
+        except ExpoGatewayError as exc:
+            self.send_json(
+                {"ok": False, "error": str(exc), "code": "expo_gateway_state_error"},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+        self.send_json({"ok": True, "accepted": removed, "serve": serve_state})
+
+    def handle_package_run(self, run_id: str) -> None:
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        if record.runtime == "expo":
+            self.send_json(
+                {
+                    "ok": False,
+                    "accepted": False,
+                    "status": record.expo_package_status or "not_implemented",
+                    "error": "Expo 打包流程尚未实现。",
+                    "code": "expo_package_not_implemented",
+                },
+                status=HTTPStatus.NOT_IMPLEMENTED,
+            )
+            return
+        progress = build_progress_payload(record)
+        artifacts = progress.get("artifacts") if isinstance(progress.get("artifacts"), dict) else {}
+        if artifacts.get("package_current"):
+            self.send_json({"ok": True, "accepted": False, "status": "ready"})
+            return
+        if not artifacts.get("package_can_start"):
+            status = str(artifacts.get("distribution_status") or "")
+            message = {
+                "packaging": "安装包正在生成，请勿重复提交。",
+                "waiting_update": "调整后的最新 unsigned HAP 尚未生成。",
+                "waiting_preview": "最新预览尚未生成，请稍后再试。",
+                "waiting_hap": "QA 和 unsigned HAP 尚未就绪。",
+                "disabled": "当前环境未启用 HPack。",
+            }.get(status, "当前状态暂不能生成安装包，请等待调整与预览完成。")
+            self.send_json(
+                {"ok": False, "error": message, "code": "package_not_ready"},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        started = start_hpack_packaging(
+            load_run(run_id) or record,
+            replace_manifest=hpack_manifest_path(run_id).is_file(),
+        )
+        if not started:
+            self.send_json(
+                {"ok": False, "error": "安装包任务已在运行或暂时无法启动。", "code": "package_busy"},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        self.send_json(
+            {"ok": True, "accepted": True, "status": "packaging"},
+            status=HTTPStatus.ACCEPTED,
+        )
+
+    def handle_get_run_questions(self, run_id: str) -> None:
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        self.send_json(load_ask_user_questions(Path(record.workspace)))
+
+    def handle_answer_run_question(self, run_id: str, question_id: str) -> None:
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        question_id = safe_question_id(question_id)
+        questions = load_ask_user_questions(Path(record.workspace))
+        pending = {
+            str(item.get("id")): item
+            for item in questions.get("pending", [])
+            if isinstance(item, dict)
+        }
+        if question_id not in pending:
+            self.send_json({"error": "Question not found or already answered"}, status=HTTPStatus.NOT_FOUND)
+            return
+        payload = self.read_body_json()
+        answers = payload.get("answers")
+        if not isinstance(answers, dict) or not answers:
+            self.send_json({"error": "answers is required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        annotations = payload.get("annotations")
+        response: dict[str, Any] = {
+            "id": question_id,
+            "toolUseId": pending[question_id].get("toolUseId") or question_id,
+            "answers": answers,
+            "answeredAt": to_iso(),
+            "answeredBy": "remote-ui",
+        }
+        if isinstance(annotations, dict):
+            response["annotations"] = annotations
+        write_json(ask_user_question_dir(Path(record.workspace)) / f"response-{question_id}.json", response)
+        self.send_json({"ok": True, "question": response})
+
+    def send_follow_up_error(self, exc: FollowUpControlError) -> None:
+        status = {
+            "run_not_found": HTTPStatus.NOT_FOUND,
+            "follow_up_not_found": HTTPStatus.NOT_FOUND,
+            "invalid_follow_up_session": HTTPStatus.NOT_FOUND,
+            "control_busy": HTTPStatus.CONFLICT,
+            "invalid_run_name": HTTPStatus.BAD_REQUEST,
+            "invalid_client_request_id": HTTPStatus.BAD_REQUEST,
+            "empty_message": HTTPStatus.BAD_REQUEST,
+            "message_too_large": HTTPStatus.BAD_REQUEST,
+            "invalid_command_id": HTTPStatus.BAD_REQUEST,
+            "command_not_found": HTTPStatus.NOT_FOUND,
+            "command_not_queued": HTTPStatus.CONFLICT,
+        }.get(exc.code, HTTPStatus.SERVICE_UNAVAILABLE if exc.code in {"control_unavailable", "follow_up_unavailable"} else HTTPStatus.INTERNAL_SERVER_ERROR)
+        self.send_json({"ok": False, "error": str(exc), "code": exc.code, "details": exc.details}, status=status)
+
+    def handle_get_follow_up(self, run_id: str) -> None:
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        try:
+            self.send_json(redact_follow_up_response(call_follow_up_control(record, "status")))
+        except FollowUpControlError as exc:
+            self.send_follow_up_error(exc)
+
+    def handle_enqueue_follow_up(self, run_id: str) -> None:
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        body = self.read_body_json()
+        text = str(body.get("text") or "")
+        if not text.strip():
+            self.send_json({"ok": False, "error": "text is required", "code": "empty_message"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            response = call_follow_up_control(record, "enqueue", {
+                "text": text,
+                "clientMessageId": str(body.get("clientMessageId") or ""),
+            })
+            persist_latest_adjustment(record, response)
+            self.send_json(redact_follow_up_response(response))
+        except FollowUpControlError as exc:
+            self.send_follow_up_error(exc)
+
+    def handle_interrupt_follow_up(self, run_id: str) -> None:
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        body = self.read_body_json()
+        try:
+            response = call_follow_up_control(record, "interrupt", {
+                "clientActionId": str(body.get("clientActionId") or ""),
+            })
+            persist_latest_adjustment(record, response, replace_from_state=True)
+            self.send_json(redact_follow_up_response(response))
+        except FollowUpControlError as exc:
+            self.send_follow_up_error(exc)
+
+    def handle_update_queued_follow_up(self, run_id: str, command_id: str) -> None:
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        body = self.read_body_json()
+        text = str(body.get("text") or "")
+        if not text.strip():
+            self.send_json({"ok": False, "error": "text is required", "code": "empty_message"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            self.send_json(redact_follow_up_response(call_follow_up_control(record, "update", {
+                "commandId": command_id,
+                "text": text,
+            })))
+        except FollowUpControlError as exc:
+            self.send_follow_up_error(exc)
+
+    def handle_remove_queued_follow_up(self, run_id: str, command_id: str) -> None:
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        try:
+            response = call_follow_up_control(record, "remove", {
+                "commandId": command_id,
+            })
+            persist_latest_adjustment(record, response, replace_from_state=True)
+            self.send_json(redact_follow_up_response(response))
+        except FollowUpControlError as exc:
+            self.send_follow_up_error(exc)
+
+    def _compute_run_progress(self, run_id: str) -> dict[str, Any] | None:
+        """读取并刷新单个 run 的进度负载；run 不存在时返回 None。"""
+        record = load_run(run_id)
+        if not record:
+            return None
+        maybe_release_signing_slot(record)
+        latest = build_progress_payload(record)
+        if latest["status"] != record.status:
+            record.status = str(latest["status"])
+            save_run(record)
+            latest["run"] = asdict(record)
+        return latest
+
+    def handle_run_events(self, run_id: str) -> None:
+        """通过 Server-Sent Events 实时推送单个 run 的进度。
+
+        每个请求由 ThreadingHTTPServer 分配独立线程，可安全地保持长连接。
+        仅在进度内容变化时推送数据帧，其余周期发送注释心跳维持连接，
+        进入终态（succeeded / failed）后关闭流。
+        """
+        if not self.load_accessible_run(run_id):
+            return
+        initial = self._compute_run_progress(run_id)
+        if initial is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "Run not found")
+            return
+
+        try:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache, no-store")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
+        poll_interval = float(DEFAULT_POLL_INTERVAL_MS) / 1000.0
+        heartbeat_every = max(1, int(15.0 / poll_interval))
+
+        def write_event(payload: dict[str, Any]) -> bool:
+            data = json.dumps(payload, ensure_ascii=False)
+            frame = f"data: {data}\n\n".encode("utf-8")
+            try:
+                self.wfile.write(frame)
+                self.wfile.flush()
+                return True
+            except (BrokenPipeError, ConnectionResetError, ValueError):
+                return False
+
+        def write_heartbeat() -> bool:
+            try:
+                self.wfile.write(b": keep-alive\n\n")
+                self.wfile.flush()
+                return True
+            except (BrokenPipeError, ConnectionResetError, ValueError):
+                return False
+
+        last_serialized = json.dumps(initial, ensure_ascii=False, sort_keys=True)
+        if not write_event(initial):
+            return
+        if str(initial.get("status")) in {"succeeded", "failed"}:
+            return
+
+        idle_ticks = 0
+        while True:
+            time.sleep(poll_interval)
+            latest = self._compute_run_progress(run_id)
+            if latest is None:
+                break
+            serialized = json.dumps(latest, ensure_ascii=False, sort_keys=True)
+            if serialized != last_serialized:
+                last_serialized = serialized
+                idle_ticks = 0
+                if not write_event(latest):
+                    break
+                if str(latest.get("status")) in {"succeeded", "failed"}:
+                    break
+            else:
+                idle_ticks += 1
+                if idle_ticks >= heartbeat_every:
+                    idle_ticks = 0
+                    if not write_heartbeat():
+                        break
+
+    def handle_get_media(self, run_id: str, *, head_only: bool = False) -> None:
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        media_path = find_latest_media(record.run_id, Path(record.workspace))
+        if not media_path:
+            self.send_error(HTTPStatus.NOT_FOUND, "Media not found")
+            return
+        if head_only:
+            self.send_file_head(media_path)
+        else:
+            self.send_file(media_path)
+
+    def live_preview_is_available(self, record: RunRecord) -> bool:
+        return effective_capture_status(record) == "complete"
+
+    def handle_get_live_frame(
+        self,
+        run_id: str,
+        *,
+        query: dict[str, list[str]] | None = None,
+    ) -> None:
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        if not self.live_preview_is_available(record):
+            self.send_json({"error": "实时预览将在真机运行验证完成后可用。"}, status=HTTPStatus.CONFLICT)
+            return
+        query = query or {}
+        try:
+            after_sequence = max(0, int((query.get("after") or ["0"])[0]))
+            wait_ms = max(0, min(int((query.get("wait_ms") or ["0"])[0]), 1500))
+        except ValueError:
+            self.send_json({"error": "帧序号或等待时间无效。"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            frame = LIVE_PREVIEW.wait_for_frame(
+                record.run_id,
+                after_sequence=after_sequence,
+                timeout_sec=wait_ms / 1000,
+            )
+        except LivePreviewError as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_GATEWAY)
+            return
+        self.send_bytes(
+            frame.data,
+            "image/jpeg",
+            headers={
+                "X-Harmony-Preview-Status": "stale" if frame.stale else "fresh",
+                "X-Harmony-Preview-Sequence": str(frame.sequence),
+                "X-Harmony-Preview-Width": str(frame.width),
+                "X-Harmony-Preview-Height": str(frame.height),
+                "X-Harmony-Preview-Bytes": str(len(frame.data)),
+            },
+        )
+
+    def live_request_network_fields(self) -> dict[str, str]:
+        cf_ray = self.headers.get("CF-Ray", "").strip()
+        cf_colo = cf_ray.rsplit("-", 1)[-1].upper() if "-" in cf_ray else ""
+        return {
+            "cf_ray": cf_ray,
+            "cf_colo": cf_colo,
+            "cf_country": self.headers.get("CF-IPCountry", "").strip().upper(),
+            "forwarded_proto": (self.headers.get("X-Forwarded-Proto") or "").split(",", 1)[0].strip(),
+        }
+
+    def log_live_input(
+        self,
+        *,
+        run_id: str,
+        action: str,
+        status: str,
+        request_started_at: float,
+        timings: dict[str, float | int] | None = None,
+        error: str = "",
+    ) -> None:
+        append_live_preview_log(
+            {
+                "timestamp": to_iso(),
+                "event": "live_input",
+                "run_id": run_id,
+                "action": action,
+                "status": status,
+                "request_ms": round((time.monotonic() - request_started_at) * 1000, 3),
+                **self.live_request_network_fields(),
+                "timings": timings or {},
+                "error": error,
+            }
+        )
+
+    def handle_live_input(self, run_id: str) -> None:
+        request_started_at = time.monotonic()
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        if not self.live_preview_is_available(record):
+            self.send_json({"error": "实时预览将在真机运行验证完成后可用。"}, status=HTTPStatus.CONFLICT)
+            return
+        payload = self.read_body_json()
+        action = str(payload.get("type") or "unknown")[:24]
+        try:
+            frame = LIVE_PREVIEW.submit_input(record.run_id, payload)
+        except LiveInputValidationError as exc:
+            self.log_live_input(
+                run_id=run_id,
+                action=action,
+                status="invalid",
+                request_started_at=request_started_at,
+                error=str(exc),
+            )
+            self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        except LiveInputRateLimitError as exc:
+            self.log_live_input(
+                run_id=run_id,
+                action=action,
+                status="rate_limited",
+                request_started_at=request_started_at,
+                error=str(exc),
+            )
+            self.send_json({"error": str(exc)}, status=HTTPStatus.TOO_MANY_REQUESTS)
+            return
+        except LivePreviewError as exc:
+            self.log_live_input(
+                run_id=run_id,
+                action=action,
+                status="error",
+                request_started_at=request_started_at,
+                error=str(exc),
+            )
+            self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_GATEWAY)
+            return
+        self.log_live_input(
+            run_id=run_id,
+            action=action,
+            status="ok",
+            request_started_at=request_started_at,
+            timings=frame.timings,
+        )
+        self.send_json(
+            {
+                "ok": True,
+                "frame_seq": frame.sequence,
+                "frame_status": "refreshing",
+                "refresh_queued": True,
+                "timings": frame.timings,
+            },
+            headers={"Server-Timing": preview_server_timing(frame.timings)},
+        )
+
+    def handle_get_live_webrtc_config(self, run_id: str) -> None:
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        if not self.live_preview_is_available(record):
+            self.send_json({"error": "实时预览尚未可用。"}, status=HTTPStatus.CONFLICT)
+            return
+        if WEBRTC_PREVIEW is None:
+            self.send_json(
+                {"available": False, "reason": "服务端未安装 aiortc。"},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+        self.send_json(
+            {
+                **WEBRTC_PREVIEW.config_payload(),
+                "offer_path": f"/api/runs/{run_id}/live/webrtc/offer",
+            }
+        )
+
+    def handle_live_webrtc_offer(self, run_id: str) -> None:
+        request_started_at = time.monotonic()
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        if not self.live_preview_is_available(record):
+            self.send_json({"error": "实时预览尚未可用。"}, status=HTTPStatus.CONFLICT)
+            return
+        if WEBRTC_PREVIEW is None:
+            self.send_json(
+                {"error": "WebRTC 当前不可用，请使用 REST 预览。"},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+        payload = self.read_body_json()
+        try:
+            answer = WEBRTC_PREVIEW.create_answer(
+                run_id=record.run_id,
+                sdp=str(payload.get("sdp") or ""),
+                description_type=str(payload.get("type") or ""),
+                signaling_id=str(payload.get("signaling_id") or ""),
+                network_fields=self.live_request_network_fields(),
+            )
+        except WebRTCPreviewError as exc:
+            append_webrtc_preview_log(
+                {
+                    "event": "webrtc_offer",
+                    "run_id": run_id,
+                    "status": "error",
+                    "request_ms": round((time.monotonic() - request_started_at) * 1000, 3),
+                    **self.live_request_network_fields(),
+                    "error": str(exc),
+                }
+            )
+            self.send_json({"error": str(exc)}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        append_webrtc_preview_log(
+            {
+                "event": "webrtc_offer",
+                "run_id": run_id,
+                "peer_id": answer.get("peer_id", ""),
+                "status": "ok",
+                "request_ms": round((time.monotonic() - request_started_at) * 1000, 3),
+                **self.live_request_network_fields(),
+                "local_candidate_types": answer.get("local_candidate_types", []),
+                "error": "",
+            }
+        )
+        self.send_json(answer)
+
+    def handle_get_thumbnail(self, run_id: str, *, head_only: bool = False) -> None:
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        screenshot_path = find_first_screenshot(record.run_id)
+        if not screenshot_path:
+            self.send_error(HTTPStatus.NOT_FOUND, "Thumbnail not found")
+            return
+        if head_only:
+            self.send_file_head(screenshot_path)
+        else:
+            self.send_file(screenshot_path)
+
+    def handle_get_hap(self, run_id: str, *, head_only: bool = False) -> None:
+        record = self.load_accessible_run(run_id, allow_share=True)
+        if not record:
+            return
+        hap_path = find_latest_hap(Path(record.workspace))
+        if not hap_path:
+            self.send_error(HTTPStatus.NOT_FOUND, "HAP not found")
+            return
+        if head_only:
+            self.send_file_head(hap_path, download_name=hap_path.name)
+        else:
+            self.send_file(hap_path, download_name=hap_path.name)
+
+    def handle_get_hap_qr(self, run_id: str) -> None:
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        hap_path = find_latest_hap(Path(record.workspace))
+        if not hap_path:
+            self.send_error(HTTPStatus.NOT_FOUND, "HAP not found")
+            return
+        try:
+            qr_bytes = self.generate_qr_png(
+                self.build_absolute_url(f"/api/runs/{run_id}/hap?share={quote(record.share_token)}")
+            )
+        except RuntimeError as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        self.send_bytes(qr_bytes, "image/png")
+
+    def handle_get_install_qr(self, run_id: str, *, version: str = "latest") -> None:
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        if version == "first" and record.first_install_url:
+            manifest_url = record.first_manifest_url
+            install_store_url = record.first_install_store_url or (
+                build_install_store_url(manifest_url) if manifest_url else ""
+            )
+            install_url = record.first_install_url
+        else:
+            hpack_manifest = load_hpack_manifest(record.run_id)
+            manifest_url = str(hpack_manifest.get("manifest_url") or "") if hpack_manifest else ""
+            install_store_url = str(hpack_manifest.get("install_store_url") or "") if hpack_manifest else ""
+            if not install_store_url and manifest_url:
+                install_store_url = build_install_store_url(manifest_url)
+            install_url = str(hpack_manifest.get("install_url") or "") if hpack_manifest else ""
+        qr_content = build_install_qr_content(
+            install_url=install_url,
+            install_store_url=install_store_url,
+            manifest_url=manifest_url,
+        )
+        if not qr_content:
+            self.send_error(HTTPStatus.NOT_FOUND, "Install URL not found")
+            return
+        try:
+            qr_bytes = self.generate_qr_png(qr_content)
+        except RuntimeError as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        self.send_bytes(qr_bytes, "image/png")
+
+
+def run_server() -> None:
+    # Default to loopback and let Cloudflare Tunnel expose the app externally.
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "8080"))
+    server = ThreadingHTTPServer((host, port), RemoteUIHandler)
+    print(f"Harmony Pilot Remote UI running at http://{host}:{port}")
+    if EXPO_PUBLIC_GATEWAY.start():
+        print(
+            "Expo Harmony Gateway running at "
+            f"{EXPO_PUBLIC_GATEWAY.local_origin()} -> {EXPO_PUBLIC_GATEWAY.public_origin}"
+        )
+    elif EXPO_PUBLIC_GATEWAY.enabled:
+        print(f"Expo Harmony Gateway failed to start: {EXPO_PUBLIC_GATEWAY.health()['error']}", file=sys.stderr)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+        EXPO_PUBLIC_GATEWAY.stop()
+
+
+if __name__ == "__main__":
+    run_server()

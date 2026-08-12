@@ -1,0 +1,19 @@
+{
+  "lease_timeout_sec": 7200,
+  "release_after_ready_sec": 1800,
+  "defaults": {
+    "cert": "signing/release.cer",
+    "keystore": "signing/release.p12",
+    "alias": "your_key_alias"
+  },
+  "slots": [
+    {
+      "id": "slot-01",
+      "profile": "signing/app-aRelease.p7b"
+    },
+    {
+      "id": "slot-02",
+      "profile": "signing/app-bRelease.p7b"
+    }
+  ]
+}

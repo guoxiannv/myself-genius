@@ -3,3 +3,6 @@
 
 # Default workspace for generated Expo applications in the monorepo.
 /expo-app/
+
+# Machine-local fixed Harmony HAP build slots and native caches.
+/harmony-pool/

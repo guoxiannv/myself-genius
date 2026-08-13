@@ -797,14 +797,85 @@ def expo_fast_run_status(record: RunRecord, state: dict[str, Any] | None) -> str
     return "queued"
 
 
-def mark_expo_package_placeholder(record: RunRecord) -> RunRecord:
-    """Record the intentionally unimplemented packaging hand-off for Expo runs."""
-    if record.expo_package_status == "not_implemented":
+def expo_hap_result_path(workspace: Path) -> Path:
+    return workspace / ".expo-fast" / "hap" / "build-result.json"
+
+
+def load_expo_hap_result(workspace: Path) -> dict[str, Any] | None:
+    result = read_json(expo_hap_result_path(workspace))
+    return result if isinstance(result, dict) else None
+
+
+def resolve_expo_hap_artifact(workspace: Path, result: dict[str, Any] | None = None) -> Path | None:
+    payload = result or load_expo_hap_result(workspace)
+    if str((payload or {}).get("status") or "").strip().lower() != "success":
+        return None
+    raw_path = str((payload or {}).get("hapPath") or "").strip()
+    if not raw_path:
+        return None
+    allowed_root = (workspace / ".expo-fast" / "hap").resolve()
+    candidate = Path(raw_path).expanduser().resolve()
+    try:
+        candidate.relative_to(allowed_root)
+    except ValueError:
+        return None
+    return candidate if candidate.is_file() else None
+
+
+def expo_hap_error(result: dict[str, Any] | None) -> str:
+    error = (result or {}).get("error")
+    if isinstance(error, dict):
+        return str(error.get("message") or "").strip()
+    return str(error or "").strip()
+
+
+def expo_hap_package_error(
+    result: dict[str, Any] | None,
+    status: str,
+    artifact_ready: bool,
+) -> str:
+    result_status = str((result or {}).get("status") or "").strip().lower()
+    if status == "failed" and result_status != "failed" and not artifact_ready:
+        return "unsigned HAP 产物缺失或路径无效。"
+    return expo_hap_error(result)
+
+
+def expo_hap_status(
+    state: dict[str, Any] | None,
+    result: dict[str, Any] | None,
+    run_status: str,
+    artifact_ready: bool = False,
+) -> str:
+    result_status = str((result or {}).get("status") or "").strip().lower()
+    if result_status == "success":
+        return "ready" if artifact_ready else "failed"
+    if result_status == "failed":
+        return "failed"
+    context_hap = ((state or {}).get("context") or {}).get("hap")
+    context_status = str((context_hap or {}).get("status") or "").strip().lower()
+    if context_status == "ready":
+        return "ready" if artifact_ready else "failed"
+    if context_status in {"failed", "skipped"}:
+        return context_status
+    if str((state or {}).get("detail") or "").strip().lower() == "hap_building":
+        return "building"
+    if run_status == "completed":
+        return "skipped"
+    return "waiting_generation"
+
+
+def sync_expo_package_status(record: RunRecord, status: str, error: str = "") -> RunRecord:
+    if record.expo_package_status == status:
         return record
     latest = load_run(record.run_id) or record
-    latest.expo_package_status = "not_implemented"
+    latest.expo_package_status = status
     latest.expo_package_updated_at = to_iso()
-    latest.notes = "Expo 生成与启动已完成，等待打包实现。"
+    if status == "ready":
+        latest.notes = "Expo bundle 与 unsigned HAP 已生成。"
+    elif status == "failed":
+        latest.notes = f"Expo bundle 已生成，但 unsigned HAP 构建失败：{error[:800] or '请查看构建日志。'}"
+    elif status == "skipped":
+        latest.notes = "Expo bundle 已生成，本次未启用 unsigned HAP 构建。"
     return save_run(latest)
 
 
@@ -1834,14 +1905,15 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
     workspace = Path(record.workspace)
     expo_state = load_expo_fast_state(workspace)
     run_status = expo_fast_run_status(record, expo_state)
+    hap_result = load_expo_hap_result(workspace)
+    hap_path = resolve_expo_hap_artifact(workspace, hap_result)
+    package_status = expo_hap_status(expo_state, hap_result, run_status, bool(hap_path))
+    package_error = expo_hap_package_error(hap_result, package_status, bool(hap_path))
     if run_status == "completed":
-        record = mark_expo_package_placeholder(record)
+        record = sync_expo_package_status(record, package_status, package_error)
 
     launch_screenshot = workspace / ".expo-fast" / "launch-screenshot.jpeg"
     media_path = launch_screenshot if launch_screenshot.is_file() else None
-    package_status = record.expo_package_status or (
-        "not_implemented" if run_status == "completed" else "waiting_generation"
-    )
     state_name = str((expo_state or {}).get("state") or "").strip().lower()
     detail = str((expo_state or {}).get("detail") or "").strip().lower()
     detail_label = str((expo_state or {}).get("detailLabel") or "").strip()
@@ -1858,15 +1930,29 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
         },
         *summarize_expo_fast_events(expo_state),
     ]
-    if package_status == "not_implemented":
+    package_event = {
+        "ready": "unsigned HAP 构建完成，可以下载。",
+        "failed": "unsigned HAP 构建失败；bundle 仍可发布。",
+        "skipped": "本次未启用 unsigned HAP 构建。",
+    }.get(package_status)
+    if package_event:
         events.append(
             {
                 "kind": "package",
-                "timestamp": record.expo_package_updated_at or (expo_state or {}).get("updatedAt"),
-                "summary": "生成流程已结束，等待打包实现。",
+                "timestamp": (hap_result or {}).get("completedAt")
+                or record.expo_package_updated_at
+                or (expo_state or {}).get("updatedAt"),
+                "summary": package_event,
             }
         )
 
+    package_label = {
+        "waiting_generation": "等待代码生成",
+        "building": "正在构建 unsigned HAP",
+        "ready": "unsigned HAP 已就绪",
+        "failed": "unsigned HAP 构建失败",
+        "skipped": "未启用 HAP 构建",
+    }.get(package_status, package_status)
     waiting_message = {
         "preparing": "正在准备 Expo 工程与能力索引…",
         "model_generation": "Expo Runtime 正在生成应用代码…",
@@ -1874,7 +1960,8 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
         "model_repair": "正在修复 Expo 应用…",
         "repair_verification": "正在验证修复结果…",
         "launching": "正在 Harmony Go 中启动并检查应用…",
-        "done": "Expo 生成已完成，等待打包实现。",
+        "hap_building": "正在等待空闲 slot 并构建 unsigned HAP…",
+        "done": "Expo 生成流程已完成。",
         "error": "Expo 生成失败，请查看左侧状态。",
     }.get(detail, detail_label or "Expo Runtime 正在启动…")
 
@@ -1885,7 +1972,12 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
         "history": [],
         "last_error": "Expo Runtime 暂不支持续跑调整。",
     }
-    distribution_status = "not_implemented" if package_status == "not_implemented" else "waiting_generation"
+    distribution_status = {
+        "ready": "ready_unsigned",
+        "failed": "failed",
+        "building": "building",
+        "skipped": "skipped",
+    }.get(package_status, "waiting_generation")
     return {
         "run": asdict(record),
         "runtime": "expo",
@@ -1903,8 +1995,13 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
             "trace_groups": trace_groups,
             "package": {
                 "status": package_status,
-                "label": "等待打包实现" if package_status == "not_implemented" else "等待生成完成",
-                "updated_at": record.expo_package_updated_at,
+                "label": package_label,
+                "updated_at": (hap_result or {}).get("completedAt") or record.expo_package_updated_at,
+                "error": package_error,
+                "duration_ms": (hap_result or {}).get("durationMs") or 0,
+                "sha256": (hap_result or {}).get("hapSha256") or "",
+                "bundle_name": (hap_result or {}).get("bundleName") or "",
+                "slot_id": (hap_result or {}).get("slotId") or "",
             },
             "serve": serve_state,
         },
@@ -1936,10 +2033,10 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
         "events": events[-20:],
         "questions": {"pending": [], "answered": [], "stale": []},
         "artifacts": {
-            "hap_found": False,
-            "hap_path": "",
-            "hap_display_path": "",
-            "hap_download_path": "",
+            "hap_found": bool(hap_path),
+            "hap_path": str(hap_path) if hap_path else "",
+            "hap_display_path": relative_to_root(hap_path, workspace) if hap_path else "",
+            "hap_download_path": f"/api/runs/{record.run_id}/hap" if hap_path else "",
             "hap_qr_path": "",
             "install_ready": False,
             "install_url": "",
@@ -1954,7 +2051,8 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
             "signed_hap_path": "",
             "signed_hap_url": "",
             "distribution_status": distribution_status,
-            "distribution_error": str((expo_state or {}).get("error") or "") if run_status == "failed" else "",
+            "distribution_error": package_error
+            or (str((expo_state or {}).get("error") or "") if run_status == "failed" else ""),
             "package_can_start": False,
             "package_current": False,
             "package_outdated": False,
@@ -2313,8 +2411,13 @@ def monitor_expo_fast_run(record: RunRecord, launcher: subprocess.Popen[Any], lo
         status = expo_fast_run_status(latest, state)
         if status == "completed":
             latest.status = "completed"
+            workspace = Path(latest.workspace)
+            hap_result = load_expo_hap_result(workspace)
+            hap_path = resolve_expo_hap_artifact(workspace, hap_result)
+            package_status = expo_hap_status(state, hap_result, status, bool(hap_path))
+            package_error = expo_hap_package_error(hap_result, package_status, bool(hap_path))
             latest = save_run(latest)
-            mark_expo_package_placeholder(latest)
+            sync_expo_package_status(latest, package_status, package_error)
             return
         if status == "failed":
             latest.status = "failed"
@@ -3255,16 +3358,21 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         if not record:
             return
         if record.runtime == "expo":
-            self.send_json(
-                {
-                    "ok": False,
-                    "accepted": False,
-                    "status": record.expo_package_status or "not_implemented",
-                    "error": "Expo 打包流程尚未实现。",
-                    "code": "expo_package_not_implemented",
-                },
-                status=HTTPStatus.NOT_IMPLEMENTED,
-            )
+            progress = build_expo_progress_payload(record)
+            package = (progress.get("expo") or {}).get("package") or {}
+            status = str(package.get("status") or "waiting_generation")
+            response = {
+                "ok": status == "ready",
+                "accepted": False,
+                "status": status,
+                "error": str(package.get("error") or ""),
+            }
+            if status == "ready":
+                self.send_json(response)
+            elif status in {"building", "waiting_generation"}:
+                self.send_json(response, status=HTTPStatus.ACCEPTED)
+            else:
+                self.send_json(response, status=HTTPStatus.CONFLICT)
             return
         progress = build_progress_payload(record)
         artifacts = progress.get("artifacts") if isinstance(progress.get("artifacts"), dict) else {}
@@ -3748,7 +3856,12 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         record = self.load_accessible_run(run_id, allow_share=True)
         if not record:
             return
-        hap_path = find_latest_hap(Path(record.workspace))
+        workspace = Path(record.workspace)
+        hap_path = (
+            resolve_expo_hap_artifact(workspace)
+            if record.runtime == "expo"
+            else find_latest_hap(workspace)
+        )
         if not hap_path:
             self.send_error(HTTPStatus.NOT_FOUND, "HAP not found")
             return

@@ -55,6 +55,7 @@ function buildExpoStepDefs(data: RunProgress | null | undefined): StepDef[] {
     model_repair: 2,
     repair_verification: 2,
     launching: 3,
+    hap_building: 4,
     done: 4,
   }
   const lastKnownDetail = [...(state?.history || [])]
@@ -83,9 +84,9 @@ function buildExpoStepDefs(data: RunProgress | null | undefined): StepDef[] {
   }))
   steps.push({
     id: "expo-package",
-    label: "等待打包实现",
-    desc: "Expo 的打包、签名与发布流程将在后续接入",
-    done: statusDone(packageStatus),
+    label: "HAP 构建",
+    desc: "通过 SDK 固定 slot 池构建 unsigned HAP",
+    done: statusDone(packageStatus) || packageStatus === "skipped",
     active: statusActive(packageStatus),
     failed: statusFailed(packageStatus),
     weight: 20,
@@ -437,11 +438,7 @@ export function BuildProgress({
   const followUpStopping = followUpStatus === "interrupting"
   const adjusted = hasFollowUpAdjustment(data)
   const expo = isExpoRun(data)
-  const expoWaitingForPackage = Boolean(
-    expo &&
-      normalize(data?.expo?.state?.state) === "completed" &&
-      normalize(data?.expo?.package?.status) === "not_implemented",
-  )
+  const expoBuildingHap = Boolean(expo && normalize(data?.expo?.package?.status) === "building")
   const waitingForPackage = Boolean(
     adjusted &&
       data?.artifacts.package_can_start &&
@@ -456,8 +453,8 @@ export function BuildProgress({
           <div className="flex items-baseline gap-2">
             <span className="text-sm font-semibold">{expo ? "Expo 生成进度" : adjusted ? "调整进度" : "生成进度"}</span>
             <span className="text-xs text-subtle">
-              {expoWaitingForPackage
-                ? "等待打包实现"
+              {expoBuildingHap
+                ? "正在构建 unsigned HAP"
                 : followUpStopping
                 ? "正在停止本轮调整"
                 : followUpBusy

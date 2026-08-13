@@ -117,7 +117,7 @@ class ExpoFastRuntimeTests(unittest.TestCase):
             ],
         )
 
-    def test_completed_state_maps_to_package_placeholder_and_launch_preview(self) -> None:
+    def test_completed_state_maps_to_unsigned_hap_and_launch_preview(self) -> None:
         workspace = remote_ui_app.EXPO_FAST_APP_ROOT / "completed-app"
         state_dir = workspace / ".expo-fast"
         state_dir.mkdir(parents=True)
@@ -168,6 +168,27 @@ class ExpoFastRuntimeTests(unittest.TestCase):
             ],
         }
         (state_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        hap_root = state_dir / "hap"
+        hap_root.mkdir()
+        hap_path = hap_root / "completed-app.hap"
+        hap_path.write_bytes(b"unsigned-hap")
+        (hap_root / "build-result.json").write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "status": "success",
+                    "jobId": "hap-completed-app",
+                    "slotId": "slot-01",
+                    "productRoot": str(workspace),
+                    "durationMs": 23000,
+                    "hapPath": str(hap_path),
+                    "hapSha256": "test-sha",
+                    "bundleName": "com.example.completed",
+                    "completedAt": "2026-08-11T00:04:00.000Z",
+                }
+            ),
+            encoding="utf-8",
+        )
         now = remote_ui_app.to_iso()
         record = remote_ui_app.RunRecord(
             run_id="e6f6a000000000000000000000000006",
@@ -187,21 +208,69 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["runtime"], "expo")
         self.assertEqual(payload["status"], "completed")
         self.assertEqual(payload["stage"], "done")
-        self.assertEqual(payload["expo"]["package"]["status"], "not_implemented")
-        self.assertEqual(payload["artifacts"]["distribution_status"], "not_implemented")
+        self.assertEqual(payload["expo"]["package"]["status"], "ready")
+        self.assertEqual(payload["expo"]["package"]["slot_id"], "slot-01")
+        self.assertEqual(payload["artifacts"]["distribution_status"], "ready_unsigned")
+        self.assertTrue(payload["artifacts"]["hap_found"])
+        self.assertEqual(payload["artifacts"]["hap_path"], str(hap_path.resolve()))
+        self.assertEqual(
+            payload["artifacts"]["hap_download_path"],
+            "/api/runs/e6f6a000000000000000000000000006/hap",
+        )
+        self.assertEqual(payload["artifacts"]["hap_qr_path"], "")
         self.assertTrue(payload["artifacts"]["media_ready"])
         self.assertEqual(
             payload["artifacts"]["media_path"],
             "/api/runs/e6f6a000000000000000000000000006/media",
         )
-        self.assertEqual(payload["ui"]["waiting_message"], "Expo 生成已完成，等待打包实现。")
-        self.assertEqual(payload["events"][-1]["summary"], "生成流程已结束，等待打包实现。")
+        self.assertEqual(payload["ui"]["waiting_message"], "Expo 生成流程已完成。")
+        self.assertEqual(payload["events"][-1]["summary"], "unsigned HAP 构建完成，可以下载。")
 
         saved = remote_ui_app.load_run(record.run_id)
         self.assertIsNotNone(saved)
         assert saved is not None
-        self.assertEqual(saved.expo_package_status, "not_implemented")
-        self.assertIn("等待打包实现", saved.notes)
+        self.assertEqual(saved.expo_package_status, "ready")
+        self.assertIn("unsigned HAP 已生成", saved.notes)
+
+    def test_expo_hap_download_rejects_artifacts_outside_the_run_output(self) -> None:
+        workspace = remote_ui_app.EXPO_FAST_APP_ROOT / "escaped-hap-app"
+        hap_root = workspace / ".expo-fast" / "hap"
+        hap_root.mkdir(parents=True)
+        outside_hap = Path(self.temp_dir.name) / "outside.hap"
+        outside_hap.write_bytes(b"not-run-owned")
+        result = {
+            "status": "success",
+            "productRoot": str(workspace),
+            "hapPath": str(outside_hap),
+        }
+        (hap_root / "build-result.json").write_text(json.dumps(result), encoding="utf-8")
+
+        self.assertIsNone(remote_ui_app.resolve_expo_hap_artifact(workspace, result))
+        state = {
+            "state": "completed",
+            "status": "passed",
+            "detail": "done",
+            "context": {"hap": {"status": "ready"}},
+        }
+        (workspace / ".expo-fast" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        now = remote_ui_app.to_iso()
+        record = remote_ui_app.RunRecord(
+            run_id="e6f6a000000000000000000000000007",
+            session_name="expo-fast-escaped-hap",
+            prompt="越界 HAP 测试",
+            workspace=str(workspace),
+            variant="expo-fast",
+            created_at=now,
+            updated_at=now,
+            runtime="expo",
+            status="completed",
+        )
+        remote_ui_app.save_run(record)
+
+        payload = remote_ui_app.build_progress_payload(record)
+        self.assertEqual(payload["expo"]["package"]["status"], "failed")
+        self.assertEqual(payload["expo"]["package"]["error"], "unsigned HAP 产物缺失或路径无效。")
+        self.assertFalse(payload["artifacts"]["hap_found"])
 
     def test_claude_trace_is_incremental_grouped_and_redacted(self) -> None:
         workspace = remote_ui_app.EXPO_FAST_APP_ROOT / "trace-app"
@@ -325,7 +394,7 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         self.assertEqual(grouped[1]["action_count"], 1)
         self.assertEqual(grouped[1]["message_count"], 1)
 
-    def test_expo_package_endpoint_is_an_explicit_placeholder(self) -> None:
+    def test_expo_package_endpoint_reports_automatic_hap_progress(self) -> None:
         status, headers, payload = self.request(
             "POST",
             "/api/runs",
@@ -342,9 +411,9 @@ class ExpoFastRuntimeTests(unittest.TestCase):
             cookie=cookie,
         )
 
-        self.assertEqual(status, 501)
-        self.assertEqual(package_payload["code"], "expo_package_not_implemented")
-        self.assertEqual(package_payload["status"], "not_implemented")
+        self.assertEqual(status, 202)
+        self.assertFalse(package_payload["accepted"])
+        self.assertEqual(package_payload["status"], "waiting_generation")
 
     def test_completed_expo_run_can_publish_and_revoke_gateway_preview(self) -> None:
         status, headers, payload = self.request(

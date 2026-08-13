@@ -307,6 +307,11 @@ export interface RunProgress {
       status?: string
       label?: string
       updated_at?: string
+      error?: string
+      duration_ms?: number
+      sha256?: string
+      bundle_name?: string
+      slot_id?: string
     }
     serve?: ExpoServeState
     trace_groups?: ExpoClaudeTraceGroup[]

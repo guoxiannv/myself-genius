@@ -18,6 +18,7 @@ const detailLabels = {
   model_repair: '修复代码',
   repair_verification: '验证修复结果',
   launching: '启动并检查应用',
+  hap_building: '构建 unsigned HAP',
   done: '完成',
   error: '失败',
 };

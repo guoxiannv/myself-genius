@@ -14,12 +14,17 @@ export function ExpoRunPanel({ data }: { data: RunProgress }) {
   const completed = stateName === "completed"
   const failed = stateName === "failed" || normalize(data.status) === "failed"
   const running = !completed && !failed
-  const packageWaiting = normalize(data.expo?.package?.status) === "not_implemented"
-  const statusLabel = packageWaiting
-    ? "等待打包实现"
-    : failed
-      ? "运行失败"
-      : state?.detailLabel || state?.label || "正在启动"
+  const packageStatus = normalize(data.expo?.package?.status)
+  const hapReady = packageStatus === "ready" && Boolean(data.artifacts.hap_download_path)
+  const hapFailed = packageStatus === "failed"
+  const hapBuilding = packageStatus === "building"
+  const statusLabel = failed
+    ? "运行失败"
+    : hapFailed
+      ? "HAP 构建失败"
+      : hapReady
+        ? "bundle 与 HAP 已就绪"
+        : data.expo?.package?.label || state?.detailLabel || state?.label || "正在启动"
 
   return (
     <div className="flex h-[clamp(460px,calc(100vh-190px),680px)] min-w-0 flex-col overflow-hidden rounded-[var(--radius-card)] border border-border bg-surface/60">
@@ -38,10 +43,10 @@ export function ExpoRunPanel({ data }: { data: RunProgress }) {
         <span
           className={cn(
             "ml-auto inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium",
-            failed
+            failed || hapFailed
               ? "border-danger/30 bg-danger/10 text-danger"
-              : packageWaiting
-                ? "border-warning/30 bg-warning/10 text-warning"
+              : hapReady
+                ? "border-success/30 bg-success/10 text-success"
                 : "border-accent/30 bg-accent/10 text-accent-soft",
           )}
         >
@@ -64,13 +69,54 @@ export function ExpoRunPanel({ data }: { data: RunProgress }) {
 
         <ExpoServeControl runId={data.run.run_id} value={data.expo?.serve} />
 
-        <ExpoClaudeTraceGroups groups={data.expo?.trace_groups || []} />
-
-        {packageWaiting && (
-          <div className="mx-5 mb-4 rounded-xl border border-warning/25 bg-warning/5 px-3.5 py-3 text-xs leading-relaxed text-warning">
-            Expo 代码生成、验证与启动已经结束。打包、签名和发布流程暂为空实现，当前进度停留在 80%。
+        <div
+          className={cn(
+            "mx-1 mb-4 rounded-xl border px-4 py-3",
+            hapFailed
+              ? "border-danger/25 bg-danger/5"
+              : hapReady
+                ? "border-success/25 bg-success/5"
+                : "border-border bg-surface-raised/50",
+          )}
+        >
+          <div className="flex items-center gap-2">
+            {hapBuilding && (
+              <span className="h-4 w-4 animate-spin rounded-full border-2 border-accent/30 border-t-accent" />
+            )}
+            <p className="text-sm font-semibold">unsigned HAP</p>
+            <span className="ml-auto text-[11px] text-muted">{data.expo?.package?.label}</span>
           </div>
-        )}
+          {hapReady ? (
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <a
+                href={data.artifacts.hap_download_path}
+                className="inline-flex items-center justify-center rounded-lg bg-accent px-3 py-2 text-xs font-semibold text-background transition-colors hover:bg-accent-soft"
+              >
+                下载 unsigned HAP
+              </a>
+              {data.expo?.package?.bundle_name && (
+                <span className="break-all text-[11px] text-muted">{data.expo.package.bundle_name}</span>
+              )}
+              {data.expo?.package?.sha256 && (
+                <span className="w-full break-all font-mono text-[10px] text-subtle">
+                  SHA-256 {data.expo.package.sha256}
+                </span>
+              )}
+            </div>
+          ) : hapFailed ? (
+            <p className="mt-2 break-words text-xs leading-relaxed text-danger">
+              {data.expo?.package?.error || "HAP 构建失败，请查看 Runner 构建日志。bundle.js 仍可正常发布。"}
+            </p>
+          ) : packageStatus === "skipped" ? (
+            <p className="mt-2 text-xs text-muted">本次任务未启用 HAP 构建。</p>
+          ) : (
+            <p className="mt-2 text-xs text-muted">
+              {hapBuilding ? "正在等待空闲 slot 并执行热构建…" : "代码生成完成后会自动进入 HAP 构建。"}
+            </p>
+          )}
+        </div>
+
+        <ExpoClaudeTraceGroups groups={data.expo?.trace_groups || []} />
       </div>
     </div>
   )

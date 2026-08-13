@@ -18,6 +18,7 @@ const defaults = {
   appRoot: resolve(root, '../expo-app'),
   node: process.execPath,
   sdk: resolve(root, '../sdk'),
+  pool: resolve(root, '../harmony-pool'),
   deveco: '/Applications/DevEco-Studio.app',
   claude: 'claude',
   candidate: 'repair',
@@ -25,6 +26,7 @@ const defaults = {
   repairEffort: '',
   timeout: 0,
   repairTimeout: 0,
+  hapWaitSeconds: 3600,
   firstPort: 3355,
 };
 
@@ -65,6 +67,10 @@ Run:
   --repair-timeout MIN   Per-repair deadline; 0 disables it (default).
   --port PORT            Host catalog port; finds a free port from 3355 by default.
   --launch BOOL          Launch Harmony Go; true by default.
+  --hap BOOL             Build an unsigned HAP last; true by default.
+  --no-hap               Skip the final unsigned HAP build.
+  --pool PATH            SDK fixed-slot pool; defaults to ../harmony-pool.
+  --hap-wait-seconds N   FIFO slot wait timeout; defaults to 3600.
   --foreground           Run in this terminal instead of tmux.
   --attach               Attach to tmux immediately after starting.
   --smoke-agent          Run the optional model-driven core-flow smoke.
@@ -88,7 +94,7 @@ function take(argv, index, flag) {
 }
 
 function parse(argv) {
-  const out = { positional: [], launch: true };
+  const out = { positional: [], launch: true, hap: true };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '-h' || arg === '--help') out.help = true;
@@ -98,6 +104,7 @@ function parse(argv) {
     else if (arg === '--smoke-agent') out.smokeAgent = true;
     else if (arg === '--dry-run') out.dryRun = true;
     else if (arg === '--no-launch') out.launch = false;
+    else if (arg === '--no-hap') out.hap = false;
     else if (arg === '--prompt') out.prompt = take(argv, i++, arg);
     else if (arg === '--prompt-file') out.promptFile = take(argv, i++, arg);
     else if (arg === '--name') out.name = take(argv, i++, arg);
@@ -110,9 +117,12 @@ function parse(argv) {
     else if (arg === '--repair-model' || arg === '--repairModel') out.repairModel = take(argv, i++, arg);
     else if (arg === '--repair-effort' || arg === '--repairEffort') out.repairEffort = take(argv, i++, arg);
     else if (arg === '--port') out.port = Number(take(argv, i++, arg));
+    else if (arg === '--pool') out.pool = take(argv, i++, arg);
+    else if (arg === '--hap-wait-seconds') out.hapWaitSeconds = Number(take(argv, i++, arg));
     else if (arg === '--timeout') out.timeout = Number(take(argv, i++, arg));
     else if (arg === '--repair-timeout') out.repairTimeout = Number(take(argv, i++, arg));
     else if (arg === '--launch') out.launch = parseBoolean(take(argv, i++, arg), arg);
+    else if (arg === '--hap') out.hap = parseBoolean(take(argv, i++, arg), arg);
     else if (arg.startsWith('-')) throw new Error(`unknown option: ${arg}`);
     else out.positional.push(arg);
   }
@@ -123,6 +133,10 @@ function parseBoolean(value, flag) {
   if (value === 'true') return true;
   if (value === 'false') return false;
   throw new Error(`${flag} must be true or false`);
+}
+
+function enabledByEnvironment(value) {
+  return !new Set(['0', 'false', 'no', 'off']).has(String(value || '').trim().toLowerCase());
 }
 
 function slug(value) {
@@ -245,6 +259,9 @@ function runnerArguments(plan) {
     '--claudeTimeoutMinutes', String(plan.timeout),
     '--repairTimeoutMinutes', String(plan.repairTimeout),
     '--launch', String(plan.launch),
+    '--hap', String(plan.hap),
+    '--pool', plan.pool,
+    '--hapWaitSeconds', String(plan.hapWaitSeconds),
     '--port', String(plan.port),
   ];
   if (plan.model !== 'automatic') args.push('--model', plan.model);
@@ -264,6 +281,7 @@ function printPlan(plan, tmuxId = '') {
   console.log(`  model   : ${plan.model}/${plan.effort}`);
   console.log(`  repair  : ${plan.repairModel}/${plan.repairEffort}`);
   console.log(`  launch  : ${plan.launch ? `Harmony Go, port ${plan.port}` : 'disabled'}`);
+  console.log(`  HAP     : ${plan.hap ? `SDK pool ${plan.pool}` : 'disabled'}`);
   if (!plan.foreground) {
     console.log(`  tmux    : ${plan.session}${tmuxId ? ` (${tmuxId})` : ''}`);
     console.log(`  log     : ${plan.sessionLog}`);
@@ -289,11 +307,18 @@ async function main() {
   const timeout = checkOptionalTimeout(raw.timeout ?? defaults.timeout, 'timeout');
   const repairTimeout = checkOptionalTimeout(raw.repairTimeout ?? defaults.repairTimeout, 'repair timeout');
   const port = await freePort(checkNumber(raw.port ?? defaults.firstPort, 'port', 1024, 65535));
+  const hapWaitSeconds = checkNumber(
+    raw.hapWaitSeconds ?? Number(process.env.EXPO_HARMONY_HAP_WAIT_SECONDS || defaults.hapWaitSeconds),
+    'HAP wait seconds',
+    1,
+    24 * 60 * 60,
+  );
   const models = resolveModels({ ...raw, candidate });
   const promptInputDir = join(dirname(project), '.expo-fast-inputs');
   const requestPath = prompt.path || join(promptInputDir, `${slug(projectName)}.md`);
   const node = resolveRunnerPath(process.env.EXPO_FAST_NODE || defaults.node);
   const sdk = resolveRunnerPath(process.env.EXPO_HARMONY_SDK_ROOT || defaults.sdk);
+  const pool = resolveRunnerPath(raw.pool || process.env.EXPO_HARMONY_POOL_ROOT || defaults.pool);
   const deveco = resolveRunnerPath(process.env.DEVECO_PATH || defaults.deveco);
   const claude = commandOrPath(process.env.CLAUDE_BIN || defaults.claude);
   const moduleCache = (process.env.EXPO_FAST_MODULE_CACHE || '')
@@ -304,8 +329,10 @@ async function main() {
   const sessionLog = join(root, '.expo-fast/session-logs', `${slug(session)}.log`);
   const plan = {
     root, configFile: existsSync(localEnvFile) ? localEnvFile : '', project, requestPath, promptKind: prompt.kind, promptSource: prompt.path || '',
-    session, sessionLog, candidate, ...models, timeout, repairTimeout, port,
-    launch: raw.launch, foreground: Boolean(raw.foreground), attach: Boolean(raw.attach),
+    session, sessionLog, candidate, ...models, timeout, repairTimeout, port, hapWaitSeconds, pool,
+    launch: raw.launch,
+    hap: raw.hap && enabledByEnvironment(process.env.EXPO_HARMONY_HAP_ENABLED),
+    foreground: Boolean(raw.foreground), attach: Boolean(raw.attach),
     smokeAgent: Boolean(raw.smokeAgent), node, sdk, deveco, claude, moduleCache,
   };
 
@@ -342,6 +369,7 @@ async function main() {
     PATH: `${dirname(node)}:${process.env.PATH || '/usr/local/bin:/usr/bin:/bin'}`,
     EXPO_FAST_NODE: node,
     EXPO_HARMONY_SDK_ROOT: sdk,
+    EXPO_HARMONY_POOL_ROOT: pool,
     EXPO_FAST_MODULE_CACHE: moduleCache,
     DEVECO_PATH: deveco,
     CLAUDE_BIN: claude,
@@ -360,6 +388,7 @@ async function main() {
     ['PATH', env.PATH],
     ['EXPO_FAST_NODE', node],
     ['EXPO_HARMONY_SDK_ROOT', sdk],
+    ['EXPO_HARMONY_POOL_ROOT', pool],
     ['EXPO_FAST_MODULE_CACHE', env.EXPO_FAST_MODULE_CACHE],
     ['DEVECO_PATH', deveco],
     ['CLAUDE_BIN', claude],

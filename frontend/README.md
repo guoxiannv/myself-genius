@@ -21,13 +21,14 @@
 - 0→1 首版本在 QA、unsigned HAP 和预览就绪后自动签名并生成二维码；后续调整只刷新代码、HAP 和预览，停在 80%，由用户点击「更新安装包」后才生成最新二维码
 - 后端通过 `node /path/to/tmux-runner.cjs --cwd <workspace> --session <name> --variant <variant> "<prompt>"` 启动任务
 - 状态来自目标工作目录下的 `.arkpilot/state/...`
-- Expo 模式通过 `start-livetest.sh --project <workspace> --prompt-file <prompt.md> --session <name>` 启动，状态来自 `.expo-fast/state.json`；生成完成后停在 80% 并显示「等待打包实现」
+- Expo 模式通过 `start-livetest.sh --project <workspace> --prompt-file <prompt.md> --session <name>` 启动，状态来自 `.expo-fast/state.json`；bundle 导出与 Harmony Go 验收完成后，Runner 会通过 SDK 固定 slot 池构建 unsigned HAP
+- Expo HAP 成功后可在详情页直接下载；当前不执行签名，也不提供扫码安装。HAP 失败不会阻止已经生成的 bundle.js 开启预览发布
 - Expo 详情页会增量读取 `agent-trace.jsonl` 与各轮 `agent-repair-trace*.jsonl`，以折叠分组实时展示经过脱敏的 Claude Action 和 Assistant Message
 
 ## 运行
 
 ```bash
-cd harmony-pilot-remote-ui
+cd frontend
 cp deploy/server.env.example deploy/server.env
 cp deploy/profile-pool.example.json deploy/profile-pool.json
 # 编辑 deploy/server.env：填入路径、签名密码、CLOUDFLARE_TUNNEL_TOKEN
@@ -63,7 +64,7 @@ cd web && npm run build                # 产物在 web/dist
 改完代码或需要重启 Bitfun UI 服务时，用 `scripts/restart_dev.sh`。它只会停止自己管理的 `remote-ui-dev` tmux session，确认 `8080` 和 `8081` 端口已释放，再重新启动新 UI 栈并做 health 检查。若端口被其它进程占用，脚本会报错并列出占用者，不会主动杀掉其它生成中的 tmux 会话或无关进程。
 
 ```bash
-cd /path/to/harmony-pilot-remote-ui
+cd /path/to/Genius/frontend
 
 # 默认后台启动到 tmux session remote-ui-dev，并自动 curl health 验证
 scripts/restart_dev.sh
@@ -376,7 +377,7 @@ data/artifacts/videos/<run_id>/demo.mp4
 ### 运行示例
 
 ```bash
-cd harmony-pilot-remote-ui
+cd frontend
 python3 scripts/hdc_runtime_capture.py \
   --workspace ~/devecoProject/demo \
   --run-id demo-run-001

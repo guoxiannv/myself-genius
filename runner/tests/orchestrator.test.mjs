@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -11,6 +11,7 @@ import { auditProductSource, verifyHarmonyGoArtifacts } from '../scripts/verify-
 import { writeRunState } from '../scripts/run-state.mjs';
 import { canRunRepair, repairArtifactName } from '../scripts/repair-policy.mjs';
 import { pinRuntimeDependencies, stageHarmonyCli } from '../scripts/dependencies.mjs';
+import { runHapPoolBuild } from '../scripts/hap-build.mjs';
 
 const root = resolve(new URL('..', import.meta.url).pathname);
 const script = join(root, 'skills/expo-harmony-fast/scripts/fast-harmony.mjs');
@@ -42,6 +43,9 @@ test('one-click launcher resolves isolated projects, prompt input, models, and t
   assert.equal(plan.repairTimeout, 15);
   assert.equal(plan.timeout, 0);
   assert.equal(plan.launch, false);
+  assert.equal(plan.hap, true);
+  assert.equal(plan.pool, resolve(root, '../harmony-pool'));
+  assert.equal(plan.hapWaitSeconds, 3600);
   assert.equal(plan.port, 3399);
   assert.match(plan.session, /^expo-fast-custom-app$/);
   assert.equal(plan.sessionLog, join(root, '.expo-fast/session-logs/expo-fast-custom-app.log'));
@@ -146,6 +150,9 @@ test('one machine-local env file configures every portable launcher path', () =>
     `EXPO_FAST_APP_ROOT="${appRoot}"`,
     'EXPO_FAST_NODE="/portable/node"',
     'EXPO_HARMONY_SDK_ROOT="/portable/devkit_sdk"',
+    'EXPO_HARMONY_POOL_ROOT="/portable/harmony-pool"',
+    'EXPO_HARMONY_HAP_ENABLED="false"',
+    'EXPO_HARMONY_HAP_WAIT_SECONDS="1800"',
     'EXPO_FAST_MODULE_CACHE="/portable/cache-one/node_modules:/portable/cache-two/node_modules"',
     'DEVECO_PATH="/portable/DevEco-Studio.app"',
     'CLAUDE_BIN="portable-claude"',
@@ -153,7 +160,7 @@ test('one machine-local env file configures every portable launcher path', () =>
     '',
   ].join('\n'));
   const env = { ...process.env, EXPO_FAST_ENV_FILE: envFile };
-  for (const key of ['EXPO_FAST_APP_ROOT', 'EXPO_FAST_NODE', 'EXPO_HARMONY_SDK_ROOT', 'EXPO_FAST_MODULE_CACHE', 'DEVECO_PATH', 'CLAUDE_BIN', 'EXPO_FAST_LIVE_CLAUDE']) delete env[key];
+  for (const key of ['EXPO_FAST_APP_ROOT', 'EXPO_FAST_NODE', 'EXPO_HARMONY_SDK_ROOT', 'EXPO_HARMONY_POOL_ROOT', 'EXPO_HARMONY_HAP_ENABLED', 'EXPO_HARMONY_HAP_WAIT_SECONDS', 'EXPO_FAST_MODULE_CACHE', 'DEVECO_PATH', 'CLAUDE_BIN', 'EXPO_FAST_LIVE_CLAUDE']) delete env[key];
   const launcher = join(root, 'scripts/start-livetest.mjs');
   const result = spawnSync(process.execPath, [launcher, '--dry-run', '--name', 'portable-app', '--launch', 'false'], { encoding: 'utf8', env });
   assert.equal(result.status, 0, result.stderr);
@@ -162,6 +169,9 @@ test('one machine-local env file configures every portable launcher path', () =>
   assert.equal(plan.project, join(appRoot, 'portable-app'));
   assert.equal(plan.node, '/portable/node');
   assert.equal(plan.sdk, '/portable/devkit_sdk');
+  assert.equal(plan.pool, '/portable/harmony-pool');
+  assert.equal(plan.hap, false);
+  assert.equal(plan.hapWaitSeconds, 1800);
   assert.equal(plan.moduleCache, '/portable/cache-one/node_modules:/portable/cache-two/node_modules');
   assert.equal(plan.deveco, '/portable/DevEco-Studio.app');
   assert.equal(plan.claude, 'portable-claude');
@@ -172,7 +182,7 @@ test('monorepo defaults and relative env paths resolve from the runner root', ()
   const launcher = join(root, 'scripts/start-livetest.mjs');
   const missingEnv = join(workspace, 'missing.env');
   const cleanEnv = { ...process.env, EXPO_FAST_ENV_FILE: missingEnv };
-  for (const key of ['EXPO_FAST_APP_ROOT', 'EXPO_FAST_NODE', 'EXPO_HARMONY_SDK_ROOT', 'EXPO_FAST_MODULE_CACHE', 'DEVECO_PATH', 'CLAUDE_BIN']) delete cleanEnv[key];
+  for (const key of ['EXPO_FAST_APP_ROOT', 'EXPO_FAST_NODE', 'EXPO_HARMONY_SDK_ROOT', 'EXPO_HARMONY_POOL_ROOT', 'EXPO_FAST_MODULE_CACHE', 'DEVECO_PATH', 'CLAUDE_BIN']) delete cleanEnv[key];
 
   const defaultsResult = spawnSync(process.execPath, [launcher, '--dry-run', '--name', 'default-app', '--launch', 'false'], {
     cwd: workspace,
@@ -183,12 +193,14 @@ test('monorepo defaults and relative env paths resolve from the runner root', ()
   const defaultsPlan = JSON.parse(defaultsResult.stdout);
   assert.equal(defaultsPlan.project, resolve(root, '../expo-app/default-app'));
   assert.equal(defaultsPlan.sdk, resolve(root, '../sdk'));
+  assert.equal(defaultsPlan.pool, resolve(root, '../harmony-pool'));
 
   const relativeEnv = join(workspace, 'relative.env');
   writeFileSync(relativeEnv, [
     'EXPO_FAST_APP_ROOT="../generated-apps"',
     `EXPO_FAST_NODE="${process.execPath}"`,
     'EXPO_HARMONY_SDK_ROOT="../sdk"',
+    'EXPO_HARMONY_POOL_ROOT="../harmony-pool"',
     'EXPO_FAST_MODULE_CACHE="../cache-one/node_modules:../cache-two/node_modules"',
     'DEVECO_PATH="../DevEco-Studio.app"',
     'CLAUDE_BIN="../bin/claude"',
@@ -204,6 +216,7 @@ test('monorepo defaults and relative env paths resolve from the runner root', ()
   const relativePlan = JSON.parse(relativeResult.stdout);
   assert.equal(relativePlan.project, resolve(root, '../generated-apps/relative-app'));
   assert.equal(relativePlan.sdk, resolve(root, '../sdk'));
+  assert.equal(relativePlan.pool, resolve(root, '../harmony-pool'));
   assert.equal(relativePlan.moduleCache, `${resolve(root, '../cache-one/node_modules')}:${resolve(root, '../cache-two/node_modules')}`);
   assert.equal(relativePlan.deveco, resolve(root, '../DevEco-Studio.app'));
   assert.equal(relativePlan.claude, resolve(root, '../bin/claude'));
@@ -220,7 +233,7 @@ test('portable launchers contain no user-specific path and keep machine config o
   assert.doesNotMatch(`${shell}\n${launcher}\n${runner}\n${dependencies}\n${helper}\n${skill}`, /\/Users\/stefan/);
   assert.match(shell, /source "\$LOCAL_ENV"/);
   assert.match(launcher, /process\.loadEnvFile\(localEnvFile\)/);
-  for (const key of ['EXPO_FAST_APP_ROOT', 'EXPO_FAST_NODE', 'EXPO_HARMONY_SDK_ROOT', 'EXPO_FAST_MODULE_CACHE', 'DEVECO_PATH', 'CLAUDE_BIN']) assert.match(example, new RegExp(key));
+  for (const key of ['EXPO_FAST_APP_ROOT', 'EXPO_FAST_NODE', 'EXPO_HARMONY_SDK_ROOT', 'EXPO_HARMONY_POOL_ROOT', 'EXPO_FAST_MODULE_CACHE', 'DEVECO_PATH', 'CLAUDE_BIN']) assert.match(example, new RegExp(key));
   assert.doesNotMatch(skill, /EXPO_FAST_APP_ROOT/);
 });
 
@@ -272,6 +285,76 @@ test('external controller records a terminal failed state without invoking the p
   assert.equal(state.history[0].state, 'failed');
   assert.equal(state.history.at(-1).state, 'failed');
   assert.match(state.error, /unknown effort/);
+});
+
+test('runner publishes a validated SDK pool HAP into the run-owned output', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-hap-'));
+  const project = join(workspace, 'product');
+  const sdk = join(workspace, 'sdk');
+  const pool = join(workspace, 'pool');
+  mkdirSync(project);
+  mkdirSync(sdk);
+  mkdirSync(pool);
+  let invocation;
+  const result = runHapPoolBuild({
+    project,
+    sdk,
+    pool,
+    runId: 'run-123',
+    commandRunner(command, args) {
+      invocation = { command, args };
+      const output = args[args.indexOf('--output') + 1];
+      const jobId = args[args.indexOf('--job-id') + 1];
+      const hapPath = join(output, `${basename(project)}-${jobId}.hap`);
+      mkdirSync(output, { recursive: true });
+      writeFileSync(hapPath, 'unsigned-hap');
+      const hapSha256 = createHash('sha256').update('unsigned-hap').digest('hex');
+      writeFileSync(join(output, 'build-result.json'), JSON.stringify({
+        schemaVersion: 1,
+        status: 'success',
+        jobId,
+        slotId: 'slot-02',
+        productRoot: realpathSync(project),
+        durationMs: 1234,
+        hapPath,
+        hapSha256,
+        bundleName: 'com.example.product',
+      }));
+      return { status: 0, stdout: 'ok', stderr: '' };
+    },
+  });
+  assert.equal(invocation.command, process.execPath);
+  assert.equal(invocation.args[1], 'build');
+  assert.equal(invocation.args[invocation.args.indexOf('--pool') + 1], pool);
+  assert.equal(result.status, 'ready');
+  assert.equal(result.slotId, 'slot-02');
+  assert.equal(result.bundleName, 'com.example.product');
+  assert.ok(result.hapPath.startsWith(join(realpathSync(project), '.expo-fast/hap')));
+  assert.equal(existsSync(result.hapPath), true);
+});
+
+test('runner records a bounded HAP failure when the SDK pool command cannot publish diagnostics', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-hap-failure-'));
+  const project = join(workspace, 'product');
+  const sdk = join(workspace, 'sdk');
+  mkdirSync(project);
+  mkdirSync(sdk);
+  const result = runHapPoolBuild({
+    project,
+    sdk,
+    pool: join(workspace, 'missing-pool'),
+    runId: 'run-failed',
+    commandRunner() {
+      return { status: 7, stdout: '', stderr: 'pool unavailable' };
+    },
+  });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failureStage, 'pool-command');
+  assert.match(result.error, /pool unavailable/);
+  assert.equal(existsSync(result.resultPath), true);
+  const persisted = JSON.parse(readFileSync(result.resultPath, 'utf8'));
+  assert.equal(persisted.status, 'failed');
+  assert.equal(persisted.productRoot, realpathSync(project));
 });
 
 test('catalog captures emulator-validated support exports', () => {

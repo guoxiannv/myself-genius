@@ -9,6 +9,7 @@ const skillRoot = resolve(new URL('..', import.meta.url).pathname);
 const runnerRoot = resolve(skillRoot, '../..');
 const sdk = resolve(runnerRoot, process.env.EXPO_HARMONY_SDK_ROOT || '../sdk');
 const template = join(skillRoot, 'assets/expo-harmony-template');
+const harmonyBundlePrefix = 'com.genius.';
 const scaffoldCapabilityPackages = ['react-native-svg'];
 const harmonyGoRuntimeOverrides = {
   '@react-native-async-storage/async-storage': {
@@ -198,8 +199,9 @@ function prepare(projectDir, requestFile) {
   if (!existsSync(join(template, 'metro.harmony.config.js'))) throw new Error(`self-contained template is incomplete: ${template}`);
   cpSync(template, projectDir, { recursive: true });
   const slug = basename(projectDir).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'generated';
-  replacePlaceholders(projectDir, { APP_NAME: slug, APP_SLUG: slug, APP_SCHEME: slug.replaceAll('-', ''), BUNDLE_IDENTIFIER: `com.fwxt.fast.${slug.replaceAll('-', '.')}`.slice(0, 127) });
-  const app = json(join(projectDir, 'app.json')); app.expo.name = slug; app.expo.slug = slug; app.expo.scheme = slug; app.expo.harmony.bundleIdentifier = `com.fwxt.fast.${slug.replaceAll('-', '.')}`.slice(0, 127); writeJson(join(projectDir, 'app.json'), app);
+  const bundleIdentifier = `${harmonyBundlePrefix}${slug.replaceAll('-', '.')}`.slice(0, 127);
+  replacePlaceholders(projectDir, { APP_NAME: slug, APP_SLUG: slug, APP_SCHEME: slug.replaceAll('-', ''), BUNDLE_IDENTIFIER: bundleIdentifier });
+  const app = json(join(projectDir, 'app.json')); app.expo.name = slug; app.expo.slug = slug; app.expo.scheme = slug; app.expo.harmony.bundleIdentifier = bundleIdentifier; writeJson(join(projectDir, 'app.json'), app);
   mkdirSync(join(projectDir, '.expo-fast'), { recursive: true });
   writeFileSync(join(projectDir, '.expo-fast/request.md'), readFileSync(resolve(requestFile)));
   const capabilityCatalog = catalog(projectDir);

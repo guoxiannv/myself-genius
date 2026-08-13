@@ -9,6 +9,7 @@ import { assertCurrentMiniApp, inspectCurrentMiniApp } from './layout-identity.m
 import { auditImplementationTrace } from './trace-scope.mjs';
 import { writeRunState } from './run-state.mjs';
 import { canRunRepair, repairArtifactName } from './repair-policy.mjs';
+import { readExistingHapResult, runHapPoolBuild } from './hap-build.mjs';
 
 const root = resolve(new URL('..', import.meta.url).pathname);
 const candidates = JSON.parse(readFileSync(join(root, 'config/candidates.json'), 'utf8')).candidates;
@@ -378,10 +379,36 @@ async function main() {
     } finally { live.server.close(); clearReverse(live.target); }
   }
   if (o.validateSmoke === 'true') metrics.smoke = validateSmoke(project);
+  let hap = readExistingHapResult(project);
+  if (o.hap !== 'false' && hap?.status !== 'ready') {
+    const pool = resolve(o.pool || process.env.EXPO_HARMONY_POOL_ROOT || join(root, '../harmony-pool'));
+    const waitSeconds = Number(o.hapWaitSeconds || process.env.EXPO_HARMONY_HAP_WAIT_SECONDS || 3600);
+    setRunState(activeRunState.state, 'hap_building', { hap: { status: 'building', pool, startedAt: new Date().toISOString() } });
+    progress(`build unsigned HAP through SDK pool · pool=${pool}`);
+    const startedAt = Date.now();
+    hap = runHapPoolBuild({ project, sdk, pool, node: node22, runId: activeRunState.runId, waitSeconds });
+    metrics.stages.hapBuildMs = Date.now() - startedAt;
+    progress(hap.status === 'ready'
+      ? `unsigned HAP ready · slot=${hap.slotId || 'unknown'} · ${hap.hapPath}`
+      : `unsigned HAP failed · ${hap.failureStage || 'unknown'} · ${hap.error || 'see build-result.json'}`);
+  } else if (o.hap === 'false') {
+    hap = { status: 'skipped' };
+  }
+  metrics.hap = hap;
   const completedAt = new Date().toISOString();
   if (resume) (metrics.resumes ||= []).push({ startedAt: invocationStartedAt.toISOString(), completedAt, ms: Date.now() - invocationStartedAt.getTime(), purpose: o.launch === 'false' ? 'reverify' : 'core-smoke' });
-  metrics.completedAt = completedAt; metrics.status = 'passed'; writeJson(join(project, '.expo-fast/result.json'), metrics); setRunState('completed', 'done', { result: 'passed' }); console.log(JSON.stringify(metrics, null, 2));
-  progress('end-to-end live test passed');
+  metrics.completedAt = completedAt;
+  metrics.totalMs = Date.now() - invocationStartedAt.getTime();
+  metrics.status = hap?.status === 'failed' ? 'partial' : 'passed';
+  writeJson(join(project, '.expo-fast/result.json'), metrics);
+  setRunState('completed', 'done', {
+    result: hap?.status === 'failed' ? 'bundle-passed-hap-failed' : 'passed',
+    hap,
+  });
+  console.log(JSON.stringify(metrics, null, 2));
+  progress(hap?.status === 'failed'
+    ? 'end-to-end live test completed · bundle passed · unsigned HAP failed'
+    : 'end-to-end live test passed');
 }
 main().catch((e) => {
   try { setRunState('failed', 'error', {}, { error: e.stack || e }); }

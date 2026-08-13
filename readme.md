@@ -24,7 +24,12 @@ git clone --recurse-submodules https://github.com/BitFun-Platform/Genius.git
 git submodule update --init --recursive
 ```
 
-获取 SDK 跟踪分支 `dev/SupportOH` 的最新提交：
+以上命令会检出 Genius 当前记录、并已经过配套验证的 SDK commit。普通部署不要执行
+`git submodule update --remote sdk`，以免本机 SDK 偏离主仓库固定的版本。
+
+### 维护者升级 SDK
+
+只有在需要主动更新 Genius 的 SDK 指针时，才获取跟踪分支 `dev/SupportOH` 的最新提交：
 
 ```bash
 git submodule update --remote sdk
@@ -36,6 +41,81 @@ SDK 更新后，主仓库中的 submodule commit 引用也会发生变化，需�
 git add sdk
 git commit -m "Update SDK submodule"
 git push
+```
+
+## 初始化 Expo HAP 构建池
+
+Expo Runner 在 bundle 导出和 Harmony Go 验收之后，会通过 SDK 的固定 slot 池构建 unsigned
+HAP。机器首次部署或 SDK full-profile 变化后，在仓库根目录执行：
+
+```bash
+cp runner/.env.example runner/.env
+# 编辑 runner/.env 中的 Node、DevEco 与 Claude 路径
+runner/setup-harmony-pool.sh
+```
+
+脚本会在需要时通过 Corepack 安装 SDK pool 准备流程所需的最小 workspace 依赖，然后在仓库根目录
+创建被 Git 忽略的 `harmony-pool/`，初始化四个 slot 并依次预热。可通过
+`EXPO_HARMONY_POOL_ROOT` 和 `EXPO_HARMONY_POOL_SIZE` 覆盖路径与数量。预热完成后，每个生成任务
+由 Runner 提交一个 SDK pool job；SDK 负责排队、租约、缓存、Hvigor 构建和 HAP 产物校验。
+
+默认四个 slot 的初始化磁盘预检门槛约为 `4 × 8 GiB + 20 GiB = 52 GiB`。这是 SDK 用于预留
+slot 空间和系统剩余空间的安全门槛，不代表 Pool 最终一定占用 52 GiB。首次完整预热需要依次完成
+四次原生构建，可能持续几十分钟；后续命中 warm slot 的应用构建会明显更快。
+
+初始化脚本还支持：
+
+```bash
+# 只创建 slot，不执行首次预热
+runner/setup-harmony-pool.sh --no-warm
+
+# 需要重新验证当前 SDK 时，强制重建已经 warm 的 slot
+runner/setup-harmony-pool.sh --force
+```
+
+脚本结束前会输出 Pool 状态 JSON。默认配置初始化成功时应满足：
+
+- `size` 为 `4`；
+- `queuedJobs` 为空数组；
+- `slot-01` 至 `slot-04` 的 `status` 均为 `idle`；
+- 四个 slot 的 `warm` 均为 `true`。
+
+如果只是 SDK commit 变化，重新执行脚本即可识别并预热旧 slot；如果 SDK 的 full-profile
+`profileId` 发生变化，需要为 `EXPO_HARMONY_POOL_ROOT` 配置一个新的空目录，不能复用旧 Pool。
+
+## 本地验证 Expo 到 HAP
+
+以下流程只启动本地 Frontend、Python API 和 Harmony Go Gateway，不需要 Cloudflare、Profile、
+HPack 签名材料或 `frontend/deploy/server.env`。开始前请确保 `runner/.env` 已配置 Node.js 22.13+、
+DevEco Studio 和 Claude CLI，DevEco 模拟器已经启动，并且 `tmux` 可用。
+
+在仓库根目录安装 Frontend 依赖：
+
+```bash
+python3 -m venv frontend/.venv
+frontend/.venv/bin/python3 -m pip install -r frontend/requirements.txt
+npm --prefix frontend/web ci
+```
+
+启动本地服务：
+
+```bash
+frontend/scripts/restart_local.sh --tmux
+```
+
+浏览器打开 `http://127.0.0.1:8180`，选择 `Expo`，输入“生成一个简单番茄闹钟APP”并提交。
+任务完成后，详情页应同时显示可用的 bundle 预览和 unsigned HAP 下载入口。对应本地产物位于：
+
+```text
+expo-app/remote-ui-<run_id>/dist/harmony-go/bundle.js
+expo-app/remote-ui-<run_id>/.expo-fast/hap/*.hap
+expo-app/remote-ui-<run_id>/.expo-fast/hap/build-result.json
+```
+
+停止本地服务：
+
+```bash
+frontend/scripts/restart_local.sh --stop
 ```
 
 > 请先确保新的 SDK commit 已经推送到 `BitFun-Platform/devkit_sdk`，再提交主仓库中的 submodule 引用，避免其他协作者无法检出该版本。

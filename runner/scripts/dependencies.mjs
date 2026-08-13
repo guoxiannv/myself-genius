@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, cpSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, cpSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { coreCachePackages, resolveCapabilities, scaffoldCapabilityPackages } from './fast-harmony.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const helper = join(root, 'skills/expo-harmony-fast/scripts/fast-harmony.mjs');
 export const runtimeCorePackages = ['expo-asset', 'expo-constants', 'expo-modules-core'];
 
 function readJson(path, fallback = null) {
@@ -47,7 +47,7 @@ function packageVersion(modulesRoot, name) {
 }
 
 function configuredCaches() {
-  return (process.env.EXPO_FAST_MODULE_CACHE || '').split(delimiter).filter(Boolean).map((value) => resolve(value));
+  return (process.env.EXPO_FAST_MODULE_CACHE || '').split(delimiter).filter(Boolean).map((value) => resolve(root, value));
 }
 
 function npmInvocation() {
@@ -72,6 +72,94 @@ function installProjectDependencies(project, logName, exactDependencies = {}) {
     '--no-fund',
     '--package-lock=false',
   ], { cwd: project, env: { COREPACK_ENABLE_PROJECT_SPEC: '0' }, log: join(project, '.expo-fast', logName) });
+}
+
+function assertCompatibleCache(cache, fingerprint) {
+  const mismatches = coreCachePackages
+    .map((name) => [name, fingerprint?.packageVersions?.[name], packageVersion(cache, name)])
+    .filter(([, expected, actual]) => expected && expected !== actual);
+  if (mismatches.length) {
+    throw new Error(`module cache does not match selected SDK:\n${mismatches
+      .map(([name, expected, actual]) => `- ${name}: expected ${expected}, found ${actual || 'missing'}`)
+      .join('\n')}`);
+  }
+}
+
+function mergeMissingCacheEntries(source, target) {
+  for (const entry of readdirSync(source)) {
+    const sourceEntry = join(source, entry);
+    const targetEntry = join(target, entry);
+    if (!entry.startsWith('@')) {
+      if (!existsSync(targetEntry)) cpSync(sourceEntry, targetEntry, { recursive: true, mode: 2, dereference: true });
+      continue;
+    }
+    mkdirSync(targetEntry, { recursive: true });
+    for (const packageName of readdirSync(sourceEntry)) {
+      const sourcePackage = join(sourceEntry, packageName);
+      const targetPackage = join(targetEntry, packageName);
+      if (!existsSync(targetPackage)) cpSync(sourcePackage, targetPackage, { recursive: true, mode: 2, dereference: true });
+    }
+  }
+}
+
+function seedFromConfiguredCache(project, caches, runtimePins) {
+  const fingerprint = readJson(join(project, '.expo-fast/sdk-fingerprint.json'));
+  if (!fingerprint) throw new Error(`SDK fingerprint is missing under ${project}`);
+  const compatible = [];
+  const rejected = [];
+  for (const cache of caches.filter(existsSync)) {
+    try {
+      assertCompatibleCache(cache, fingerprint);
+      compatible.push(cache);
+    } catch (error) {
+      rejected.push({ cache, reason: error.message });
+    }
+  }
+  const primary = compatible[0];
+  if (!primary) {
+    throw new Error(`no compatible node_modules cache\n${rejected
+      .map((item) => `${item.cache}: ${item.reason}`)
+      .join('\n')}`);
+  }
+
+  const modules = join(project, 'node_modules');
+  cpSync(primary, modules, { recursive: true, mode: 2, dereference: true });
+  for (const cache of compatible.slice(1)) mergeMissingCacheEntries(cache, modules);
+
+  const pkg = readJson(join(project, 'package.json'), {});
+  const scaffoldPins = Object.fromEntries(scaffoldCapabilityPackages
+    .map((name) => [name, pkg.dependencies?.[name] || ''])
+    .filter(([, version]) => version));
+  const expected = { ...scaffoldPins, ...runtimePins };
+  const missingEntries = Object.entries(expected)
+    .filter(([name, version]) => packageVersion(modules, name) !== version);
+  const install = missingEntries.length
+    ? installProjectDependencies(project, 'dependency-cache-fill.log', Object.fromEntries(missingEntries))
+    : { ms: 0, output: '' };
+  const unresolved = Object.entries(expected)
+    .filter(([name, version]) => packageVersion(modules, name) !== version);
+  if (unresolved.length) {
+    throw new Error(`configured cache dependencies are unresolved:\n${unresolved
+      .map(([name, version]) => `- ${name}: expected ${version}, found ${packageVersion(modules, name) || 'missing'}`)
+      .join('\n')}`);
+  }
+
+  const actualNames = [...new Set([...coreCachePackages, ...Object.keys(expected)])].sort();
+  const evidence = {
+    schemaVersion: 2,
+    strategy: 'configured-cache',
+    configuredCaches: caches,
+    selected: primary,
+    rejected,
+    installed: missingEntries.map(([name]) => name).sort(),
+    installedAt: new Date().toISOString(),
+    installMs: install.ms,
+    runtimeCorePins: runtimePins,
+    actualVersions: Object.fromEntries(actualNames.map((name) => [name, packageVersion(modules, name)])),
+    sdkFingerprint: fingerprint,
+  };
+  writeJson(join(project, '.expo-fast/module-cache.json'), evidence);
+  return evidence;
 }
 
 export function pinRuntimeDependencies(projectRoot, sdkRoot = resolve(root, process.env.EXPO_HARMONY_SDK_ROOT || '../sdk')) {
@@ -124,30 +212,8 @@ export function seedDependencies(projectRoot, sdkRoot = resolve(root, process.en
   const caches = configuredCaches();
   let cacheFailure = null;
   if (caches.length) {
-    const cached = spawnSync(process.execPath, [helper, 'seed-modules', project], {
-      cwd: root,
-      env: { ...process.env, EXPO_HARMONY_SDK_ROOT: resolve(sdkRoot), EXPO_FAST_MODULE_CACHE: caches.join(delimiter) },
-      encoding: 'utf8',
-      maxBuffer: 128 * 1024 * 1024,
-    });
-    if (cached.status === 0) {
-      const evidencePath = join(project, '.expo-fast/module-cache.json');
-      const evidence = readJson(evidencePath, { schemaVersion: 2 });
-      const runtimeMismatches = Object.entries(runtime.pins)
-        .filter(([name, version]) => packageVersion(join(project, 'node_modules'), name) !== version);
-      if (!runtimeMismatches.length) {
-        evidence.schemaVersion = 2;
-        evidence.strategy = 'configured-cache';
-        evidence.runtimeCorePins = runtime.pins;
-        writeJson(evidencePath, evidence);
-        return evidence;
-      }
-      cacheFailure = `configured cache has incompatible Harmony runtime dependencies: ${runtimeMismatches
-        .map(([name, version]) => `${name} expected ${version}, found ${packageVersion(join(project, 'node_modules'), name) || 'missing'}`)
-        .join('; ')}`;
-    } else {
-      cacheFailure = `${cached.stderr || cached.stdout || `cache seed exited ${cached.status}`}`.trim().slice(0, 8000);
-    }
+    try { return seedFromConfiguredCache(project, caches, runtime.pins); }
+    catch (error) { cacheFailure = String(error.stack || error).slice(0, 8000); }
   }
 
   const install = installProjectDependencies(project, 'dependency-install.log');
@@ -156,8 +222,7 @@ export function seedDependencies(projectRoot, sdkRoot = resolve(root, process.en
 
 export function syncDependencies(projectRoot) {
   const project = resolve(projectRoot);
-  run(process.execPath, [helper, 'resolve-capabilities', project], { cwd: root });
-  const resolution = readJson(join(project, '.expo-fast/capability-selection.json'));
+  const resolution = resolveCapabilities(project);
   if (!resolution || resolution.status !== 'pass') throw new Error(`capability selection did not pass under ${project}`);
   const modules = join(project, 'node_modules');
   const selectedCapabilities = Object.fromEntries(resolution.selected.map((entry) => [entry.package, entry.version]));

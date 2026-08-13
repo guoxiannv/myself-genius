@@ -1,16 +1,28 @@
-# ExpoHarmonyFast 编排优化交接
+# Expo Harmony Fast 编排优化交接
 
-更新日期：2026-08-10（Asia/Shanghai）
+更新日期：2026-08-14（Asia/Shanghai）
 
-## 1. 交接结论
+> 本文件主要保留 2026-08-09 至 2026-08-10 的实验结论和决策背景。当前运行入口、目录结构和脚本职责以 `README.md` 为准；历史轮次的固定数据不要改写为当前运行状态。
 
-本轮 Prompt、Skill、runner、gate、测试和实验报告的修改都在：
+## 0. 当前架构（2026-08-14）
 
-`/Users/stefan/Workspaces/fe-project/ExpoHarmonyFast`
+编排现位于 Genius 仓库的 `runner/` 子目录，生成应用默认放在相邻的 `expo-app/`。运行时已停止依赖 `skills/expo-harmony-fast/SKILL.md`：模板迁到 `templates/expo-harmony/`，运行合同迁到 `docs/runtime-contract.md`，能力与模板逻辑迁到 `scripts/fast-harmony.mjs`。
+
+当前职责边界如下：
+
+- `scripts/run-livetest.mjs` 是唯一端到端状态机和模型回合控制器。
+- `scripts/fast-harmony.mjs` 只负责模板准备、capability catalog 和 capability resolution。
+- `scripts/dependencies.mjs` 统一负责 runtime pin、依赖缓存、能力依赖同步和 Harmony Go export。
+- 独立的 `scripts/catalog.mjs` 已删除；`npm run catalog -- <project>` 直接调用 `fast-harmony.mjs catalog`。
+- 当前模型 prompt 保持不变，仍由 `scripts/run-livetest.mjs` 和复制到生成工程的 `AGENTS.md` 共同构成。
+
+## 1. 历史交接结论
+
+以下结论描述的是当时的 Prompt、Skill、runner、gate、测试和实验报告状态；相关文件现已迁入 `runner/`，但历史实验数据保持原样。
 
 Live Test 生成应用按约定放在：
 
-`/Users/stefan/Workspaces/fe-project/expo-app`
+`../expo-app`
 
 当前有效的三轮独立实验分别是：
 
@@ -38,7 +50,7 @@ trace。编排仓中的 `experiments/cold-start-v1/*-trace.json` 是它们的汇
 - SVG 仍是模板自带 icon system 的 scaffold capability；其他 Expo/RN 产品能力由单次
   implementation turn 在紧凑 brief 中选择，并以 catalog 精确版本写入
   `package.json.dependencies`。
-- runner 在 typecheck 前执行 `sync-dependencies`，确定性保护 scaffold、拒绝未支持包和
+- runner 在 typecheck 前通过 `scripts/dependencies.mjs sync` 确定性保护 scaffold、拒绝未支持包和
   版本漂移、安装所选依赖，并写 `.expo-fast/capability-selection.json`。
 - JSON 导出/导入不再允许退化为页面展示和手工粘贴；source gate 分别要求
   `expo-sharing.shareAsync` 与 `expo-document-picker.getDocumentAsync`。
@@ -53,7 +65,7 @@ Runner 又补齐了响应式合同：所有断点都使用 `useWindowDimensions(
 `<640` 为底部导航/单列，平板 `640–1279` 为顶部横向导航，桌面 `>=1280` 为固定左侧栏
 加多栏主内容。桌面侧栏和主内容必须是同一个横向根容器的兄弟节点，不能把侧栏写在
 横向 frame 外。模板已从旧的 `>=1000` 修正为 `>=1280`，并给桌面列表提供约 48% 卡片
-换行结构；Runner Prompt、Skill、runtime contract、source audit 和回归测试同步更新。
+换行结构；当时的 Runner Prompt、Skill、runtime contract、source audit 和回归测试同步更新。
 
 2026-08-10 新一轮 `cold-v4-learning-go` 的原始实现回合在 20 分钟截止，且 trace 证明
 它读取了 `test-project-go` 的 21 个业务源码文件；新工程非短唯一行有 73.9% 可在旧工程
@@ -64,7 +76,7 @@ source-boundary invalid”结论。恢复后的应用最终通过 exact-app 核�
 
 本次同时补了三道通用门禁：`scripts/trace-scope.mjs` 拒绝跨项目/依赖/隐藏编排读取和
 Bash；identity gate 拒绝可见 runtime error overlay；launch 对同 manifest id 先移除再
-安装当前 catalog Bundle。全量测试现为 15/15 PASS。
+安装当前 catalog Bundle。当时的全量测试为 15/15 PASS；当前测试数量可能变化，以 `npm test` 结果为准。
 
 ## 2. 必须先读的文件
 
@@ -78,8 +90,9 @@ Bash；identity gate 拒绝可见 runtime error overlay；launch 对同 manifest
 6. `scripts/run-livetest.mjs`
 7. `scripts/validate-smoke.mjs`
 8. `scripts/verify-product.mjs`
-9. `skills/expo-harmony-fast/SKILL.md`
-10. `config/candidates.json`
+9. `scripts/fast-harmony.mjs`
+10. `docs/runtime-contract.md`
+11. `config/candidates.json`
 
 完整会话记录在 `session-history/README.md` 所列文件中。
 
@@ -201,15 +214,16 @@ Cold 4 则不同：trace 明确读取 `test-project-go` 的完整业务实现以
 
 ## 8. 关键路径
 
-编排仓：
+编排仓（以下均相对于 `runner/`）：
 
-- `/Users/stefan/Workspaces/fe-project/ExpoHarmonyFast`
 - runner：`scripts/run-livetest.mjs`
 - trace analyzer：`scripts/analyze-trace.mjs`
 - trace scope gate：`scripts/trace-scope.mjs`
 - product audit：`scripts/verify-product.mjs`
 - smoke validator：`scripts/validate-smoke.mjs`
-- Skill：`skills/expo-harmony-fast/SKILL.md`
+- capability/template helper：`scripts/fast-harmony.mjs`
+- technical template：`templates/expo-harmony/`
+- runtime contract：`docs/runtime-contract.md`
 - 场景 prompt：`prompts/learning-goals.md`
 - 总报告：`EXPERIMENT-REPORT.md`
 
@@ -247,24 +261,22 @@ Cold experiments：
 修改 workflow contract 后必须运行：
 
 ```sh
-cd /Users/stefan/Workspaces/fe-project/ExpoHarmonyFast
+cd runner
 npm test
 node --check scripts/run-livetest.mjs
 node --check scripts/analyze-trace.mjs
-python3 /Users/stefan/.codex/skills/.system/skill-creator/scripts/quick_validate.py \
-  skills/expo-harmony-fast
+node --check scripts/fast-harmony.mjs
+node --check scripts/dependencies.mjs
 ```
 
-HarmonyOS UI 操作遵循：
-
-`/Users/stefan/.codex/skills/harmonyos-perform-ui-action/SKILL.md`
+当前自动化 HarmonyOS UI 操作由 runner 内置的 HDC/identity/smoke 流程负责，不读取外部 Skill。历史人工设备操作曾使用独立的 HarmonyOS UI 指南，但它不是运行时合同。
 
 本轮实际使用设备是 `127.0.0.1:5555`；历史还连接过 `127.0.0.1:5557`。多设备时必须先
 明确目标，不能默认选择第一个。
 
 ## 11. 工作区注意事项
 
-- `ExpoHarmonyFast` 目前不是 Git repository；不要假设可以用 git status/commit。
+- `runner/` 当前属于 Genius Git repository；runner 相关工作使用仓库约定的 `runner/*` 分支。
 - 不要删除旧 warm/cold 工程、trace 或作废实验，它们仍是追溯证据。
 - `session-history/*.jsonl` 文件较大，属于原始会话档案。
 - 本轮结束时 `127.0.0.1:5555` 打开的是恢复后的 `cold-v4-learning-go`；但进程状态不是
@@ -272,7 +284,7 @@ HarmonyOS UI 操作遵循：
 
 ## 12. 2026-08-10 Loop Engineer 最终状态（覆盖旧工作区说明）
 
-仓库现在是 Git repository，当前分支为 `codex/loop-engineer-fast-optimization`。已经完成
+本节记录 2026-08-10 当时的最终状态；当时分支为 `codex/loop-engineer-fast-optimization`。已经完成
 四个有效、互相隔离的 cold-start 轮次；失败/作废样本未计入四轮上限。总报告追加在
 `EXPERIMENT-REPORT.md`，结构化结果在
 `experiments/loop-engineer-20260810/effective-round-{1,2,3,4}.json`。

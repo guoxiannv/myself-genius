@@ -1,4 +1,0 @@
-interface:
-  display_name: "Expo Harmony Fast"
-  short_description: "Generate polished Harmony Go apps quickly"
-  default_prompt: "Use $expo-harmony-fast to build this Expo Harmony Go app end to end."

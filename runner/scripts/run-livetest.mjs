@@ -13,7 +13,7 @@ import { readExistingHapResult, runHapPoolBuild } from './hap-build.mjs';
 
 const root = resolve(new URL('..', import.meta.url).pathname);
 const candidates = JSON.parse(readFileSync(join(root, 'config/candidates.json'), 'utf8')).candidates;
-const helper = join(root, 'skills/expo-harmony-fast/scripts/fast-harmony.mjs');
+const helper = join(root, 'scripts/fast-harmony.mjs');
 const dependencies = join(root, 'scripts/dependencies.mjs');
 const verifier = join(root, 'scripts/verify-product.mjs');
 const sdk = resolve(root, process.env.EXPO_HARMONY_SDK_ROOT || '../sdk');
@@ -205,7 +205,6 @@ function mime(path) { return ({ '.json': 'application/json', '.js': 'application
 async function serve(folder, port) { const server = createServer((req, res) => { const rel = decodeURIComponent((req.url || '/').split('?')[0] === '/' ? '/catalog.json' : req.url.split('?')[0]); const path = resolve(folder, `.${rel}`); if (!path.startsWith(resolve(folder)) || !existsSync(path) || !statSync(path).isFile()) { res.statusCode = 404; res.end('not found'); return; } res.setHeader('Content-Type', mime(path)); createReadStream(path).pipe(res); }); await new Promise((ok, fail) => { const onError = (error) => fail(error); server.once('error', onError); server.listen(port, '127.0.0.1', () => { server.off('error', onError); ok(); }); }); return server; }
 function hdcRun(args) { const r = spawnSync(hdc, args, { encoding: 'utf8' }); if (r.status !== 0 || /\[Fail\]/i.test(`${r.stdout}\n${r.stderr}`)) throw new Error(`hdc ${args.join(' ')} failed\n${r.stdout}${r.stderr}`); return r.stdout || ''; }
 function clearReverse(target) { const list = spawnSync(hdc, ['-t', target, 'fport', 'ls'], { encoding: 'utf8' }).stdout || ''; for (const line of list.split(/\r?\n/)) { const match = line.match(/tcp:(\d+)\s+tcp:(\d+)\s+\[Reverse\]/); if (match && match[1] === '3333') spawnSync(hdc, ['-t', target, 'fport', 'rm', `tcp:${match[1]}`, `tcp:${match[2]}`], { encoding: 'utf8' }); } }
-function copyEvidence(project, catalogRoot) { const catalog = JSON.parse(readFileSync(join(catalogRoot, 'catalog.json'), 'utf8')); const manifest = resolve(catalogRoot, catalog[0].manifestUrl.replace(/^\//, '')); for (const [src, name] of [[join(catalogRoot, 'runtime.json'), 'runtime.json'], [manifest, 'manifest.json']]) writeFileSync(join(project, '.expo-fast', name), readFileSync(src)); }
 async function launch(project, catalogRoot, port) { const targets = hdcRun(['list', 'targets']).trim().split(/\s+/).filter(Boolean); if (!targets.length) throw new Error('no Harmony target'); const target = targets[0]; const server = await serve(catalogRoot, port); try { clearReverse(target); hdcRun(['-t', target, 'rport', 'tcp:3333', `tcp:${port}`]); hdcRun(['-t', target, 'shell', 'aa', 'force-stop', 'host.exp.exponent.harmony']); hdcRun(['-t', target, 'shell', 'aa', 'start', '-a', 'EntryAbility', '-b', 'host.exp.exponent.harmony']); return { target, server }; } catch (e) { server.close(); throw e; } }
 function nodeText(node) { const a = node.attributes || {}; return a.text || a.originalText || a.description || ''; }
 function children(node) { return node.children || []; }
@@ -287,7 +286,7 @@ async function main() {
     progress('prepare cold-start template and capability index');
     run(node22, [helper, 'prepare', project, request]); setRunState('generating_code', 'preparing', stateContext, { reset: true }); writeFileSync(join(project, 'AGENTS.md'), readFileSync(join(root, 'AGENTS.md'))); writeFileSync(join(project, 'CLAUDE.md'), '@AGENTS.md\n');
     const modelCapabilityIndex = writeModelCapabilityIndex(project, requestText);
-    const experiment = { schemaVersion: 1, protocol: 'cold-start-v1', coldStart: true, sourceInheritance: false, requestSha256: sha256(requestText), templateAssetSha256: digestProductSource(join(root, 'skills/expo-harmony-fast/assets/expo-harmony-template')), templateProductSha256: digestProductSource(project), capabilityCatalogSha256: modelCapabilityIndex.sourceSha256, modelCapabilityIndexSha256: modelCapabilityIndex.sha256, modelCapabilityIndexBytes: modelCapabilityIndex.bytes, requiredCapabilities: modelCapabilityIndex.requiredPackages, preparedAt: new Date().toISOString() };
+    const experiment = { schemaVersion: 1, protocol: 'cold-start-v1', coldStart: true, sourceInheritance: false, requestSha256: sha256(requestText), templateAssetSha256: digestProductSource(join(root, 'templates/expo-harmony')), templateProductSha256: digestProductSource(project), capabilityCatalogSha256: modelCapabilityIndex.sourceSha256, modelCapabilityIndexSha256: modelCapabilityIndex.sha256, modelCapabilityIndexBytes: modelCapabilityIndex.bytes, requiredCapabilities: modelCapabilityIndex.requiredPackages, preparedAt: new Date().toISOString() };
     writeJson(join(project, '.expo-fast/experiment.json'), experiment);
     metrics.experiment = experiment;
     metrics.stages.seedModulesMs = run(node22, [dependencies, 'seed', project]).ms;

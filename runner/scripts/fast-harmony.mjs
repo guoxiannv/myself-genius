@@ -1,16 +1,15 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { basename, delimiter, dirname, join, relative, resolve } from 'node:path';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { basename, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
-const skillRoot = resolve(new URL('..', import.meta.url).pathname);
-const runnerRoot = resolve(skillRoot, '../..');
+const runnerRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const sdk = resolve(runnerRoot, process.env.EXPO_HARMONY_SDK_ROOT || '../sdk');
-const template = join(skillRoot, 'assets/expo-harmony-template');
+const template = join(runnerRoot, 'templates/expo-harmony');
 const harmonyBundlePrefix = 'com.genius.';
-const scaffoldCapabilityPackages = ['react-native-svg'];
+export const scaffoldCapabilityPackages = ['react-native-svg'];
 const harmonyGoRuntimeOverrides = {
   '@react-native-async-storage/async-storage': {
     nativePackage: '@react-native-oh-tpl/async-storage',
@@ -28,7 +27,7 @@ const harmonyGoRuntimeOverrides = {
     ],
   },
 };
-const coreCachePackages = ['expo', 'react', 'react-native', '@react-native-oh/react-native-harmony', '@react-native-oh/react-native-harmony-cli', '@expo/cli'];
+export const coreCachePackages = ['expo', 'react', 'react-native', '@react-native-oh/react-native-harmony', '@react-native-oh/react-native-harmony-cli', '@expo/cli'];
 const infrastructurePackages = new Set([
   '@babel/runtime',
   '@expo/cli',
@@ -49,12 +48,6 @@ function stableJson(value) {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
   if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
   return JSON.stringify(value);
-}
-function run(cmd, args, options = {}) {
-  const result = spawnSync(cmd, args, { cwd: options.cwd, env: { ...process.env, ...(options.env || {}) }, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024, stdio: options.capture ? ['ignore', 'pipe', 'pipe'] : 'inherit' });
-  if (options.log) writeFileSync(options.log, `${result.stdout || ''}${result.stderr || ''}`);
-  if (result.status !== 0) throw new Error(`${cmd} exited with ${result.status ?? 'unknown'}\n${result.stderr || result.stdout || ''}`);
-  return result.stdout || '';
 }
 function walk(rootDir, out = []) { if (!existsSync(rootDir)) return out; for (const e of readdirSync(rootDir, { withFileTypes: true })) { const p = join(rootDir, e.name); if (e.isDirectory()) walk(p, out); else out.push(p); } return out; }
 function sha256Files(paths, root = sdk) { const hash = createHash('sha256'); for (const path of [...paths].sort()) hash.update(relative(root, path)).update('\0').update(readFileSync(path)).update('\0'); return hash.digest('hex'); }
@@ -138,7 +131,7 @@ function sdkFingerprint() {
     contractsSha256: sha256Files(contractPaths),
   };
 }
-function catalog(projectDir) {
+export function catalog(projectDir) {
   const runtime = runtimeContract();
   const records = supportContracts();
   const available = records.filter(contractPasses).map((record) => catalogEntry(
@@ -193,7 +186,7 @@ function configurePackageJson(projectDir, capabilityCatalog) {
   writeJson(path, pkg);
   writeJson(join(projectDir, '.expo-fast/scaffold-package.json'), pkg);
 }
-function prepare(projectDir, requestFile) {
+export function prepare(projectDir, requestFile) {
   mkdirSync(projectDir, { recursive: true });
   if (readdirSync(projectDir).length) throw new Error(`target must be empty: ${projectDir}`);
   if (!existsSync(join(template, 'metro.harmony.config.js'))) throw new Error(`self-contained template is incomplete: ${template}`);
@@ -208,16 +201,7 @@ function prepare(projectDir, requestFile) {
   configurePackageJson(projectDir, capabilityCatalog);
   return projectDir;
 }
-function packageVersion(modulesRoot, name) { return json(join(modulesRoot, ...name.split('/'), 'package.json'), {}).version || ''; }
-function assertCoreCache(cache, fingerprint) {
-  const mismatches = coreCachePackages.map((name) => [name, fingerprint.packageVersions[name], packageVersion(cache, name)]).filter(([, expected, actual]) => expected && expected !== actual);
-  if (mismatches.length) throw new Error(`module cache does not match selected SDK:\n${mismatches.map(([name, expected, actual]) => `- ${name}: expected ${expected}, found ${actual || 'missing'}`).join('\n')}`);
-}
-function moduleCaches() {
-  const configured = (process.env.EXPO_FAST_MODULE_CACHE || '').split(delimiter).filter(Boolean).map((value) => resolve(runnerRoot, value));
-  return configured;
-}
-function resolveCapabilities(projectDir) {
+export function resolveCapabilities(projectDir) {
   const pkg = json(join(projectDir, 'package.json'), {});
   const scaffold = json(join(projectDir, '.expo-fast/scaffold-package.json'), {});
   const capabilityCatalog = json(join(projectDir, '.expo-fast/capability-catalog.json'), { available: [], unavailable: [] });
@@ -305,93 +289,13 @@ function resolveCapabilities(projectDir) {
   if (errors.length) throw new Error(`capability resolution failed:\n${errors.map((error) => `- ${error}`).join('\n')}`);
   return result;
 }
-function installMissingPackages(projectDir, expectedVersions) {
-  const target = join(projectDir, 'node_modules');
-  const missing = Object.keys(expectedVersions).filter((name) => packageVersion(target, name) !== expectedVersions[name]);
-  if (!missing.length) return [];
-  const staging = mkdtempSync(join(tmpdir(), 'expo-fast-selected-packages.'));
-  try {
-    writeJson(join(staging, 'package.json'), { name: 'expo-fast-selected-packages', version: '1.0.0', private: true, dependencies: Object.fromEntries(missing.map((name) => [name, expectedVersions[name]])) });
-    const npmCli = resolve(dirname(process.execPath), '../lib/node_modules/npm/bin/npm-cli.js');
-    const command = existsSync(npmCli) ? process.execPath : 'npm';
-    const args = existsSync(npmCli) ? [npmCli, 'install'] : ['install'];
-    run(command, [...args, '--ignore-scripts', '--legacy-peer-deps', '--prefer-offline', '--no-audit', '--no-fund', '--package-lock=false', '--save-exact'], { cwd: staging, env: { COREPACK_ENABLE_PROJECT_SPEC: '0' } });
-    const stagingModules = join(staging, 'node_modules');
-    for (const entry of readdirSync(stagingModules)) {
-      if (entry === '.bin') continue;
-      const from = join(stagingModules, entry); const to = join(target, entry);
-      if (entry.startsWith('@')) {
-        mkdirSync(to, { recursive: true });
-        for (const scopedEntry of readdirSync(from)) {
-          const scopedTarget = join(to, scopedEntry);
-          if (missing.includes(`${entry}/${scopedEntry}`)) rmSync(scopedTarget, { recursive: true, force: true });
-          if (!existsSync(scopedTarget)) cpSync(join(from, scopedEntry), scopedTarget, { recursive: true, mode: 2, dereference: true });
-        }
-      } else {
-        if (missing.includes(entry)) rmSync(to, { recursive: true, force: true });
-        if (!existsSync(to)) cpSync(from, to, { recursive: true, mode: 2, dereference: true });
-      }
-    }
-    const unresolved = missing.filter((name) => packageVersion(target, name) !== expectedVersions[name]);
-    if (unresolved.length) throw new Error(`failed to prepare selected package(s): ${unresolved.join(', ')}`);
-    return missing;
-  } finally { rmSync(staging, { recursive: true, force: true }); }
-}
-function seedModules(projectDir) {
-  const fingerprint = json(join(projectDir, '.expo-fast/sdk-fingerprint.json')) || sdkFingerprint();
-  const caches = moduleCaches().filter(existsSync);
-  let primary;
-  const rejected = [];
-  for (const cache of caches) {
-    try { assertCoreCache(cache, fingerprint); primary = cache; break; } catch (error) { rejected.push({ cache, reason: error.message }); }
-  }
-  if (!primary) throw new Error(`no compatible node_modules cache\n${rejected.map((item) => `${item.cache}: ${item.reason}`).join('\n')}`);
-  const target = join(projectDir, 'node_modules');
-  cpSync(primary, target, { recursive: true, mode: 2, dereference: true });
-  for (const cache of caches.filter((path) => path !== primary)) {
-    try { assertCoreCache(cache, fingerprint); } catch { continue; }
-    for (const entry of readdirSync(cache)) { const from = join(cache, entry); const to = join(target, entry); if (!existsSync(to)) cpSync(from, to, { recursive: true, mode: 2, dereference: true }); }
-  }
-  const pkg = json(join(projectDir, 'package.json'), {});
-  const expected = Object.fromEntries(scaffoldCapabilityPackages.map((name) => [name, pkg.dependencies?.[name] || '']).filter(([, version]) => version));
-  const installed = installMissingPackages(projectDir, expected);
-  const actualVersions = Object.fromEntries([...coreCachePackages, ...scaffoldCapabilityPackages].map((name) => [name, packageVersion(target, name)]));
-  writeJson(join(projectDir, '.expo-fast/module-cache.json'), { schemaVersion: 1, selected: primary, rejected, installed, actualVersions, sdkFingerprint: fingerprint });
-}
-function syncDependencies(projectDir) {
-  const resolution = resolveCapabilities(projectDir);
-  const selectedCapabilities = Object.fromEntries(resolution.selected.map((entry) => [entry.package, entry.version]));
-  const runtimeDependencies = resolution.runtimeDependencies || {};
-  const expected = { ...selectedCapabilities, ...runtimeDependencies };
-  const installed = installMissingPackages(projectDir, expected);
-  const target = join(projectDir, 'node_modules');
-  const unresolved = Object.entries(expected).filter(([name, version]) => packageVersion(target, name) !== version);
-  if (unresolved.length) throw new Error(`selected or runtime dependency versions are unresolved:\n${unresolved.map(([name, version]) => `- ${name}: expected ${version}, found ${packageVersion(target, name) || 'missing'}`).join('\n')}`);
-  const cachePath = join(projectDir, '.expo-fast/module-cache.json');
-  const cache = json(cachePath, { schemaVersion: 1 });
-  cache.capabilitySelection = '.expo-fast/capability-selection.json';
-  cache.selectedCapabilities = selectedCapabilities;
-  cache.runtimeDependencies = runtimeDependencies;
-  cache.installed = [...new Set([...(cache.installed || []), ...installed])].sort();
-  cache.actualVersions = { ...(cache.actualVersions || {}), ...Object.fromEntries(Object.keys(expected).map((name) => [name, packageVersion(target, name)])) };
-  writeJson(cachePath, cache);
-  return resolution;
-}
-function localizePackageJson(projectDir) {
-  const path = join(projectDir, 'package.json'); const pkg = json(path); const local = ['expo', '@expo/cli', '@expo/metro', '@expo/metro-config', '@react-native-oh/react-native-harmony', '@react-native-oh/react-native-harmony-cli', 'expo-modules-core'];
-  for (const name of local) { const base = packageRoot(name); if (existsSync(join(base, 'package.json'))) { if (pkg.dependencies?.[name]) pkg.dependencies[name] = `file:${base}`; if (pkg.devDependencies?.[name]) pkg.devDependencies[name] = `file:${base}`; } }
-  pkg.dependencies ||= {}; pkg.dependencies['@expo/metro-runtime'] ||= '57.0.7'; writeJson(path, pkg);
-}
-function exportGo(projectDir, outputDir) { mkdirSync(outputDir, { recursive: true }); const cli = join(sdk, 'packages/@expo/cli/harmony/expo-harmony.mjs'); return run(process.execPath, [cli, 'export-go', '--app-root', projectDir, '--output-dir', outputDir], { cwd: projectDir, capture: true, log: join(projectDir, '.expo-fast/export.log') }); }
 function main() {
   const [command, projectArg, requestArg] = process.argv.slice(2); const project = resolve(projectArg || '.');
   if (command === 'catalog') { console.log(JSON.stringify(catalog(project), null, 2)); return; }
   if (command === 'prepare') { prepare(project, requestArg); console.log(project); return; }
-  if (command === 'seed-modules') { seedModules(project); return; }
   if (command === 'resolve-capabilities') { console.log(JSON.stringify(resolveCapabilities(project), null, 2)); return; }
-  if (command === 'sync-dependencies') { console.log(JSON.stringify(syncDependencies(project), null, 2)); return; }
-  if (command === 'install') { localizePackageJson(project); run('npm', ['install', '--legacy-peer-deps'], { cwd: project }); return; }
-  if (command === 'export-go') { exportGo(project, resolve(requestArg || join(project, 'dist/harmony-go'))); return; }
-  throw new Error('usage: fast-harmony.mjs catalog|prepare|seed-modules|resolve-capabilities|sync-dependencies|install|export-go <project> [request/output]');
+  throw new Error('usage: fast-harmony.mjs catalog|prepare|resolve-capabilities <project> [request]');
 }
-try { main(); } catch (error) { console.error(error.stack || error); process.exitCode = 1; }
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try { main(); } catch (error) { console.error(error.stack || error); process.exitCode = 1; }
+}

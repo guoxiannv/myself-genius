@@ -14,7 +14,29 @@ import { pinRuntimeDependencies, stageHarmonyCli } from '../scripts/dependencies
 import { runHapPoolBuild } from '../scripts/hap-build.mjs';
 
 const root = resolve(new URL('..', import.meta.url).pathname);
-const script = join(root, 'skills/expo-harmony-fast/scripts/fast-harmony.mjs');
+const script = join(root, 'scripts/fast-harmony.mjs');
+const dependencyController = join(root, 'scripts/dependencies.mjs');
+
+test('runtime resources are standalone orchestrator assets without a retired skill package', () => {
+  assert.equal(existsSync(join(root, 'skills/expo-harmony-fast')), false);
+  assert.equal(existsSync(join(root, 'scripts/catalog.mjs')), false);
+  for (const path of [
+    script,
+    join(root, 'templates/expo-harmony/package.json'),
+    join(root, 'docs/runtime-contract.md'),
+  ]) assert.equal(existsSync(path), true, path);
+});
+
+test('dependency lifecycle commands have one controller', () => {
+  const helper = readFileSync(script, 'utf8');
+  const dependencies = readFileSync(dependencyController, 'utf8');
+  for (const command of ['seed-modules', 'sync-dependencies', 'export-go', 'install']) {
+    assert.doesNotMatch(helper, new RegExp(`command === '${command}'`));
+  }
+  for (const command of ['seed', 'sync', 'export']) {
+    assert.match(dependencies, new RegExp(`command === '${command}'`));
+  }
+});
 
 test('one-click launcher resolves isolated projects, prompt input, models, and tmux defaults', () => {
   const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-launcher-'));
@@ -222,19 +244,17 @@ test('monorepo defaults and relative env paths resolve from the runner root', ()
   assert.equal(relativePlan.claude, resolve(root, '../bin/claude'));
 });
 
-test('portable launchers contain no user-specific path and keep machine config outside skills', () => {
+test('portable launchers contain no user-specific path and keep machine config outside runtime sources', () => {
   const shell = readFileSync(join(root, 'start-livetest.sh'), 'utf8');
   const launcher = readFileSync(join(root, 'scripts/start-livetest.mjs'), 'utf8');
   const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
   const dependencies = readFileSync(join(root, 'scripts/dependencies.mjs'), 'utf8');
-  const helper = readFileSync(join(root, 'skills/expo-harmony-fast/scripts/fast-harmony.mjs'), 'utf8');
-  const skill = readFileSync(join(root, 'skills/expo-harmony-fast/SKILL.md'), 'utf8');
+  const helper = readFileSync(join(root, 'scripts/fast-harmony.mjs'), 'utf8');
   const example = readFileSync(join(root, '.env.example'), 'utf8');
-  assert.doesNotMatch(`${shell}\n${launcher}\n${runner}\n${dependencies}\n${helper}\n${skill}`, /\/Users\/stefan/);
+  assert.doesNotMatch(`${shell}\n${launcher}\n${runner}\n${dependencies}\n${helper}`, /\/Users\/stefan/);
   assert.match(shell, /source "\$LOCAL_ENV"/);
   assert.match(launcher, /process\.loadEnvFile\(localEnvFile\)/);
   for (const key of ['EXPO_FAST_APP_ROOT', 'EXPO_FAST_NODE', 'EXPO_HARMONY_SDK_ROOT', 'EXPO_HARMONY_POOL_ROOT', 'EXPO_FAST_MODULE_CACHE', 'DEVECO_PATH', 'CLAUDE_BIN']) assert.match(example, new RegExp(key));
-  assert.doesNotMatch(skill, /EXPO_FAST_APP_ROOT/);
 });
 
 test('external controller atomically records live generation, repair, and completion state', () => {
@@ -258,12 +278,10 @@ test('external controller atomically records live generation, repair, and comple
   assert.deepEqual(readdirSync(stateDir), ['state.json']);
 
   const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
-  const skill = readFileSync(join(root, 'skills/expo-harmony-fast/SKILL.md'), 'utf8');
   assert.match(runner, /setRunState\('generating_code', 'model_generation'/);
   assert.match(runner, /setRunState\('repairing', 'model_repair'/);
   assert.match(runner, /setRunState\('completed', 'done'/);
   assert.ok(runner.indexOf("[helper, 'prepare', project, request]") < runner.indexOf("setRunState('generating_code', 'preparing'"));
-  assert.doesNotMatch(skill, /\.expo-fast\/state\.json/);
 });
 
 test('external controller records a terminal failed state without invoking the product agent', () => {
@@ -474,7 +492,10 @@ test('selected Expo capabilities are synchronized from a compatible dependency c
     '@react-native-async-storage/async-storage': '1.24.0',
     '@react-native-oh-tpl/async-storage': '1.21.0-0.2.2',
     expo: '57.0.9',
+    'expo-asset': '57.0.8',
+    'expo-constants': '57.0.8',
     'expo-document-picker': '57.0.1',
+    'expo-modules-core': '57.0.8',
     'expo-sharing': '57.0.8',
     react: '19.2.3',
     'react-native': '0.84.1',
@@ -486,9 +507,9 @@ test('selected Expo capabilities are synchronized from a compatible dependency c
     writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({ name, version }));
   }
   const env = { ...process.env, EXPO_FAST_MODULE_CACHE: cache };
-  const seeded = spawnSync(process.execPath, [script, 'seed-modules', project], { encoding: 'utf8', env });
+  const seeded = spawnSync(process.execPath, [dependencyController, 'seed', project], { encoding: 'utf8', env });
   assert.equal(seeded.status, 0, seeded.stderr);
-  const synced = spawnSync(process.execPath, [script, 'sync-dependencies', project], { encoding: 'utf8', env });
+  const synced = spawnSync(process.execPath, [dependencyController, 'sync', project], { encoding: 'utf8', env });
   assert.equal(synced.status, 0, synced.stderr);
   const moduleCache = JSON.parse(readFileSync(join(project, '.expo-fast/module-cache.json'), 'utf8'));
   assert.equal(moduleCache.selectedCapabilities['expo-sharing'], '57.0.8');
@@ -660,7 +681,7 @@ test('runner and starter encode the logical-width three-device contract', () => 
   assert.match(runner, /about 48% basis/);
   assert.match(runner, /Do not invent tabs for a single-destination app/);
 
-  const starter = readFileSync(join(root, 'skills/expo-harmony-fast/assets/expo-harmony-template/src/app-shell.tsx'), 'utf8');
+  const starter = readFileSync(join(root, 'templates/expo-harmony/src/app-shell.tsx'), 'utf8');
   assert.match(starter, /width >= 1280/);
   assert.match(starter, /width >= 640 && width < 1280/);
   assert.doesNotMatch(starter, /width >= 1000/);
@@ -671,14 +692,12 @@ test('runner and starter encode the logical-width three-device contract', () => 
 });
 
 test('starter and model contract use Harmony-safe Path-only icon geometry', () => {
-  const icons = readFileSync(join(root, 'skills/expo-harmony-fast/assets/expo-harmony-template/src/components/icons.tsx'), 'utf8');
+  const icons = readFileSync(join(root, 'templates/expo-harmony/src/components/icons.tsx'), 'utf8');
   const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
-  const skill = readFileSync(join(root, 'skills/expo-harmony-fast/SKILL.md'), 'utf8');
   assert.match(icons, /import Svg, \{ Path \} from 'react-native-svg'/);
   assert.doesNotMatch(icons, /<(?:Circle|Line|Polyline|Rect|Polygon)\b/);
   assert.equal([...icons.matchAll(/export const \w+Icon = icon\(/g)].length, 17);
   assert.match(runner, /Production icons must be Path-only/);
-  assert.match(skill, /Keep production icons Path-only/);
 });
 
 test('automatic selection routes complex multi-surface requests to repair', () => {

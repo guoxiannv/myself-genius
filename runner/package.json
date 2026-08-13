@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "catalog": "node scripts/catalog.mjs",
+    "catalog": "node scripts/fast-harmony.mjs catalog",
     "live": "node scripts/start-livetest.mjs"
   },
   "engines": {

@@ -1,5 +1,11 @@
 # Runtime contract
 
+This document is a runner-owned runtime reference, not a model skill. The generated
+capability catalog and SDK fingerprint remain the machine-readable authority for each
+run. `scripts/fast-harmony.mjs` owns template preparation, catalog generation, and
+capability resolution; `scripts/dependencies.mjs` exclusively owns dependency seeding,
+synchronization, runtime pins, and Harmony Go export.
+
 The selected devkit is Expo SDK 57.0.9, React 19.2.3, React Native 0.84.1,
 RNOH 0.84.2, Harmony API 22. The live host is Expo Harmony Go; it consumes a
 Metro bundle/catalog and avoids rebuilding the native host for each app.
@@ -39,9 +45,10 @@ The desktop navigation must not precede or sit outside the horizontal root conta
 because that stacks the supposed sidebar above the content. Single-destination apps
 keep the responsive content behavior without inventing tabs.
 
-After the implementation pass, `resolve-capabilities` rejects unavailable or unpinned
-dependencies and preserves the scaffold manifest. `sync-dependencies` then installs
-the selected set before typecheck. The source gate checks package presence and named
+After the implementation pass, `fast-harmony.mjs resolve-capabilities` rejects
+unavailable or unpinned dependencies and preserves the scaffold manifest.
+`dependencies.mjs sync` then installs the selected set before typecheck. The source
+gate checks package presence and named
 imports against the catalog's `supportedExports`. It also rejects text-only substitutes
 for explicitly requested JSON export/import and requires the corresponding sharing and
 document-picker capabilities. The artifact gate reconciles product imports, exact
@@ -52,19 +59,25 @@ Evidence written per run:
 
 ```text
 .expo-fast/
+  state.json
   request.md
+  experiment.json
   capability-catalog.json
+  model-capability-index.txt
   scaffold-package.json
   capability-selection.json
-  capability-resolution.log
   sdk-fingerprint.json
   module-cache.json
   brief.json              # brief/repair modes
-  implementation.log
+  agent-trace.jsonl
+  agent-repair-trace-*.jsonl
+  trace-scope-audit*.json
+  capability-resolution.log
   typecheck.log
   export.log
   source-audit.json
   build-evidence.json
+  sdk-cli.json
   runtime.json
   manifest.json
   smoke/
@@ -72,10 +85,15 @@ Evidence written per run:
     layout-after.json
     action.json
     screenshot.jpeg
-  agent-trace.jsonl       # Claude stream-json transcript
+  hap/
+  result.json
 ```
 
 Never claim full end-to-end success from `manifest.json` alone. The minimum smoke
 assertion is an app-specific accessibility node/value change after a form
 submission, timer transition, list mutation, toggle, or value edit, with layout
 captured before and after. Navigation-only evidence is invalid.
+
+The final unsigned HAP build is intentionally independent from the earlier Harmony Go
+path. A HAP failure is recorded as a partial failure and must not erase already-passing
+generation, source audit, artifact audit, or runtime evidence.

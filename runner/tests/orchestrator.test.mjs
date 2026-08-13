@@ -337,6 +337,39 @@ test('product capability selection adds exact Expo dependencies and rejects drif
   assert.match(rejected.stderr, /react-native-webview.*is unavailable/);
 });
 
+test('runtime override dependencies are derived and exact native declarations remain recoverable', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-runtime-override-'));
+  const project = join(workspace, 'runtime-app');
+  const request = join(workspace, 'request.md');
+  writeFileSync(request, '保存离线数据。');
+  const prepared = spawnSync(process.execPath, [script, 'prepare', project, request], { encoding: 'utf8' });
+  assert.equal(prepared.status, 0, prepared.stderr);
+  const packagePath = join(project, 'package.json');
+  const pkg = JSON.parse(readFileSync(packagePath, 'utf8'));
+  pkg.dependencies['@react-native-async-storage/async-storage'] = '1.24.0';
+  pkg.dependencies['@react-native-oh-tpl/async-storage'] = '1.21.0-0.2.2';
+  writeFileSync(packagePath, `${JSON.stringify(pkg, null, 2)}\n`);
+
+  const resolved = spawnSync(process.execPath, [script, 'resolve-capabilities', project], { encoding: 'utf8' });
+  assert.equal(resolved.status, 0, resolved.stderr);
+  const selection = JSON.parse(readFileSync(join(project, '.expo-fast/capability-selection.json'), 'utf8'));
+  const storage = selection.selected.find((entry) => entry.package === '@react-native-async-storage/async-storage');
+  assert.deepEqual(storage.runtimeOverride, {
+    nativePackage: '@react-native-oh-tpl/async-storage',
+    nativeVersion: '1.21.0-0.2.2',
+  });
+  assert.deepEqual(selection.runtimeDependencies, {
+    '@react-native-oh-tpl/async-storage': '1.21.0-0.2.2',
+  });
+  assert.equal(selection.selected.some((entry) => entry.package === '@react-native-oh-tpl/async-storage'), false);
+
+  pkg.dependencies['@react-native-oh-tpl/async-storage'] = '1.21.0-0.2.1';
+  writeFileSync(packagePath, `${JSON.stringify(pkg, null, 2)}\n`);
+  const drifted = spawnSync(process.execPath, [script, 'resolve-capabilities', project], { encoding: 'utf8' });
+  assert.notEqual(drifted.status, 0);
+  assert.match(drifted.stderr, /@react-native-oh-tpl\/async-storage must use exact runtime version 1\.21\.0-0\.2\.2/);
+});
+
 test('selected Expo capabilities are synchronized from a compatible dependency cache', () => {
   const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-sync-'));
   const project = join(workspace, 'sync-app');
@@ -347,6 +380,7 @@ test('selected Expo capabilities are synchronized from a compatible dependency c
   assert.equal(prepared.status, 0, prepared.stderr);
   const packagePath = join(project, 'package.json');
   const pkg = JSON.parse(readFileSync(packagePath, 'utf8'));
+  pkg.dependencies['@react-native-async-storage/async-storage'] = '1.24.0';
   pkg.dependencies['expo-sharing'] = '57.0.8';
   pkg.dependencies['expo-document-picker'] = '57.0.1';
   writeFileSync(packagePath, `${JSON.stringify(pkg, null, 2)}\n`);
@@ -354,6 +388,8 @@ test('selected Expo capabilities are synchronized from a compatible dependency c
     '@expo/cli': '57.0.11',
     '@react-native-oh/react-native-harmony': '0.84.2',
     '@react-native-oh/react-native-harmony-cli': '0.84.2',
+    '@react-native-async-storage/async-storage': '1.24.0',
+    '@react-native-oh-tpl/async-storage': '1.21.0-0.2.2',
     expo: '57.0.9',
     'expo-document-picker': '57.0.1',
     'expo-sharing': '57.0.8',
@@ -374,6 +410,9 @@ test('selected Expo capabilities are synchronized from a compatible dependency c
   const moduleCache = JSON.parse(readFileSync(join(project, '.expo-fast/module-cache.json'), 'utf8'));
   assert.equal(moduleCache.selectedCapabilities['expo-sharing'], '57.0.8');
   assert.equal(moduleCache.selectedCapabilities['expo-document-picker'], '57.0.1');
+  assert.equal(moduleCache.selectedCapabilities['@react-native-async-storage/async-storage'], '1.24.0');
+  assert.equal(moduleCache.runtimeDependencies['@react-native-oh-tpl/async-storage'], '1.21.0-0.2.2');
+  assert.equal(moduleCache.actualVersions['@react-native-oh-tpl/async-storage'], '1.21.0-0.2.2');
   assert.equal(moduleCache.actualVersions['expo-sharing'], '57.0.8');
 });
 
@@ -417,16 +456,28 @@ test('external dependency controller runs the SDK Harmony overlay from project-i
 test('external dependency controller CLI synchronizes an already installed exact capability', () => {
   const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-dependency-sync-'));
   const project = join(workspace, 'app');
-  const packageContract = { name: 'sync-app', version: '1.0.0', private: true, dependencies: { 'react-native-svg': '15.15.4' } };
+  const packageContract = { name: 'sync-app', version: '1.0.0', private: true, dependencies: { '@react-native-async-storage/async-storage': '1.24.0', 'react-native-svg': '15.15.4' } };
   mkdirSync(join(project, '.expo-fast'), { recursive: true });
+  mkdirSync(join(project, 'node_modules/@react-native-async-storage/async-storage'), { recursive: true });
+  mkdirSync(join(project, 'node_modules/@react-native-oh-tpl/async-storage'), { recursive: true });
   mkdirSync(join(project, 'node_modules/react-native-svg'), { recursive: true });
   writeFileSync(join(project, 'package.json'), JSON.stringify(packageContract));
   writeFileSync(join(project, '.expo-fast/scaffold-package.json'), JSON.stringify(packageContract));
   writeFileSync(join(project, '.expo-fast/capability-catalog.json'), JSON.stringify({
     contractsSha256: 'test-contract',
-    available: [{ package: 'react-native-svg', version: '15.15.4', supportedExports: ['Svg', 'Path'] }],
+    available: [
+      {
+        package: '@react-native-async-storage/async-storage',
+        version: '1.24.0',
+        supportedExports: ['default'],
+        runtimeOverride: { nativePackage: '@react-native-oh-tpl/async-storage', nativeVersion: '1.21.0-0.2.2' },
+      },
+      { package: 'react-native-svg', version: '15.15.4', supportedExports: ['Svg', 'Path'] },
+    ],
     unavailable: [],
   }));
+  writeFileSync(join(project, 'node_modules/@react-native-async-storage/async-storage/package.json'), JSON.stringify({ name: '@react-native-async-storage/async-storage', version: '1.24.0' }));
+  writeFileSync(join(project, 'node_modules/@react-native-oh-tpl/async-storage/package.json'), JSON.stringify({ name: '@react-native-oh-tpl/async-storage', version: '1.21.0-0.2.2' }));
   writeFileSync(join(project, 'node_modules/react-native-svg/package.json'), JSON.stringify({ name: 'react-native-svg', version: '15.15.4' }));
   const controller = join(root, 'scripts/dependencies.mjs');
   const result = spawnSync(process.execPath, [controller, 'sync', project], { encoding: 'utf8' });
@@ -436,6 +487,8 @@ test('external dependency controller CLI synchronizes an already installed exact
   assert.equal(output.installMs, 0);
   const evidence = JSON.parse(readFileSync(join(project, '.expo-fast/module-cache.json'), 'utf8'));
   assert.deepEqual(evidence.lastSync, { strategy: 'project-npm-install', installMs: 0, installed: [] });
+  assert.deepEqual(evidence.runtimeDependencies, { '@react-native-oh-tpl/async-storage': '1.21.0-0.2.2' });
+  assert.equal(evidence.actualVersions['@react-native-oh-tpl/async-storage'], '1.21.0-0.2.2');
   assert.equal(evidence.actualVersions['react-native-svg'], '15.15.4');
 });
 

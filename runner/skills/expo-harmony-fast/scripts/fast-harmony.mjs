@@ -225,6 +225,22 @@ function resolveCapabilities(projectDir) {
   const scaffoldDependencies = scaffold.dependencies || {};
   const errors = [];
   const selected = [];
+  const runtimeDependencyOwners = new Map();
+
+  for (const capability of available.values()) {
+    const runtime = capability.runtimeOverride;
+    if (!runtime?.nativePackage || !runtime.nativeVersion) continue;
+    const existing = runtimeDependencyOwners.get(runtime.nativePackage);
+    if (existing && (existing.nativeVersion !== runtime.nativeVersion || existing.sourcePackage !== capability.package)) {
+      errors.push(`runtime dependency ${runtime.nativePackage} has conflicting capability owners`);
+      continue;
+    }
+    runtimeDependencyOwners.set(runtime.nativePackage, {
+      sourcePackage: capability.package,
+      sourceVersion: capability.version,
+      nativeVersion: runtime.nativeVersion,
+    });
+  }
 
   for (const [packageName, version] of Object.entries(scaffoldDependencies)) {
     if (dependencies[packageName] !== version) errors.push(`fixed scaffold dependency ${packageName} must remain ${version}`);
@@ -235,6 +251,14 @@ function resolveCapabilities(projectDir) {
   for (const [packageName, version] of Object.entries(dependencies).sort(([a], [b]) => a.localeCompare(b))) {
     if (infrastructurePackages.has(packageName)) {
       if (!Object.hasOwn(scaffoldDependencies, packageName)) errors.push(`Product implementation may not add infrastructure dependency ${packageName}`);
+      continue;
+    }
+    const runtimeOwner = runtimeDependencyOwners.get(packageName);
+    if (runtimeOwner) {
+      if (version !== runtimeOwner.nativeVersion) errors.push(`${packageName} must use exact runtime version ${runtimeOwner.nativeVersion}; found ${version}`);
+      if (dependencies[runtimeOwner.sourcePackage] !== runtimeOwner.sourceVersion) {
+        errors.push(`${packageName} requires ${runtimeOwner.sourcePackage}@${runtimeOwner.sourceVersion}`);
+      }
       continue;
     }
     const capability = available.get(packageName);
@@ -255,7 +279,16 @@ function resolveCapabilities(projectDir) {
       limitations: capability.limitations,
       evidence: capability.evidence,
       supportContract: capability.supportContract,
+      ...(capability.runtimeOverride ? { runtimeOverride: capability.runtimeOverride } : {}),
     });
+  }
+  const runtimeDependencies = {};
+  for (const entry of selected) {
+    const runtime = entry.runtimeOverride;
+    if (!runtime?.nativePackage || !runtime.nativeVersion) continue;
+    const existing = runtimeDependencies[runtime.nativePackage];
+    if (existing && existing !== runtime.nativeVersion) errors.push(`runtime dependency ${runtime.nativePackage} has conflicting versions ${existing} and ${runtime.nativeVersion}`);
+    runtimeDependencies[runtime.nativePackage] = runtime.nativeVersion;
   }
   const result = {
     schemaVersion: 1,
@@ -263,6 +296,7 @@ function resolveCapabilities(projectDir) {
     resolvedAt: new Date().toISOString(),
     catalogContractsSha256: capabilityCatalog.contractsSha256 || '',
     selected,
+    runtimeDependencies,
     errors,
   };
   writeJson(join(projectDir, '.expo-fast/capability-selection.json'), result);
@@ -324,15 +358,18 @@ function seedModules(projectDir) {
 }
 function syncDependencies(projectDir) {
   const resolution = resolveCapabilities(projectDir);
-  const expected = Object.fromEntries(resolution.selected.map((entry) => [entry.package, entry.version]));
+  const selectedCapabilities = Object.fromEntries(resolution.selected.map((entry) => [entry.package, entry.version]));
+  const runtimeDependencies = resolution.runtimeDependencies || {};
+  const expected = { ...selectedCapabilities, ...runtimeDependencies };
   const installed = installMissingPackages(projectDir, expected);
   const target = join(projectDir, 'node_modules');
   const unresolved = Object.entries(expected).filter(([name, version]) => packageVersion(target, name) !== version);
-  if (unresolved.length) throw new Error(`selected dependency versions are unresolved:\n${unresolved.map(([name, version]) => `- ${name}: expected ${version}, found ${packageVersion(target, name) || 'missing'}`).join('\n')}`);
+  if (unresolved.length) throw new Error(`selected or runtime dependency versions are unresolved:\n${unresolved.map(([name, version]) => `- ${name}: expected ${version}, found ${packageVersion(target, name) || 'missing'}`).join('\n')}`);
   const cachePath = join(projectDir, '.expo-fast/module-cache.json');
   const cache = json(cachePath, { schemaVersion: 1 });
   cache.capabilitySelection = '.expo-fast/capability-selection.json';
-  cache.selectedCapabilities = expected;
+  cache.selectedCapabilities = selectedCapabilities;
+  cache.runtimeDependencies = runtimeDependencies;
   cache.installed = [...new Set([...(cache.installed || []), ...installed])].sort();
   cache.actualVersions = { ...(cache.actualVersions || {}), ...Object.fromEntries(Object.keys(expected).map((name) => [name, packageVersion(target, name)])) };
   writeJson(cachePath, cache);

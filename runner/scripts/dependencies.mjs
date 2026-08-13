@@ -55,11 +55,16 @@ function npmInvocation() {
   return existsSync(npmCli) ? { command: process.execPath, prefix: [npmCli] } : { command: 'npm', prefix: [] };
 }
 
-function installProjectDependencies(project, logName) {
+function installProjectDependencies(project, logName, exactDependencies = {}) {
   const npm = npmInvocation();
+  const exactSpecs = Object.entries(exactDependencies)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, version]) => `${name}@${version}`);
   return run(npm.command, [
     ...npm.prefix,
     'install',
+    ...exactSpecs,
+    ...(exactSpecs.length ? ['--no-save'] : []),
     '--ignore-scripts',
     '--legacy-peer-deps',
     '--prefer-offline',
@@ -155,14 +160,18 @@ export function syncDependencies(projectRoot) {
   const resolution = readJson(join(project, '.expo-fast/capability-selection.json'));
   if (!resolution || resolution.status !== 'pass') throw new Error(`capability selection did not pass under ${project}`);
   const modules = join(project, 'node_modules');
-  const expected = Object.fromEntries(resolution.selected.map((entry) => [entry.package, entry.version]));
-  const missing = Object.entries(expected)
-    .filter(([name, version]) => packageVersion(modules, name) !== version)
-    .map(([name]) => name);
-  const install = missing.length ? installProjectDependencies(project, 'dependency-sync-install.log') : { ms: 0, output: '' };
+  const selectedCapabilities = Object.fromEntries(resolution.selected.map((entry) => [entry.package, entry.version]));
+  const runtimeDependencies = resolution.runtimeDependencies || {};
+  const expected = { ...selectedCapabilities, ...runtimeDependencies };
+  const missingEntries = Object.entries(expected)
+    .filter(([name, version]) => packageVersion(modules, name) !== version);
+  const missing = missingEntries.map(([name]) => name);
+  const install = missing.length
+    ? installProjectDependencies(project, 'dependency-sync-install.log', Object.fromEntries(missingEntries))
+    : { ms: 0, output: '' };
   const unresolved = Object.entries(expected).filter(([name, version]) => packageVersion(modules, name) !== version);
   if (unresolved.length) {
-    throw new Error(`selected dependency versions are unresolved:\n${unresolved
+    throw new Error(`selected or runtime dependency versions are unresolved:\n${unresolved
       .map(([name, version]) => `- ${name}: expected ${version}, found ${packageVersion(modules, name) || 'missing'}`)
       .join('\n')}`);
   }
@@ -170,7 +179,8 @@ export function syncDependencies(projectRoot) {
   const evidence = readJson(evidencePath, { schemaVersion: 2, strategy: 'registry-install' });
   evidence.schemaVersion = 2;
   evidence.capabilitySelection = '.expo-fast/capability-selection.json';
-  evidence.selectedCapabilities = expected;
+  evidence.selectedCapabilities = selectedCapabilities;
+  evidence.runtimeDependencies = runtimeDependencies;
   evidence.installed = [...new Set([...(evidence.installed || []), ...missing])].sort();
   evidence.actualVersions = {
     ...(evidence.actualVersions || {}),
@@ -178,7 +188,7 @@ export function syncDependencies(projectRoot) {
   };
   evidence.lastSync = { strategy: 'project-npm-install', installMs: install.ms, installed: missing };
   writeJson(evidencePath, evidence);
-  return { resolution, installed: missing, installMs: install.ms };
+  return { resolution, installed: missing, runtimeDependencies, installMs: install.ms };
 }
 
 export function stageHarmonyCli(projectRoot, sdkRoot = resolve(root, process.env.EXPO_HARMONY_SDK_ROOT || '../sdk')) {

@@ -36,6 +36,7 @@ config.local.json
 
 # deploy/ runtime config & signing materials (commit *.example only)
 deploy/server.env
+deploy/expo-fast.env
 deploy/profile-pool.json
 deploy/profile-pool-state.json
 deploy/signing/*

@@ -13,13 +13,13 @@
 当前工程根目录：
 
 ```text
-/Users/m2/Desktop/code/harmony-pilot-remote-ui
+/path/to/Genius/frontend
 ```
 
 历史 run 记录目录：
 
 ```text
-/Users/m2/Desktop/code/harmony-pilot-remote-ui/data/runs/
+/path/to/Genius/frontend/data/runs/
 ```
 
 每个生成任务对应一个 JSON 文件：
@@ -43,13 +43,13 @@ data/runs/<run_id>.json
 每个 run 生成出来的 HarmonyOS 工程目录来自 `RunRecord.workspace` 字段。当前推荐的隔离 workspace 结构通常是：
 
 ```text
-/Users/m2/Desktop/code/harmony-pilot-remote-ui/workspace/<run_id>/
+/path/to/Genius/frontend/workspace/<run_id>/
 ```
 
 预览视频、截图和采集结果目录：
 
 ```text
-/Users/m2/Desktop/code/harmony-pilot-remote-ui/data/artifacts/videos/<run_id>/
+/path/to/Genius/frontend/data/artifacts/videos/<run_id>/
 ```
 
 常见文件：
@@ -64,7 +64,7 @@ data/artifacts/videos/<run_id>/screenshots/*.jpeg
 扫码安装/签名发布结果目录：
 
 ```text
-/Users/m2/Desktop/code/harmony-pilot-remote-ui/data/artifacts/hpack/<run_id>/
+/path/to/Genius/frontend/data/artifacts/hpack/<run_id>/
 ```
 
 常见文件：

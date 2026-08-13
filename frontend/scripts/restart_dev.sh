@@ -8,10 +8,10 @@ LOCAL_ENV="$ROOT/.env.local"
 BACKGROUND=1
 SKIP_PREFLIGHT=0
 SERVE_STACK=0
-TMUX_SESSION="${TMUX_SESSION:-remote-ui-dev}"
+TMUX_SESSION="${TMUX_SESSION:-remote-ui-dev2}"
 OPENBITFUN_PROXY_SESSION="${OPENBITFUN_PROXY_SESSION:-openbitfun-proxy}"
 OPENBITFUN_PROXY_PORT="${OPENBITFUN_PROXY_PORT:-40363}"
-OPENBITFUN_PROXY_ROOT="${OPENBITFUN_PROXY_ROOT:-/Users/m2/Desktop/code/harmony-pilot}"
+OPENBITFUN_PROXY_ROOT="${OPENBITFUN_PROXY_ROOT:-}"
 OPENBITFUN_PROXY_HEALTH_URL="http://127.0.0.1:${OPENBITFUN_PROXY_PORT}/health"
 
 usage() {
@@ -68,8 +68,17 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 HOST="${HOST:-127.0.0.1}"
-PORT="${PORT:-8080}"
-BACKEND_PORT="${BACKEND_PORT:-8081}"
+PORT="${PORT:-8089}"
+BACKEND_PORT="${BACKEND_PORT:-8090}"
+
+# This repository is the version2 stack. Never let a missing or incorrect env
+# file make its restart command target the legacy bitfun stack.
+if [ "$TMUX_SESSION" = "remote-ui-dev" ] || [ "$PORT" = "8080" ] || [ "$BACKEND_PORT" = "8081" ]; then
+  echo "Refusing to use the protected legacy Bitfun service resources." >&2
+  echo "Version2 requires its own tmux session and ports (defaults: remote-ui-dev2, 8089, 8090)." >&2
+  echo "Resolved: TMUX_SESSION=$TMUX_SESSION PORT=$PORT BACKEND_PORT=$BACKEND_PORT" >&2
+  exit 1
+fi
 HEALTH_URL="http://${HOST}:${PORT}/api/health"
 BACKEND_HEALTH_URL="http://${HOST}:${BACKEND_PORT}/api/health"
 PUBLIC_HEALTH_URL="${PUBLIC_HEALTH_URL:-${HP_PUBLIC_HEALTH_URL:-}}"
@@ -112,6 +121,7 @@ ensure_openbitfun_proxy() {
 
   if [ ! -d "$OPENBITFUN_PROXY_ROOT" ]; then
     echo "Missing OPENBITFUN_PROXY_ROOT: $OPENBITFUN_PROXY_ROOT" >&2
+    echo "Set OPENBITFUN_PROXY_ROOT in deploy/server.env when using the local proxy." >&2
     exit 1
   fi
   if ! command -v tmux >/dev/null 2>&1; then
@@ -153,6 +163,9 @@ serve_stack() {
   export HP_PROFILE_POOL_CONFIG="${HP_PROFILE_POOL_CONFIG:-$ROOT/deploy/profile-pool.json}"
   export HP_PROFILE_POOL_STATE="${HP_PROFILE_POOL_STATE:-$ROOT/deploy/profile-pool-state.json}"
   export HP_HPACK_ENABLED="${BITFUN_HPACK_ENABLED:-${HP_HPACK_ENABLED:-1}}"
+  if [ -z "${__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS:-}" ] && [ -n "${HP_HPACK_DEPLOY_DOMAIN:-}" ]; then
+    export __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS="$HP_HPACK_DEPLOY_DOMAIN"
+  fi
 
   BACKEND_PID=""
   WEB_PID=""

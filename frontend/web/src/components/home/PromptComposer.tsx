@@ -5,20 +5,15 @@ import { cn } from "@/lib/format"
 import { SUGGESTIONS } from "./suggestions"
 
 const PRO_WORKFLOW_VARIANT = "autopilot-html-tmux-no-uitree-fast-plan-launch-qa-split"
-const BALANCED_WORKFLOW_VARIANT = "autopilot-html-tmux-no-uitree-fast-spec-design-plan-launch-qa-split"
 
-// 构建 Effort。Fast 继续走 plan_skill 选择 UITREE 设计档位；Balanced 与 Pro 切到
-// no-UITREE workflow，它们的设计 skill 由 workflow 固定，planSkill 传了也会被忽略。
-// Balanced 在生成前先做一轮需求澄清（问答深度由 Decision Mode 决定）。Expo
-// 则切换到独立的 Expo Harmony Fast Runtime，直接生成、验证并启动。
+// 一套前端按 Runtime 分流到两套独立执行后端：Pro 使用 devkit_studio 的
+// ArkPilot tmux-runner；Expo 使用 expo-arkpilot 的 one-click launcher。
 const EFFORTS = [
-  { id: "a2ui-fast", label: "Fast", hint: "速度最快，质量基本", planSkill: "a2ui-fast", variant: undefined, runtime: "arkpilot" },
-  { id: "a2ui-balanced", label: "Balanced", hint: "先澄清需求再生成", planSkill: "", variant: BALANCED_WORKFLOW_VARIANT, runtime: "arkpilot" },
-  { id: "a2ui-pro", label: "Pro", hint: "速度较慢，质量最佳", planSkill: "", variant: PRO_WORKFLOW_VARIANT, runtime: "arkpilot" },
-  { id: "expo", label: "Expo", hint: "使用 Expo Harmony Fast Runtime", planSkill: "", variant: undefined, runtime: "expo" },
+  { id: "a2ui-pro", label: "Pro", hint: "Genius 1.0", planSkill: "", variant: PRO_WORKFLOW_VARIANT, runtime: "arkpilot" },
+  { id: "expo", label: "Expo", hint: "Genius 2.0", planSkill: "", variant: undefined, runtime: "expo" },
 ] as const
 
-const DEFAULT_EFFORT = "a2ui-pro"
+const DEFAULT_EFFORT = "expo"
 
 const DECISION_MODES = [
   { id: "auto", label: "Approve for me", hint: "基于你的描述直接生成初版，我来替你决策" },
@@ -39,7 +34,7 @@ export function PromptComposer() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const activeEffort = EFFORTS.find((e) => e.id === skill) ?? EFFORTS[2]
+  const activeEffort = EFFORTS.find((e) => e.id === skill) ?? EFFORTS[0]
   const activeDecisionMode = DECISION_MODES.find((mode) => mode.id === decisionMode) ?? DECISION_MODES[0]
 
   // 点击外部关闭下拉

@@ -197,7 +197,7 @@ completed-<question_id>.json
 实现文件：
 
 ```text
-/Users/m2/Desktop/code/harmony-pilot/hooks/ask-user-question-pretooluse.cjs
+/path/to/harmony-pilot/hooks/ask-user-question-pretooluse.cjs
 ```
 
 核心逻辑：
@@ -274,7 +274,7 @@ poll interval: 300ms
 实现文件：
 
 ```text
-/Users/m2/Desktop/code/harmony-pilot-remote-ui/app.py
+/path/to/Genius/frontend/app.py
 ```
 
 ### 目录定位
@@ -551,7 +551,7 @@ api.answerQuestion(runId, request.id, answers)
 文件：
 
 ```text
-/Users/m2/Desktop/code/harmony-pilot/scripts/lib/workflow-prompts.mjs
+/path/to/harmony-pilot/scripts/lib/workflow-prompts.mjs
 ```
 
 plan/design lane 会附加：
@@ -717,7 +717,7 @@ const request = pending[0]
 启动服务：
 
 ```bash
-cd /Users/m2/Desktop/code/harmony-pilot-remote-ui
+cd /path/to/Genius/frontend
 scripts/restart_local.sh
 ```
 

@@ -1,5 +1,7 @@
-# Runtime dependencies for screenshot sizing, video generation, and QR codes.
+# Runtime and repository-validation dependencies.
 Pillow
 imageio-ffmpeg
 qrcode
 aiortc>=1.13,<2
+harmony-hpack==1.1.2
+PyYAML

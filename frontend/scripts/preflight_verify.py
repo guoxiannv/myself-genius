@@ -5,6 +5,7 @@ import importlib.util
 import os
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -35,6 +36,20 @@ def env_path() -> Path:
     return Path(os.environ.get("HP_REMOTE_UI_ENV", str(DEFAULT_ENV))).expanduser().resolve()
 
 
+def resolve_app_path(value: str) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return (APP_ROOT / path).resolve()
+
+
+def resolve_runner_path(value: str, runner_root: Path) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return (runner_root / path).resolve()
+
+
 def exists_file(path: str) -> bool:
     return bool(path) and Path(path).expanduser().is_file()
 
@@ -48,6 +63,23 @@ def executable_path(value: str) -> str:
         return ""
     expanded = str(Path(value).expanduser()) if value.startswith(("~", "/")) else value
     return expanded if Path(expanded).is_file() else (shutil.which(value) or "")
+
+
+def node_version(executable: str) -> tuple[int, int] | None:
+    if not executable:
+        return None
+    try:
+        result = subprocess.run(
+            [executable, "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except OSError:
+        return None
+    match = re.search(r"v(\d+)\.(\d+)", result.stdout)
+    return (int(match.group(1)), int(match.group(2))) if result.returncode == 0 and match else None
 
 
 def read_text(path: Path) -> str:
@@ -83,14 +115,55 @@ def main() -> int:
     for module in ["qrcode", "PIL"]:
         failures += not check(f"python module {module}", importlib.util.find_spec(module) is not None)
 
-    runner = os.environ.get("HP_TMUX_RUNNER", "")
-    workspace = os.environ.get("HP_TARGET_WORKSPACE", "")
-    failures += not check("HP_TMUX_RUNNER", exists_file(runner), runner)
-    failures += not check("HP_TARGET_WORKSPACE", exists_dir(workspace), workspace)
+    runner_value = os.environ.get("HP_TMUX_RUNNER", "").strip()
+    runner = resolve_app_path(runner_value) if runner_value else Path()
+    workspace_value = os.environ.get("HP_TARGET_WORKSPACE", "").strip()
+    workspace = resolve_app_path(workspace_value) if workspace_value else Path()
+    failures += not check("HP_TMUX_RUNNER", runner.is_file(), str(runner) if runner_value else "")
+    failures += not check("HP_TARGET_WORKSPACE", workspace.is_dir(), str(workspace) if workspace_value else "")
+
+    expo_root_value = os.environ.get("HP_EXPO_FAST_ROOT", "").strip()
+    expo_root = resolve_app_path(expo_root_value) if expo_root_value else Path()
+    expo_app_root_value = os.environ.get("HP_EXPO_FAST_APP_ROOT", "").strip()
+    expo_app_root = resolve_app_path(expo_app_root_value) if expo_app_root_value else Path()
+    expo_env_value = os.environ.get("HP_EXPO_FAST_ENV_FILE", "").strip()
+    expo_env_file = resolve_app_path(expo_env_value) if expo_env_value else None
+    failures += not check("HP_EXPO_FAST_ROOT", expo_root.is_dir(), str(expo_root) if expo_root_value else "")
+    failures += not check(
+        "Expo Runner launcher",
+        bool(expo_root_value) and (expo_root / "start-livetest.sh").is_file(),
+        str(expo_root / "start-livetest.sh") if expo_root_value else "",
+    )
+    failures += not check(
+        "HP_EXPO_FAST_APP_ROOT parent",
+        bool(expo_app_root_value) and expo_app_root.parent.is_dir(),
+        str(expo_app_root) if expo_app_root_value else "",
+    )
+    if expo_env_file is not None:
+        failures += not check("HP_EXPO_FAST_ENV_FILE", expo_env_file.is_file(), str(expo_env_file))
+        load_env_file(expo_env_file)
+
+    node_value = os.environ.get("EXPO_FAST_NODE", "node").strip() or "node"
+    node_executable = executable_path(node_value)
+    version = node_version(node_executable)
+    failures += not check(
+        "Expo Runner Node >=22.13",
+        version is not None and version >= (22, 13),
+        f"{node_executable or node_value} ({'.'.join(map(str, version)) if version else 'unknown'})",
+    )
+    sdk_value = os.environ.get("EXPO_HARMONY_SDK_ROOT", "").strip()
+    sdk_root = resolve_runner_path(sdk_value, expo_root) if sdk_value and expo_root_value else Path()
+    failures += not check("EXPO_HARMONY_SDK_ROOT", sdk_root.is_dir(), str(sdk_root) if sdk_value else "")
+    cache_value = os.environ.get("EXPO_FAST_MODULE_CACHE", "").strip()
+    for index, value in enumerate(filter(None, cache_value.split(os.pathsep)), start=1):
+        cache = resolve_runner_path(value, expo_root)
+        failures += not check(f"EXPO_FAST_MODULE_CACHE[{index}]", cache.is_dir(), str(cache))
 
     hdc = os.environ.get("HDC_PATH", "") or "/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony/toolchains/hdc"
     failures += not check("hdc", bool(executable_path(hdc)), hdc)
     hpack = os.environ.get("HP_HPACK_BIN", "hpack")
+    if "/" in hpack and not Path(hpack).expanduser().is_absolute():
+        hpack = str(resolve_app_path(hpack))
     failures += not check("hpack", bool(executable_path(hpack)), hpack)
     hvigorw = os.environ.get("HP_HVIGORW", "/Applications/DevEco-Studio.app/Contents/tools/hvigor/bin/hvigorw")
     failures += not check("hvigorw", bool(executable_path(hvigorw)), hvigorw)
@@ -115,12 +188,6 @@ def main() -> int:
 
     hpack_enabled = os.environ.get("HP_HPACK_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
     failures += not check("HP_HPACK_ENABLED", hpack_enabled, os.environ.get("HP_HPACK_ENABLED", ""))
-
-    def resolve_app_path(value: str) -> Path:
-        path = Path(value).expanduser()
-        if path.is_absolute():
-            return path.resolve()
-        return (APP_ROOT / path).resolve()
 
     pool_config = resolve_app_path(
         os.environ.get("HP_PROFILE_POOL_CONFIG")
@@ -169,9 +236,12 @@ def main() -> int:
         for name in ["HP_HPACK_BASE_URL", "HP_HPACK_STATIC_ROOT"]:
             value = os.environ.get(name, "")
             ok = bool(value)
+            display = value
             if name == "HP_HPACK_STATIC_ROOT" and value:
-                Path(value).expanduser().mkdir(parents=True, exist_ok=True)
-            failures += not check(name, ok, value)
+                static_root = resolve_app_path(value)
+                static_root.mkdir(parents=True, exist_ok=True)
+                display = str(static_root)
+            failures += not check(name, ok, display)
     else:
         for name in [
             "HP_HPACK_BASE_URL",
@@ -188,7 +258,10 @@ def main() -> int:
                 ok = exists_file(value)
             elif name == "HP_HPACK_STATIC_ROOT":
                 ok = bool(value)
-                Path(value).expanduser().mkdir(parents=True, exist_ok=True) if value else None
+                if value:
+                    static_root = resolve_app_path(value)
+                    static_root.mkdir(parents=True, exist_ok=True)
+                    value = str(static_root)
             else:
                 ok = bool(value)
             display = "***" if "PASSWORD" in name or name.endswith("_KEY_PASSWORD") else value

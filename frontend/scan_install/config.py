@@ -32,8 +32,25 @@ def resolve_app_path(value: str) -> Path:
     return (APP_ROOT / path).resolve()
 
 
+def resolve_app_executable(value: str) -> str:
+    value = value.strip()
+    if not value or "/" not in value:
+        return value
+    path = Path(value).expanduser()
+    return str(path if path.is_absolute() else APP_ROOT / path)
+
+
 load_env_file(DEPLOY_DIR / "server.env")
 load_env_file(Path(os.environ.get("HP_REMOTE_UI_ENV", str(APP_ROOT / ".env.local"))).expanduser())
+
+# Values loaded from a repository-local env file must keep the same meaning even
+# when a child process changes cwd to runner/, a generated workspace, or tmux.
+if os.environ.get("CLAUDE_CONFIG_DIR", "").strip():
+    os.environ["CLAUDE_CONFIG_DIR"] = str(resolve_app_path(os.environ["CLAUDE_CONFIG_DIR"]))
+for command_path_key in ("HP_CAPTURE_PYTHON_BIN", "HP_HPACK_BIN", "HP_HPACK_PYTHON_BIN"):
+    command_path = os.environ.get(command_path_key, "").strip()
+    if "/" in command_path:
+        os.environ[command_path_key] = resolve_app_executable(command_path)
 
 DATA_DIR = APP_ROOT / "data"
 RUNS_DIR = DATA_DIR / "runs"
@@ -41,12 +58,12 @@ DEFAULT_ARTIFACTS_DIR = DATA_DIR / "artifacts"
 LOG_DIR = DATA_DIR / "logs"
 
 TMUX_RUNNER_PATH = (
-    Path(os.environ["HP_TMUX_RUNNER"]).expanduser().resolve()
+    resolve_app_path(os.environ["HP_TMUX_RUNNER"])
     if os.environ.get("HP_TMUX_RUNNER", "").strip()
     else Path()
 )
 TARGET_WORKSPACE = (
-    Path(os.environ["HP_TARGET_WORKSPACE"]).expanduser().resolve()
+    resolve_app_path(os.environ["HP_TARGET_WORKSPACE"])
     if os.environ.get("HP_TARGET_WORKSPACE", "").strip()
     else Path()
 )
@@ -87,18 +104,20 @@ EXPO_PUBLIC_SERVE_STATE_PATH = resolve_app_path(
 
 DEFAULT_VARIANT = os.environ.get("HP_TMUX_VARIANT", "autopilot-html-tmux-team-split")
 DEFAULT_POLL_INTERVAL_MS = int(os.environ.get("HP_POLL_INTERVAL_MS", "3000"))
-MEDIA_DIR = Path(
+MEDIA_DIR = resolve_app_path(
     os.environ.get("HP_MEDIA_DIR", str(DEFAULT_ARTIFACTS_DIR / "videos"))
-).resolve()
+)
 
 EXPECTED_HAP_RELATIVE_PATH = Path("entry/build/default/outputs/default/entry-default-unsigned.hap")
 HDC_CAPTURE_SCRIPT_PATH = APP_ROOT / "scripts" / "hdc_runtime_capture.py"
 HPACK_PACKAGER_SCRIPT_PATH = APP_ROOT / "scripts" / "hpack_packager.py"
 
 HPACK_ENABLED = os.environ.get("HP_HPACK_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
-HPACK_PYTHON_BIN = os.environ.get("HP_HPACK_PYTHON_BIN", sys.executable).strip() or sys.executable
+HPACK_PYTHON_BIN = (
+    resolve_app_executable(os.environ.get("HP_HPACK_PYTHON_BIN", sys.executable)) or sys.executable
+)
 HPACK_STATIC_ROOT = (
-    Path(os.environ.get("HP_HPACK_STATIC_ROOT", "")).expanduser().resolve()
+    resolve_app_path(os.environ.get("HP_HPACK_STATIC_ROOT", ""))
     if os.environ.get("HP_HPACK_STATIC_ROOT", "")
     else None
 )
@@ -107,9 +126,9 @@ if HPACK_STATIC_ROOT is not None:
 
 HDC_CAPTURE_TARGET = os.environ.get("HP_HDC_TARGET", "").strip()
 DEFAULT_CAPTURE_PYTHON_BIN = APP_ROOT / ".venv" / "bin" / "python3"
-CAPTURE_PYTHON_BIN = (
-    os.environ.get("HP_CAPTURE_PYTHON_BIN", "").strip()
-    or (str(DEFAULT_CAPTURE_PYTHON_BIN) if DEFAULT_CAPTURE_PYTHON_BIN.is_file() else sys.executable)
+CAPTURE_PYTHON_CONFIG = os.environ.get("HP_CAPTURE_PYTHON_BIN", "").strip()
+CAPTURE_PYTHON_BIN = resolve_app_executable(CAPTURE_PYTHON_CONFIG) or (
+    str(DEFAULT_CAPTURE_PYTHON_BIN) if DEFAULT_CAPTURE_PYTHON_BIN.is_file() else sys.executable
 )
 CAPTURE_POLL_INTERVAL_SEC = float(os.environ.get("HP_CAPTURE_POLL_INTERVAL_SEC", "5"))
 CAPTURE_WAIT_TIMEOUT_SEC = float(os.environ.get("HP_CAPTURE_WAIT_TIMEOUT_SEC", "9800"))

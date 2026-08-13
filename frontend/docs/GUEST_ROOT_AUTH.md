@@ -32,7 +32,7 @@ POST /api/auth/logout
 Root 密码不会以明文保存在配置中。运行下列命令，输入密码两次：
 
 ```sh
-cd /Users/huaweiide/Desktop/fe/code/harmony-pilot-remote-ui
+cd /path/to/Genius/frontend
 python3 scripts/generate_root_auth_config.py
 ```
 

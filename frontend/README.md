@@ -1,6 +1,6 @@
-# Harmony Pilot Remote UI
+# Genius Frontend
 
-一个独立于 `harmony-pilot` 主仓库的 Python Web 小项目，用来远程触发本地 `tmux-runner`，并在网页中展示简化后的执行轨迹、运行预览与扫码安装结果。
+位于 `Genius/frontend` 的统一 Web 入口：Pro 任务分派到同级 `devkit_studio` 的 `tmux-runner`，Expo 任务分派到仓库内的 `Genius/runner`，并在网页中展示执行轨迹、运行预览与扫码安装结果。构建选项只保留 Pro 和 Expo。
 
 后端是标准库实现的纯 JSON API（不依赖 FastAPI、Flask 等第三方框架）；前端是位于 `web/` 的独立 **Vite + React + TypeScript + Tailwind CSS** 工程，通过 `/api` 与后端通信。前端单独调试方式见 [`web/README.md`](./web/README.md)。
 
@@ -31,19 +31,22 @@
 cd frontend
 cp deploy/server.env.example deploy/server.env
 cp deploy/profile-pool.example.json deploy/profile-pool.json
+python3 -m venv .venv
+.venv/bin/python3 -m pip install -r requirements.txt
 # 编辑 deploy/server.env：填入路径、签名密码、CLOUDFLARE_TUNNEL_TOKEN
 # 可选：编辑 .env.local 覆盖本机单项配置
-python3 scripts/preflight_verify.py
+.venv/bin/python3 scripts/preflight_verify.py
 scripts/restart_dev.sh
 ```
 
-`scripts/restart_dev.sh` 是推荐入口。它会清理旧进程，后台启动完整 Bitfun UI dev stack，并验证本机和公网 health：
+`scripts/restart_dev.sh` 是 version2 的推荐入口。它只清理自己的进程，后台启动完整 UI dev stack，并验证本机和公网 health：
 
-- `127.0.0.1:8080`：React / Vite 新前端，对应 `https://bitfun-platform.com/`
-- `127.0.0.1:8081`：Python JSON API 后端，提供 `/api/*`、HPack 安装页和 HAP 静态文件
-- Cloudflare Tunnel：把 `bitfun-platform.com` 转发到本机 `127.0.0.1:8080`
+- `127.0.0.1:8089`：React / Vite version2 前端，对应 `https://version2.bitfun-platform.com/`
+- `127.0.0.1:8090`：version2 Python JSON API 后端，提供 `/api/*`、HPack 安装页和 HAP 静态文件
+- `remote-ui-dev2`：version2 独立 tmux session
+- Cloudflare Tunnel：把 `version2.bitfun-platform.com` 转发到本机 `127.0.0.1:8089`
 
-旧的 `scripts/run_dev.sh` 只启动 Python 后端自带页面并让它占用 `8080`，会使公网首页回到 legacy UI；除非你明确要调试旧的 Python-only UI，否则不要用它启动 `bitfun-platform.com`。
+旧 Bitfun 服务独立使用 `remote-ui-dev`、`8080/8081` 和 `bitfun-platform.com`。version2 重启脚本会拒绝使用这些受保护资源，避免环境文件缺失或误配时影响旧服务。
 
 ### 前端界面
 
@@ -61,12 +64,12 @@ cd web && npm run build                # 产物在 web/dist
 
 ### 完整重启
 
-改完代码或需要重启 Bitfun UI 服务时，用 `scripts/restart_dev.sh`。它只会停止自己管理的 `remote-ui-dev` tmux session，确认 `8080` 和 `8081` 端口已释放，再重新启动新 UI 栈并做 health 检查。若端口被其它进程占用，脚本会报错并列出占用者，不会主动杀掉其它生成中的 tmux 会话或无关进程。
+改完代码或需要重启 version2 UI 服务时，用 `scripts/restart_dev.sh`。它只会停止自己管理的 `remote-ui-dev2` tmux session，确认 `8089` 和 `8090` 端口已释放，再重新启动 version2 UI 栈并做 health 检查。脚本明确保护旧服务的 `remote-ui-dev`、`8080` 和 `8081`；若 version2 端口被其它进程占用，它只报错，不主动杀进程。
 
 ```bash
 cd /path/to/Genius/frontend
 
-# 默认后台启动到 tmux session remote-ui-dev，并自动 curl health 验证
+# 默认后台启动到 tmux session remote-ui-dev2，并自动 curl health 验证
 scripts/restart_dev.sh
 
 # 前台启动，Ctrl+C 会停止 web + app + tunnel
@@ -82,8 +85,8 @@ scripts/restart_dev.sh --skip-preflight
 验证服务是否起来：
 
 ```bash
-curl -fsS http://127.0.0.1:8080/api/health | head -c 120
-curl -fsS http://127.0.0.1:8081/api/health | head -c 120
+curl -fsS http://127.0.0.1:8089/api/health | head -c 120
+curl -fsS http://127.0.0.1:8090/api/health | head -c 120
 ```
 
 返回 `{"ok": true, ...}` 即正常。
@@ -120,7 +123,7 @@ tmux 模式默认使用 `remote-ui-local` session，可通过
 
 `app.py` 启动时会自动读取 `deploy/server.env`（`.env.local` 仅作可选覆盖）。验证时至少需要配置：
 
-- `HP_TMUX_RUNNER`: `harmony-pilot/scripts/tmux-runner.cjs` 的绝对路径
+- `HP_TMUX_RUNNER`: `devkit_studio/scripts/tmux-runner.cjs` 的路径，当前使用 `../../devkit_studio/scripts/tmux-runner.cjs`
 - `HP_TARGET_WORKSPACE`: HarmonyOS 工程根目录，例如 `~/devecoProject/demo`
 - `HP_EXPO_FAST_ROOT`: Expo Harmony Fast Runtime 路径；Genius 仓内默认是 `../runner`
 - `HP_EXPO_FAST_APP_ROOT`: Expo 任务独立工作目录的父目录；默认是 `../expo-app`，每次构建会在这里创建新工程与对应的 Markdown Prompt
@@ -190,8 +193,8 @@ workspace/current/
 
 推荐正式方案：`Cloudflare Tunnel + Cloudflare Access`
 
-- 固定域名，例如 `bitfun-platform.com`
-- Tunnel 转发到本机 `127.0.0.1:8080`（React 前端），前端再把 `/api/*`、`/static/hpack/*`、`/hpack/*`、`/install/*` 代理到 `127.0.0.1:8081`
+- 固定域名 `version2.bitfun-platform.com`
+- Tunnel 转发到本机 `127.0.0.1:8089`（React 前端），前端再把 `/api/*`、`/static/hpack/*`、`/hpack/*`、`/install/*` 代理到 `127.0.0.1:8090`
 - Access 做邮箱登录和访问控制
 
 安装 `cloudflared`：
@@ -212,7 +215,7 @@ scripts/restart_dev.sh --foreground
 
 专用入口：
 
-- `scripts/run_dev.sh`：旧 Python-only UI + tunnel。保留用于排查后端自带页面，不作为 `bitfun-platform.com` 推荐入口。
+- `scripts/run_dev.sh`：旧 Python-only UI + tunnel。仅保留用于排查后端自带页面，不作为 version2 推荐入口。
 - `scripts/run_verify.sh`：只启动 Python 后端，用于 API / HPack / HDC 后端单独调试。
 - `scripts/run_tunnel.sh`：只启动 Cloudflare Tunnel，用于手动拆分调试。
 
@@ -222,14 +225,14 @@ scripts/restart_dev.sh --foreground
 
 | 步骤 | 操作 | 说明 |
 |------|------|------|
-| 1 | `pip install -r requirements.txt` | 需要 `qrcode`、`Pillow`、`imageio-ffmpeg`（二维码与视频生成） |
-| 2 | 克隆并配置 `harmony-pilot` | `HP_TMUX_RUNNER` 指向其 `scripts/tmux-runner.cjs`；需支持 `ARKPILOT_BUNDLE_NAME` 环境变量 |
+| 1 | `python3 -m venv .venv && .venv/bin/python3 -m pip install -r requirements.txt` | 在当前 `Genius/frontend` 重建环境；包含二维码、视频、WebRTC 与 HPack 依赖，不能复制旧目录的虚拟环境 |
+| 2 | 克隆并配置 `devkit_studio` | `HP_TMUX_RUNNER` 指向其 `scripts/tmux-runner.cjs`；需支持 `ARKPILOT_BUNDLE_NAME` 环境变量 |
 | 3 | `cp deploy/server.env.example deploy/server.env` | 填写 tmux-runner 路径、workspace、HPack 公网 URL、签名密码、Tunnel token |
 | 4 | `cp deploy/profile-pool.example.json deploy/profile-pool.json` | 按本机 `.p7b` 文件名改 `slots[].profile` |
 | 5 | 签名材料放入 `deploy/signing/` | 可用 `scripts/sync_deploy_signing_assets.sh` 同步 |
 | 6 | 安装 DevEco 工具链 | macOS 默认路径见 `deploy/server.env.example`；Linux 需改 `HDC_PATH` / `HP_HVIGORW` / `HP_DEVECO_JAVA_HOME` |
-| 7 | `python3 scripts/preflight_verify.py` | 全部 `[OK]` 后再启动 |
-| 8 | Cloudflare | Tunnel 指向 `127.0.0.1:8080`；Access 对 `/static/hpack/*` 配置 **Bypass**（手机拉 manifest 不能走登录） |
+| 7 | `.venv/bin/python3 scripts/preflight_verify.py` | 全部 `[OK]` 后再启动 |
+| 8 | Cloudflare | `version2.bitfun-platform.com` 指向 `127.0.0.1:8089`；Access 对 `/static/hpack/*` 配置 **Bypass**（手机拉 manifest 不能走登录） |
 
 **不要提交：** `deploy/server.env`、`deploy/profile-pool.json`、`deploy/signing/*`（除 `.gitkeep`）、`.env.local`
 
@@ -273,16 +276,16 @@ HP_HPACK_ENABLED=1 \
 HP_HPACK_BASE_URL=https://your-domain.com/static/hpack \
 HP_HPACK_DEPLOY_DOMAIN=your-domain.com \
 HP_HPACK_STATIC_ROOT=$(pwd)/static/hpack \
-HP_HPACK_CERT=/Users/you/.harmony-pilot/hpack-sign/release.cer \
-HP_HPACK_PROFILE=/Users/you/.harmony-pilot/hpack-sign/release.p7b \
-HP_HPACK_KEYSTORE=/Users/you/.harmony-pilot/hpack-sign/release.p12 \
+HP_HPACK_CERT=~/.harmony-pilot/hpack-sign/release.cer \
+HP_HPACK_PROFILE=~/.harmony-pilot/hpack-sign/release.p7b \
+HP_HPACK_KEYSTORE=~/.harmony-pilot/hpack-sign/release.p12 \
 HP_HPACK_ALIAS=<key-alias> \
 HP_HPACK_KEYSTORE_PASSWORD=<keystore-password> \
 HP_HPACK_KEY_PASSWORD=<key-password> \
-PORT=8081 python3 app.py
+PORT=8090 python3 app.py
 ```
 
-上面是后端单独调试方式。完整新 UI 栈仍然使用 `scripts/restart_dev.sh`，由 React 前端在 `8080` 代理 `/static/hpack/*` 到后端 `8081`。
+上面是后端单独调试方式。完整 version2 UI 栈仍然使用 `scripts/restart_dev.sh`，由 React 前端在 `8089` 代理 `/static/hpack/*` 到后端 `8090`。
 
 首版本生成流程：
 

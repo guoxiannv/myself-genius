@@ -14,7 +14,7 @@ STOP_ONLY=0
 INTERNAL_SERVICE=""
 OPENBITFUN_PROXY_SESSION="${OPENBITFUN_PROXY_SESSION:-openbitfun-proxy}"
 OPENBITFUN_PROXY_PORT="${OPENBITFUN_PROXY_PORT:-40363}"
-OPENBITFUN_PROXY_ROOT="${OPENBITFUN_PROXY_ROOT:-/Users/m2/Desktop/code/harmony-pilot}"
+OPENBITFUN_PROXY_ROOT="${OPENBITFUN_PROXY_ROOT:-}"
 OPENBITFUN_PROXY_HEALTH_URL="http://127.0.0.1:${OPENBITFUN_PROXY_PORT}/health"
 
 usage() {
@@ -40,7 +40,7 @@ Environment overrides:
   FRONTEND_PORT=8180 BACKEND_PORT=8181 HOST=127.0.0.1
   HP_EXPO_PUBLIC_SERVE_PORT=3456 HP_EXPO_PUBLIC_SERVE_ENABLED=1
   LOCAL_TMUX_SESSION=remote-ui-local
-  OPENBITFUN_PROXY_ROOT=/Users/m2/Desktop/code/harmony-pilot
+  OPENBITFUN_PROXY_ROOT=/path/to/harmony-pilot
 EOF
 }
 
@@ -197,6 +197,7 @@ ensure_openbitfun_proxy() {
 
   if [ ! -d "$OPENBITFUN_PROXY_ROOT" ]; then
     echo "Missing OPENBITFUN_PROXY_ROOT: $OPENBITFUN_PROXY_ROOT" >&2
+    echo "Set OPENBITFUN_PROXY_ROOT in deploy/server.env when using the local proxy." >&2
     exit 1
   fi
   if ! command -v tmux >/dev/null 2>&1; then

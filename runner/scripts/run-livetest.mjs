@@ -21,6 +21,7 @@ const hdc = resolve(process.env.HDC || `${process.env.DEVECO_PATH || '/Applicati
 const node22 = process.env.EXPO_FAST_NODE || process.execPath;
 const claude = process.env.CLAUDE_BIN || 'claude';
 const liveClaude = process.env.EXPO_FAST_LIVE_CLAUDE === '1';
+const harmonyGoLocalOrigin = 'http://127.0.0.1:3333';
 let activeRunState = null;
 
 function setRunState(state, detail, context = {}, extra = {}) {
@@ -206,7 +207,7 @@ async function serve(folder, port) { const server = createServer((req, res) => {
 function hdcRun(args) { const r = spawnSync(hdc, args, { encoding: 'utf8' }); if (r.status !== 0 || /\[Fail\]/i.test(`${r.stdout}\n${r.stderr}`)) throw new Error(`hdc ${args.join(' ')} failed\n${r.stdout}${r.stderr}`); return r.stdout || ''; }
 function clearReverse(target) { const list = spawnSync(hdc, ['-t', target, 'fport', 'ls'], { encoding: 'utf8' }).stdout || ''; for (const line of list.split(/\r?\n/)) { const match = line.match(/tcp:(\d+)\s+tcp:(\d+)\s+\[Reverse\]/); if (match && match[1] === '3333') spawnSync(hdc, ['-t', target, 'fport', 'rm', `tcp:${match[1]}`, `tcp:${match[2]}`], { encoding: 'utf8' }); } }
 async function launch(project, catalogRoot, port) { const targets = hdcRun(['list', 'targets']).trim().split(/\s+/).filter(Boolean); if (!targets.length) throw new Error('no Harmony target'); const target = targets[0]; const server = await serve(catalogRoot, port); try { clearReverse(target); hdcRun(['-t', target, 'rport', 'tcp:3333', `tcp:${port}`]); hdcRun(['-t', target, 'shell', 'aa', 'force-stop', 'host.exp.exponent.harmony']); hdcRun(['-t', target, 'shell', 'aa', 'start', '-a', 'EntryAbility', '-b', 'host.exp.exponent.harmony']); return { target, server }; } catch (e) { server.close(); throw e; } }
-function nodeText(node) { const a = node.attributes || {}; return a.text || a.originalText || a.description || ''; }
+function nodeText(node) { const a = node?.attributes || {}; return a.text || a.originalText || a.description || ''; }
 function children(node) { return node.children || []; }
 function subtreeHas(node, text) { return nodeText(node) === text || children(node).some((child) => subtreeHas(child, text)); }
 function collect(node, predicate, out = []) { if (predicate(node)) out.push(node); for (const child of children(node)) collect(child, predicate, out); return out; }
@@ -218,20 +219,72 @@ function relatedButton(layout, identity, labels) {
 }
 function dumpLayout(project, target, name) { const device = `/data/local/tmp/expo-fast-${process.pid}-${name}.json`; const local = join(project, '.expo-fast', `${name}.json`); hdcRun(['-t', target, 'shell', 'uitest', 'dumpLayout', '-p', device]); hdcRun(['-t', target, 'file', 'recv', device, local]); return JSON.parse(readFileSync(local, 'utf8')); }
 function tapNode(target, node) { const [x, y] = boundsCenter(node); hdcRun(['-t', target, 'shell', 'uitest', 'uiInput', 'click', String(x), String(y)]); return { x, y, bounds: node.attributes.bounds, text: nodeText(node) }; }
+function replaceTextInput(target, node, value) {
+  const action = tapNode(target, node);
+  hdcRun(['-t', target, 'shell', 'uitest', 'uiInput', 'keyEvent', '2072', '2017']);
+  hdcRun(['-t', target, 'shell', 'uitest', 'uiInput', 'text', value]);
+  hdcRun(['-t', target, 'shell', 'uitest', 'uiInput', 'keyEvent', 'Back']);
+  return { ...action, value };
+}
+function catalogStatus(layout) {
+  return collect(layout, (node) => /^(?:正在发现|开发服务)/.test(nodeText(node))).map(nodeText)[0] || 'catalog status unavailable';
+}
+async function waitForLayout(project, target, name, predicate, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  let layout;
+  do {
+    layout = dumpLayout(project, target, name);
+    if (predicate(layout)) return layout;
+    await new Promise((r) => setTimeout(r, 500));
+  } while (Date.now() < deadline);
+  return layout;
+}
+async function prepareCatalog(project, target, manifestId, actions) {
+  let layout = dumpLayout(project, target, 'launch-catalog');
+  const projectsTab = collect(layout, (node) => node.attributes?.type === 'Button' && nodeText(node) === '项目')[0];
+  if (projectsTab) {
+    actions.push({ action: 'catalog', ...tapNode(target, projectsTab) });
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  layout = await waitForLayout(project, target, 'launch-catalog', (candidate) => {
+    const inputReady = collect(candidate, (node) => node.attributes?.type === 'TextInput').length > 0;
+    const refreshReady = collect(candidate, (node) => node.attributes?.type === 'Button' && nodeText(node) === '刷新').length > 0;
+    return inputReady && refreshReady;
+  });
+  let serverInput = collect(layout, (node) => node.attributes?.type === 'TextInput')[0];
+  if (!serverInput) throw new Error('Harmony Go catalog server input is unavailable');
+  if (nodeText(serverInput) !== harmonyGoLocalOrigin) {
+    actions.push({ action: 'set-catalog-origin', ...replaceTextInput(target, serverInput, harmonyGoLocalOrigin) });
+    await new Promise((r) => setTimeout(r, 500));
+    layout = dumpLayout(project, target, 'launch-catalog');
+    serverInput = collect(layout, (node) => node.attributes?.type === 'TextInput')[0];
+    if (!serverInput || nodeText(serverInput) !== harmonyGoLocalOrigin) {
+      throw new Error(`could not set Harmony Go catalog origin to ${harmonyGoLocalOrigin}`);
+    }
+  }
+  const refresh = collect(layout, (node) => node.attributes?.type === 'Button' && nodeText(node) === '刷新')[0];
+  if (!refresh) throw new Error(`Harmony Go catalog refresh is unavailable; status=${catalogStatus(layout)}`);
+  actions.push({ action: 'refresh-catalog', ...tapNode(target, refresh) });
+  layout = await waitForLayout(project, target, 'launch-catalog', (candidate) => {
+    const online = collect(candidate, (node) => nodeText(node).startsWith('开发服务已连接')).length > 0;
+    const currentApp = collect(candidate, (node) => nodeText(node) === manifestId).length > 0;
+    const origin = collect(candidate, (node) => node.attributes?.type === 'TextInput')[0];
+    return online && currentApp && nodeText(origin) === harmonyGoLocalOrigin;
+  });
+  if (!layout || !collect(layout, (node) => nodeText(node).startsWith('开发服务已连接')).length || !collect(layout, (node) => nodeText(node) === manifestId).length) {
+    const origin = collect(layout || {}, (node) => node.attributes?.type === 'TextInput')[0];
+    throw new Error(`Harmony Go catalog did not expose mini app ${manifestId} from ${harmonyGoLocalOrigin}; origin=${nodeText(origin) || 'unavailable'}; status=${catalogStatus(layout || {})}`);
+  }
+  return layout;
+}
 async function installAndOpen(project, target, manifestId) {
   const source = [join(project, 'App.tsx'), ...readdirSync(join(project, 'src'), { recursive: true }).filter((entry) => /\.[jt]sx?$/.test(String(entry))).map((entry) => join(project, 'src', String(entry)))].filter((path) => existsSync(path)).map((path) => readFileSync(path, 'utf8')).join('\n');
   const testIds = [...source.matchAll(/testID=["']([^"']+)["']/g)].map((match) => match[1]);
   const sharedTemplateIds = new Set(['app-shell', 'responsive-navigation', 'primary-action', 'item-count']);
   const productMarkers = testIds.filter((id) => !sharedTemplateIds.has(id) && !/^tab-(?:home|activity|settings)$/.test(id));
   if (!productMarkers.length) throw new Error(`current source has no run-specific literal testID for exact-app identity: ${manifestId}`);
-  let layout = dumpLayout(project, target, 'launch-catalog');
   const actions = [];
-  const projectsTab = collect(layout, (node) => node.attributes?.type === 'Button' && nodeText(node) === '项目')[0];
-  if (projectsTab) {
-    actions.push({ action: 'catalog', ...tapNode(target, projectsTab) });
-    await new Promise((r) => setTimeout(r, 1500));
-    layout = dumpLayout(project, target, 'launch-catalog');
-  }
+  let layout = await prepareCatalog(project, target, manifestId, actions);
   const remove = relatedButton(layout, manifestId, ['移除']);
   if (remove) {
     actions.push({ action: 'remove-stale-bundle', ...tapNode(target, remove) });
@@ -239,10 +292,6 @@ async function installAndOpen(project, target, manifestId) {
     layout = dumpLayout(project, target, 'launch-catalog');
   }
   let install = relatedButton(layout, manifestId, ['安装']);
-  if (!install) {
-    const refresh = collect(layout, (node) => node.attributes?.type === 'Button' && nodeText(node) === '刷新')[0];
-    if (refresh) { tapNode(target, refresh); await new Promise((r) => setTimeout(r, 1500)); layout = dumpLayout(project, target, 'launch-catalog'); install = relatedButton(layout, manifestId, ['安装']); }
-  }
   if (install) { actions.push({ action: 'install', ...tapNode(target, install) }); await new Promise((r) => setTimeout(r, 3000)); layout = dumpLayout(project, target, 'launch-installed'); }
   const alreadyProduct = inspectCurrentMiniApp(layout, manifestId, productMarkers).ok;
   if (!alreadyProduct) {

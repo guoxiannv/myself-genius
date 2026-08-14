@@ -17,11 +17,17 @@ function hasHarmonyGoBundle(layout) {
   return collect(layout, (node) => node.attributes?.bundleName === 'host.exp.exponent.harmony').length > 0;
 }
 function currentProjectTitle(layout, manifestId) {
-  return collect(layout, (node) => {
+  const candidates = collect(layout, (node) => {
     const box = bounds(node);
     const attributes = node.attributes || {};
-    return attributes.type === 'Text' && attributes.visible !== 'false' && nodeText(node) === manifestId && box && box.top < 201 && box.bottom <= 201;
-  })[0] || null;
+    return attributes.type === 'Text' && attributes.visible !== 'false' && nodeText(node) === manifestId && box;
+  });
+  const projectsTab = collect(layout, (node) => node.attributes?.type === 'Button' && nodeText(node) === '项目')[0];
+  const projectsBounds = bounds(projectsTab);
+  if (projectsBounds) {
+    return candidates.filter((node) => bounds(node).bottom <= projectsBounds.top).sort((a, b) => bounds(a).top - bounds(b).top)[0] || null;
+  }
+  return candidates.find((node) => bounds(node).top < 201 && bounds(node).bottom <= 201) || null;
 }
 function productMarker(layout, markerIds) {
   const wanted = new Set(markerIds.filter(Boolean));

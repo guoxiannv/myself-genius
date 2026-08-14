@@ -257,6 +257,17 @@ test('portable launchers contain no user-specific path and keep machine config o
   for (const key of ['EXPO_FAST_APP_ROOT', 'EXPO_FAST_NODE', 'EXPO_HARMONY_SDK_ROOT', 'EXPO_HARMONY_POOL_ROOT', 'EXPO_FAST_MODULE_CACHE', 'DEVECO_PATH', 'CLAUDE_BIN']) assert.match(example, new RegExp(key));
 });
 
+test('runner resets the persisted Harmony Go catalog origin before exact-app launch', () => {
+  const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
+  assert.match(runner, /const harmonyGoLocalOrigin = 'http:\/\/127\.0\.0\.1:3333'/);
+  assert.match(runner, /'keyEvent', '2072', '2017'/);
+  assert.match(runner, /action: 'set-catalog-origin'/);
+  assert.match(runner, /action: 'refresh-catalog'/);
+  assert.match(runner, /Harmony Go catalog did not expose mini app/);
+  assert.ok(runner.indexOf("action: 'set-catalog-origin'") < runner.indexOf("action: 'refresh-catalog'"));
+  assert.ok(runner.indexOf('await prepareCatalog') < runner.indexOf('const remove = relatedButton'));
+});
+
 test('external controller atomically records live generation, repair, and completion state', () => {
   const project = mkdtempSync(join(tmpdir(), 'expo-fast-state-'));
   const runId = 'run-state-test';
@@ -742,6 +753,20 @@ test('exact-app identity rejects a listed app when another app is current', () =
   ] }] };
   writeFileSync(join(smoke, 'layout-before.json'), JSON.stringify(wrong));
   assert.throws(() => validateSmoke(project), /current-project title is not exactly test-ledger/);
+});
+
+test('exact-app identity locates the Host title relative to navigation on high-density layouts', async () => {
+  const { inspectCurrentMiniApp } = await import('../scripts/layout-identity.mjs');
+  const layout = { children: [{ attributes: { bundleName: 'host.exp.exponent.harmony' }, children: [
+    { attributes: { type: 'Text', text: 'EXPO HARMONY GO', bounds: '[67,175][550,222]', visible: 'true' } },
+    { attributes: { type: 'Text', text: 'test-ledger', bounds: '[67,232][1184,493]', visible: 'true' } },
+    { attributes: { type: 'Button', text: '项目', bounds: '[67,566][263,694]', visible: 'true' } },
+    { attributes: { type: 'Custom', id: 'ledger-summary', bounds: '[40,900][900,1000]', visible: 'true' } },
+    { attributes: { type: 'Text', text: 'test-ledger', bounds: '[316,1991][951,2180]', visible: 'true' } },
+  ] }] };
+  const identity = inspectCurrentMiniApp(layout, 'test-ledger', ['ledger-summary']);
+  assert.equal(identity.ok, true);
+  assert.equal(identity.currentProjectBounds, '[67,232][1184,493]');
 });
 
 test('exact-app identity rejects a visible runtime error overlay', () => {

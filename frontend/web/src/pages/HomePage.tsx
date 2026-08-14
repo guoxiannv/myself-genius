@@ -111,14 +111,6 @@ export function HomePage() {
               </svg>
               免费开始生成
             </button>
-            <a
-              href="https://gitee.com/harmonyos-cases/cases"
-              target="_blank"
-              rel="noreferrer"
-              className="rounded-xl border border-border bg-surface-raised px-5 py-2.5 text-sm font-medium text-foreground transition-colors hover:border-border-strong"
-            >
-              查看示例作品
-            </a>
           </div>
         </div>
       </section>

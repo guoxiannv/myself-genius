@@ -22,7 +22,7 @@ export function TopBar({
             </svg>
           </span>
           <span className="text-sm font-semibold tracking-tight">
-            Harmony<span className="text-glow">Pilot</span>
+            Bitfun <span className="text-glow">Genius</span>
           </span>
         </Link>
       )}

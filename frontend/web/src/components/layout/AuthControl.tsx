@@ -91,7 +91,7 @@ export function AuthControl({ compact = false }: { compact?: boolean }) {
           >
             <div className="flex items-start justify-between gap-4">
               <div>
-                <p className="text-xs font-semibold text-accent-soft">HarmonyPilot</p>
+                <p className="text-xs font-semibold text-accent-soft">Bitfun Genius</p>
                 <h2 id="root-login-title" className="mt-1 text-xl font-bold text-foreground">管理员登录</h2>
               </div>
               <button type="button" onClick={() => setOpen(false)} aria-label="关闭登录窗口" className="text-subtle transition-colors hover:text-foreground">

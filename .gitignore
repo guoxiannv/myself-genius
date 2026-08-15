@@ -6,3 +6,4 @@
 
 # Machine-local fixed Harmony HAP build slots and native caches.
 /harmony-pool/
+/harmony-pool-*/

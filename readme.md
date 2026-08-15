@@ -27,6 +27,10 @@ git submodule update --init --recursive
 以上命令会检出 Genius 当前记录、并已经过配套验证的 SDK commit。普通部署不要执行
 `git submodule update --remote sdk`，以免本机 SDK 偏离主仓库固定的版本。
 
+当前 Harmony full-profile 版本由 SDK 的 `tools/harmony/full-profile.json` 固定。升级
+`profileId`（例如从 v2 到 v3）会使已有构建池失效；升级后的 SDK 必须先推送到
+`BitFun-Platform/devkit_sdk`，再更新本仓库的 submodule 指针，并为新 profile 创建新的 Pool 根目录。
+
 ### 维护者升级 SDK
 
 只有在需要主动更新 Genius 的 SDK 指针时，才获取跟踪分支 `dev/SupportOH` 的最新提交：

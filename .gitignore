@@ -1,9 +1,19 @@
 .DS_Store
 **/.DS_Store
 
+.idea/
+*.idea
+
 # Default workspace for generated Expo applications in the monorepo.
 /expo-app/
 
 # Machine-local fixed Harmony HAP build slots and native caches.
 /harmony-pool/
 /harmony-pool-*/
+.bitfun/
+
+# Local pnpm content-addressable store residue.
+.pnpm-store/
+
+# HPack build output (signed HAPs, manifests) served from the repo root.
+/static/

@@ -20,6 +20,7 @@ data/runs/*
 data/artifacts/*
 !data/artifacts/__init__.py
 data/signing-pool-state.json
+data/expo-publications.json
 scripts/__pycache__/*
 static/hpack/*
 workspace/

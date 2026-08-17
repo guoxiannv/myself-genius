@@ -1,12 +1,12 @@
 # Expo Harmony Fast Runner
 
-`runner/` 是 Genius 仓库中的 Expo Harmony Go 冷启动生成编排。它从一份产品需求创建全新 Expo 工程，让模型实现产品，随后执行依赖解析、类型检查、源码与产物审计、Harmony Go 启动验证，并可在固定 SDK 池中构建 unsigned HAP。
+`runner/` 是 Genius 仓库中的 Expo Harmony Go 冷启动生成编排。它从一份产品需求创建全新 Expo 工程，让模型实现产品，随后执行依赖解析、类型检查、源码与产物审计，并通过预装的 Harmony Go 壳启动验证。固定 SDK 池构建 unsigned HAP 仅作为显式启用的兼容能力。
 
 当前运行时不再依赖 `SKILL.md`。生成模型收到的产品约束由 `scripts/run-livetest.mjs` 与 `AGENTS.md` 组成；技术模板、运行合同和能力解析均是 runner 自身资源。
 
 ## 快速开始
 
-要求 Node.js 22.13 或更高版本、可用的 Claude Code 命令，以及同仓的 Expo Harmony SDK。需要启动或构建 HarmonyOS 产物时，还需配置 DevEco Studio、Harmony Go 设备和 HAP 构建池。
+要求 Node.js 22.13 或更高版本、可用的 Claude Code 命令，以及同仓的 Expo Harmony SDK。启动预览时还需配置 DevEco Studio 和已安装 Harmony Go 壳的设备；只有显式启用每任务 HAP 时才需要 HAP 构建池。
 
 ```sh
 cd runner
@@ -15,7 +15,7 @@ npm test
 ./start-livetest.sh --prompt "帮我做一个离线应用……"
 ```
 
-`.env` 只保存本机路径。相对路径统一以 `runner/` 为基准，主要配置包括生成工程根目录、Node、SDK、可选 `node_modules` 缓存、DevEco Studio、Claude Code 和 HAP pool。完整参数可运行：
+`.env` 只保存本机路径。相对路径统一以 `runner/` 为基准，主要配置包括生成工程根目录、Node、SDK、可选 `node_modules` 缓存、DevEco Studio、Claude Code 和预览设备池。完整参数可运行：
 
 ```sh
 ./start-livetest.sh --help
@@ -66,7 +66,8 @@ start-livetest.sh
 4. 解析并同步模型选择的精确能力依赖，执行 typecheck、trace-scope 和 source audit。
 5. 若确定性诊断失败且策略允许，使用同一会话执行聚合 repair，再完整复验。
 6. 通过 SDK Harmony CLI 导出 Bundle/catalog，执行 artifact audit。
-7. 可选启动 Harmony Go、验证当前应用身份与交互证据，最后在固定 pool 中构建 unsigned HAP。
+7. 将 Bundle 发布到共享 Gateway，由设备池分配预装 Harmony Go 壳并验证当前应用身份与交互证据。
+8. 只有显式传入 `--hap true` 时，才在固定 pool 中额外构建每任务 unsigned HAP。
 
 HAP 失败会被记录为独立的 partial failure，不会抹掉此前已经通过的生成、审计或 Harmony Go 证据。
 

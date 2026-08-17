@@ -29,6 +29,9 @@ function serializedError(error) {
 
 function validateReadyResult(project, outputRoot, resultPath, metadata) {
   if (metadata.status !== 'success') return null;
+  if (metadata.buildMode !== 'release') {
+    throw new Error(`Harmony pool result is not a release HAP: ${metadata.buildMode || '<missing>'}`);
+  }
   if (typeof metadata.hapPath !== 'string' || !metadata.hapPath) {
     throw new Error(`Successful Harmony pool result has no HAP path: ${resultPath}`);
   }
@@ -67,6 +70,7 @@ function publicResult(metadata, resultPath, ready = null) {
     hapPath: ready?.hapPath || null,
     hapSha256: ready?.hapSha256 || null,
     bundleName: metadata.bundleName ?? null,
+    buildMode: metadata.buildMode ?? null,
     resultPath,
     logPath: typeof metadata.logPath === 'string' ? metadata.logPath : null,
     startedAt: metadata.startedAt ?? null,
@@ -116,6 +120,8 @@ export function runHapPoolBuild({
   node = process.execPath,
   runId,
   waitSeconds = 3600,
+  buildMode = 'release',
+  deviceType = 'phone',
   commandRunner = spawnSync,
 }) {
   const startedAt = Date.now();
@@ -131,6 +137,9 @@ export function runHapPoolBuild({
 
   const safeRunId = String(runId || basename(project)).replace(/[^A-Za-z0-9._-]+/g, '-');
   const jobId = `hap-${safeRunId}`;
+  if (!['debug', 'release'].includes(buildMode)) {
+    throw new Error(`Unsupported Harmony HAP build mode: ${buildMode}`);
+  }
   const poolScript = join(sdk, 'tools/harmony/full-profile-pool.mjs');
   const args = [
     poolScript,
@@ -140,6 +149,8 @@ export function runHapPoolBuild({
     '--job-id', jobId,
     '--output', outputRoot,
     '--wait-seconds', String(waitSeconds),
+    '--build-mode', buildMode,
+    '--device-type', deviceType,
   ];
 
   let processResult;

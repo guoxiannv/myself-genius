@@ -52,7 +52,33 @@ function configuredCaches() {
 
 function npmInvocation() {
   const npmCli = resolve(dirname(process.execPath), '../lib/node_modules/npm/bin/npm-cli.js');
-  return existsSync(npmCli) ? { command: process.execPath, prefix: [npmCli] } : { command: 'npm', prefix: [] };
+  try {
+    readFileSync(npmCli);
+    return { command: process.execPath, prefix: [npmCli] };
+  } catch {
+    return { command: 'npm', prefix: [] };
+  }
+}
+
+export function assertDependencyRuntime() {
+  const [major, minor] = process.versions.node.split('.').map(Number);
+  if (major < 22 || (major === 22 && minor < 13)) {
+    throw new Error(`Node.js 22.13 or newer is required; found ${process.version} at ${process.execPath}`);
+  }
+  const npm = npmInvocation();
+  const result = spawnSync(npm.command, [...npm.prefix, '--version'], {
+    env: process.env,
+    encoding: 'utf8',
+  });
+  const output = `${result.stdout || ''}${result.stderr || ''}`.trim();
+  if (result.status !== 0) {
+    throw new Error([
+      `npm is not usable with the configured Node runtime ${process.execPath}`,
+      output || result.error?.message || `npm exited ${result.status ?? 'unknown'}`,
+      'Set EXPO_FAST_NODE to a readable Node.js installation that includes an accessible npm command.',
+    ].join('\n'));
+  }
+  return { node: process.version, nodePath: process.execPath, npm: output };
 }
 
 function installProjectDependencies(project, logName, exactDependencies = {}) {
@@ -286,10 +312,11 @@ export function exportHarmonyGo(projectRoot, outputRoot, sdkRoot = resolve(root,
 function main() {
   const [command, projectArg, outputArg] = process.argv.slice(2);
   const project = resolve(projectArg || '.');
+  if (command === 'check') { console.log(JSON.stringify(assertDependencyRuntime(), null, 2)); return; }
   if (command === 'seed') { console.log(JSON.stringify(seedDependencies(project), null, 2)); return; }
   if (command === 'sync') { console.log(JSON.stringify(syncDependencies(project), null, 2)); return; }
   if (command === 'export') { exportHarmonyGo(project, resolve(outputArg || join(project, 'dist/harmony-go'))); return; }
-  throw new Error('usage: dependencies.mjs seed|sync|export <project> [output]');
+  throw new Error('usage: dependencies.mjs check | seed|sync|export <project> [output]');
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

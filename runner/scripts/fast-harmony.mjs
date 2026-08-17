@@ -192,9 +192,15 @@ export function prepare(projectDir, requestFile) {
   if (!existsSync(join(template, 'metro.harmony.config.js'))) throw new Error(`self-contained template is incomplete: ${template}`);
   cpSync(template, projectDir, { recursive: true });
   const slug = basename(projectDir).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'generated';
-  const bundleIdentifier = `${harmonyBundlePrefix}${slug.replaceAll('-', '.')}`.slice(0, 127);
+  const configuredBundleIdentifier = String(process.env.EXPO_FAST_BUNDLE_IDENTIFIER || '').trim();
+  const bundleIdentifier = configuredBundleIdentifier || `${harmonyBundlePrefix}${slug.replaceAll('-', '.')}`.slice(0, 127);
   replacePlaceholders(projectDir, { APP_NAME: slug, APP_SLUG: slug, APP_SCHEME: slug.replaceAll('-', ''), BUNDLE_IDENTIFIER: bundleIdentifier });
-  const app = json(join(projectDir, 'app.json')); app.expo.name = slug; app.expo.slug = slug; app.expo.scheme = slug; app.expo.harmony.bundleIdentifier = bundleIdentifier; writeJson(join(projectDir, 'app.json'), app);
+  const configuredVersionCode = String(process.env.EXPO_FAST_VERSION_CODE || '').trim();
+  const versionCode = configuredVersionCode ? Number(configuredVersionCode) : Math.floor(Date.now() / 1000);
+  if (!Number.isSafeInteger(versionCode) || versionCode <= 0 || versionCode > 2147483647) {
+    throw new Error(`EXPO_FAST_VERSION_CODE must be an integer from 1 through 2147483647: ${configuredVersionCode}`);
+  }
+  const app = json(join(projectDir, 'app.json')); app.expo.name = slug; app.expo.slug = slug; app.expo.scheme = slug; app.expo.harmony.bundleIdentifier = bundleIdentifier; app.expo.harmony.versionCode = versionCode; writeJson(join(projectDir, 'app.json'), app);
   mkdirSync(join(projectDir, '.expo-fast'), { recursive: true });
   writeFileSync(join(projectDir, '.expo-fast/request.md'), readFileSync(resolve(requestFile)));
   const capabilityCatalog = catalog(projectDir);

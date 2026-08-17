@@ -6,12 +6,15 @@ import { basename, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { validateSmoke } from '../scripts/validate-smoke.mjs';
+import { inspectCurrentMiniApp, visibleBundleNames } from '../scripts/layout-identity.mjs';
+import { assignHdcPreviewPorts, configuredHdcPreviewTargets, configuredHdcTarget, discoverHdcPreviewPools, hdcOutputFailed, parseHdcForwardRules, parseHdcTargets, prioritizeHdcPreviewTargets, reversePortCandidates, selectHdcPreviewTargets, selectHdcTarget } from '../scripts/hdc-target.mjs';
 import { auditImplementationTrace } from '../scripts/trace-scope.mjs';
 import { auditProductSource, verifyHarmonyGoArtifacts } from '../scripts/verify-product.mjs';
 import { writeRunState } from '../scripts/run-state.mjs';
 import { canRunRepair, repairArtifactName } from '../scripts/repair-policy.mjs';
-import { pinRuntimeDependencies, stageHarmonyCli } from '../scripts/dependencies.mjs';
+import { assertDependencyRuntime, pinRuntimeDependencies, stageHarmonyCli } from '../scripts/dependencies.mjs';
 import { runHapPoolBuild } from '../scripts/hap-build.mjs';
+import { acquirePreviewDevice, acquirePreviewDevices, configuredPreviewPools } from '../scripts/preview-device-pool.mjs';
 
 const root = resolve(new URL('..', import.meta.url).pathname);
 const script = join(root, 'scripts/fast-harmony.mjs');
@@ -33,9 +36,16 @@ test('dependency lifecycle commands have one controller', () => {
   for (const command of ['seed-modules', 'sync-dependencies', 'export-go', 'install']) {
     assert.doesNotMatch(helper, new RegExp(`command === '${command}'`));
   }
-  for (const command of ['seed', 'sync', 'export']) {
+  for (const command of ['check', 'seed', 'sync', 'export']) {
     assert.match(dependencies, new RegExp(`command === '${command}'`));
   }
+});
+
+test('dependency runtime preflight verifies Node and npm together', () => {
+  const runtime = assertDependencyRuntime();
+  assert.match(runtime.node, /^v\d+\.\d+\.\d+/);
+  assert.ok(runtime.nodePath);
+  assert.match(runtime.npm, /^\d+\.\d+\.\d+/);
 });
 
 test('one-click launcher resolves isolated projects, prompt input, models, and tmux defaults', () => {
@@ -52,7 +62,15 @@ test('one-click launcher resolves isolated projects, prompt input, models, and t
     '--repair-timeout', '15',
     '--launch', 'false',
     '--port', '3399',
-  ], { encoding: 'utf8' });
+  ], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      EXPO_FAST_ENV_FILE: join(workspace, 'missing.env'),
+      EXPO_HARMONY_POOL_ROOT: '',
+      HP_HDC_TARGET: '127.0.0.1:5557',
+    },
+  });
   assert.equal(result.status, 0, result.stderr);
   const plan = JSON.parse(result.stdout);
   assert.equal(plan.project, project);
@@ -65,10 +83,11 @@ test('one-click launcher resolves isolated projects, prompt input, models, and t
   assert.equal(plan.repairTimeout, 15);
   assert.equal(plan.timeout, 0);
   assert.equal(plan.launch, false);
-  assert.equal(plan.hap, true);
+  assert.equal(plan.hap, false);
   assert.equal(plan.pool, resolve(root, '../harmony-pool'));
   assert.equal(plan.hapWaitSeconds, 3600);
   assert.equal(plan.port, 3399);
+  assert.equal(plan.hdcTarget, '127.0.0.1:5557');
   assert.match(plan.session, /^expo-fast-custom-app$/);
   assert.equal(plan.sessionLog, join(root, '.expo-fast/session-logs/expo-fast-custom-app.log'));
   assert.ok(plan.requestPath.startsWith(workspace));
@@ -129,6 +148,61 @@ exit 0
   rmSync(sessionLog, { force: true });
 });
 
+test('tmux launcher forwards EXPO_FAST_BUNDLE_IDENTIFIER into the runner session', {
+  skip: spawnSync('tmux', ['-V']).status !== 0 || !existsSync('/bin/zsh'),
+}, async () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-bundle-env-'));
+  const fakeNode = join(workspace, 'fake-node');
+  const fakeSdk = join(workspace, 'sdk');
+  const fakeDevEco = join(workspace, 'DevEco-Studio.app');
+  writeFileSync(fakeNode, `#!/bin/sh
+echo "bundle=[\${EXPO_FAST_BUNDLE_IDENTIFIER}]"
+project=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '--project' ]; then shift; project="$1"; fi
+  shift
+done
+if [ -n "$project" ]; then mkdir -p "$project/.expo-fast"; fi
+exit 0
+`);
+  chmodSync(fakeNode, 0o755);
+  mkdirSync(fakeSdk);
+  mkdirSync(fakeDevEco);
+  const launcher = join(root, 'scripts/start-livetest.mjs');
+  const baseEnv = {
+    ...process.env,
+    EXPO_FAST_NODE: fakeNode,
+    EXPO_HARMONY_SDK_ROOT: fakeSdk,
+    DEVECO_PATH: fakeDevEco,
+    CLAUDE_BIN: fakeNode,
+  };
+  delete baseEnv.EXPO_FAST_BUNDLE_IDENTIFIER;
+
+  async function runSession(label, env) {
+    const session = `expo-fast-bundle-${label}-${process.pid}-${Date.now()}`;
+    const sessionLog = join(root, '.expo-fast/session-logs', `${session}.log`);
+    const result = spawnSync(process.execPath, [launcher,
+      '--project', join(workspace, `app-${label}`),
+      '--prompt', 'Build a signed app.',
+      '--session', session,
+      '--launch', 'false',
+    ], { encoding: 'utf8', env });
+    assert.equal(result.status, 0, result.stderr);
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (spawnSync('tmux', ['has-session', '-t', session]).status !== 0 && existsSync(sessionLog)) break;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+    }
+    const log = readFileSync(sessionLog, 'utf8');
+    rmSync(sessionLog, { force: true });
+    return log;
+  }
+
+  const signedLog = await runSession('signed', { ...baseEnv, EXPO_FAST_BUNDLE_IDENTIFIER: 'com.example.profile.slot06' });
+  assert.match(signedLog, /bundle=\[com\.example\.profile\.slot06\]/);
+  const unsignedLog = await runSession('unsigned', baseEnv);
+  assert.match(unsignedLog, /bundle=\[\]/);
+});
+
 test('one-click launcher defaults to the tested learning-goals scenario and K3 repair lane', () => {
   const launcher = join(root, 'scripts/start-livetest.mjs');
   const result = spawnSync(process.execPath, [launcher, '--dry-run', '--launch', 'false'], { encoding: 'utf8' });
@@ -177,12 +251,13 @@ test('one machine-local env file configures every portable launcher path', () =>
     'EXPO_HARMONY_HAP_WAIT_SECONDS="1800"',
     'EXPO_FAST_MODULE_CACHE="/portable/cache-one/node_modules:/portable/cache-two/node_modules"',
     'DEVECO_PATH="/portable/DevEco-Studio.app"',
+    'EXPO_FAST_HDC_TARGET="127.0.0.1:5557"',
     'CLAUDE_BIN="portable-claude"',
     'EXPO_FAST_LIVE_CLAUDE="0"',
     '',
   ].join('\n'));
   const env = { ...process.env, EXPO_FAST_ENV_FILE: envFile };
-  for (const key of ['EXPO_FAST_APP_ROOT', 'EXPO_FAST_NODE', 'EXPO_HARMONY_SDK_ROOT', 'EXPO_HARMONY_POOL_ROOT', 'EXPO_HARMONY_HAP_ENABLED', 'EXPO_HARMONY_HAP_WAIT_SECONDS', 'EXPO_FAST_MODULE_CACHE', 'DEVECO_PATH', 'CLAUDE_BIN', 'EXPO_FAST_LIVE_CLAUDE']) delete env[key];
+  for (const key of ['EXPO_FAST_APP_ROOT', 'EXPO_FAST_NODE', 'EXPO_HARMONY_SDK_ROOT', 'EXPO_HARMONY_POOL_ROOT', 'EXPO_HARMONY_HAP_ENABLED', 'EXPO_HARMONY_HAP_WAIT_SECONDS', 'EXPO_FAST_MODULE_CACHE', 'EXPO_FAST_HDC_TARGET', 'EXPO_FAST_HDC_DESKTOP_TARGET', 'EXPO_FAST_HDC_PHONE_TARGET', 'HDC_TARGET', 'HP_HDC_TARGET', 'HP_HDC_DESKTOP_TARGET', 'HP_HDC_PHONE_TARGET', 'DEVECO_PATH', 'CLAUDE_BIN', 'EXPO_FAST_LIVE_CLAUDE']) delete env[key];
   const launcher = join(root, 'scripts/start-livetest.mjs');
   const result = spawnSync(process.execPath, [launcher, '--dry-run', '--name', 'portable-app', '--launch', 'false'], { encoding: 'utf8', env });
   assert.equal(result.status, 0, result.stderr);
@@ -196,6 +271,7 @@ test('one machine-local env file configures every portable launcher path', () =>
   assert.equal(plan.hapWaitSeconds, 1800);
   assert.equal(plan.moduleCache, '/portable/cache-one/node_modules:/portable/cache-two/node_modules');
   assert.equal(plan.deveco, '/portable/DevEco-Studio.app');
+  assert.equal(plan.hdcTarget, '127.0.0.1:5557');
   assert.equal(plan.claude, 'portable-claude');
 });
 
@@ -254,7 +330,314 @@ test('portable launchers contain no user-specific path and keep machine config o
   assert.doesNotMatch(`${shell}\n${launcher}\n${runner}\n${dependencies}\n${helper}`, /\/Users\/stefan/);
   assert.match(shell, /source "\$LOCAL_ENV"/);
   assert.match(launcher, /process\.loadEnvFile\(localEnvFile\)/);
-  for (const key of ['EXPO_FAST_APP_ROOT', 'EXPO_FAST_NODE', 'EXPO_HARMONY_SDK_ROOT', 'EXPO_HARMONY_POOL_ROOT', 'EXPO_FAST_MODULE_CACHE', 'DEVECO_PATH', 'CLAUDE_BIN']) assert.match(example, new RegExp(key));
+  for (const key of ['EXPO_FAST_APP_ROOT', 'EXPO_FAST_NODE', 'EXPO_HARMONY_SDK_ROOT', 'EXPO_HARMONY_POOL_ROOT', 'EXPO_FAST_MODULE_CACHE', 'EXPO_FAST_HDC_TARGET', 'DEVECO_PATH', 'CLAUDE_BIN']) assert.match(example, new RegExp(key));
+});
+
+test('device type discovery separates PC and phone targets without fixed ports', () => {
+  const fakeHdc = join(mkdtempSync(join(tmpdir(), 'fake-hdc-')), 'hdc');
+  writeFileSync(fakeHdc, `#!/bin/sh
+if [ "$2" = "127.0.0.1:5555" ]; then
+  echo phone
+elif [ "$2" = "127.0.0.1:5557" ]; then
+  echo 2in1
+fi
+`);
+  chmodSync(fakeHdc, 0o755);
+  assert.deepEqual(discoverHdcPreviewPools(fakeHdc, ['127.0.0.1:5555', '127.0.0.1:5557']), {
+    desktop: ['127.0.0.1:5557'],
+    phone: ['127.0.0.1:5555'],
+  });
+});
+test('configured preview targets only prioritize connected devices of the discovered kind', () => {
+  assert.deepEqual(prioritizeHdcPreviewTargets(
+    ['desktop-b', 'desktop-a', 'desktop-c'],
+    ['missing-desktop', 'desktop-c', 'desktop-a'],
+  ), ['desktop-c', 'desktop-a', 'desktop-b']);
+  assert.deepEqual(prioritizeHdcPreviewTargets(['desktop-b'], ['phone-a']), ['desktop-b']);
+});
+
+test('Harmony target selection honors configuration and fails closed for ambiguity', () => {
+  assert.deepEqual(parseHdcTargets('127.0.0.1:5555\n127.0.0.1:5557\n'), ['127.0.0.1:5555', '127.0.0.1:5557']);
+  assert.equal(configuredHdcTarget({ HP_HDC_TARGET: '127.0.0.1:5557' }), '127.0.0.1:5557');
+  assert.equal(configuredHdcTarget({ HDC_TARGET: '127.0.0.1:5555', HP_HDC_TARGET: '127.0.0.1:5557' }), '127.0.0.1:5555');
+  assert.equal(configuredHdcTarget({ EXPO_FAST_HDC_TARGET: '127.0.0.1:5559', HDC_TARGET: '127.0.0.1:5555' }), '127.0.0.1:5559');
+  assert.equal(selectHdcTarget(['127.0.0.1:5555', '127.0.0.1:5557'], '127.0.0.1:5557'), '127.0.0.1:5557');
+  assert.equal(selectHdcTarget(['127.0.0.1:5557']), '127.0.0.1:5557');
+  assert.throws(() => selectHdcTarget(['127.0.0.1:5555', '127.0.0.1:5557']), /multiple Harmony targets connected/);
+  assert.throws(() => selectHdcTarget(['127.0.0.1:5555'], '127.0.0.1:5557'), /is not connected/);
+});
+
+test('Harmony preview target selection binds desktop and phone to distinct devices', () => {
+  const targets = ['127.0.0.1:5557', '127.0.0.1:5559'];
+  assert.deepEqual(configuredHdcPreviewTargets({
+    HP_HDC_DESKTOP_TARGET: '127.0.0.1:5557',
+    HP_HDC_PHONE_TARGET: '127.0.0.1:5559',
+  }), { desktop: '127.0.0.1:5557', phone: '127.0.0.1:5559' });
+  assert.deepEqual(selectHdcPreviewTargets(targets, {
+    desktop: '127.0.0.1:5557',
+    phone: '127.0.0.1:5559',
+  }, '127.0.0.1:5557'), { desktop: '127.0.0.1:5557', phone: '127.0.0.1:5559' });
+  assert.throws(() => selectHdcPreviewTargets(targets, {
+    desktop: '127.0.0.1:5557',
+    phone: '127.0.0.1:5557',
+  }), /must use different Harmony targets/);
+});
+
+test('Harmony preview ports are stable per device and reverse rules retain target identity', () => {
+  const pools = {
+    desktop: ['127.0.0.1:5557', '127.0.0.1:5561'],
+    phone: ['127.0.0.1:5555', '127.0.0.1:5559'],
+  };
+  assert.deepEqual(assignHdcPreviewPorts(pools), {
+    '127.0.0.1:5557': 3333,
+    '127.0.0.1:5561': 3334,
+    '127.0.0.1:5555': 3335,
+    '127.0.0.1:5559': 3336,
+  });
+  assert.deepEqual(parseHdcForwardRules([
+    '127.0.0.1:5557    tcp:3333 tcp:3456    [Reverse]',
+    '127.0.0.1:5555    tcp:3335 tcp:3456    [Reverse]',
+  ].join('\n')), [
+    { target: '127.0.0.1:5557', devicePort: 3333, hostPort: 3456, direction: 'reverse' },
+    { target: '127.0.0.1:5555', devicePort: 3335, hostPort: 3456, direction: 'reverse' },
+  ]);
+  assert.deepEqual(reversePortCandidates(3333, 4), [3333, 3334, 3335, 3336]);
+  assert.throws(() => reversePortCandidates(65534, 4), /invalid Harmony Go reverse port range/);
+});
+
+test('Harmony Go reverse mapping retries an orphaned device listener on the next port', () => {
+  const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
+  const opener = readFileSync(join(root, 'scripts/open-desktop-preview.mjs'), 'utf8');
+  assert.match(runner, /function ensureReverseWithFallback\(/);
+  assert.match(runner, /TCP Port listen failed/);
+  assert.match(runner, /devicePorts: \{ \[target\]: devicePort \}/);
+  assert.match(opener, /const activeDevicePort = prepareHarmonyGoTarget\(/);
+  assert.match(opener, /activeDevicePort,/);
+});
+
+test('preview pool leases desktop and phone independently without cross-kind blocking', async () => {
+  const poolRoot = mkdtempSync(join(tmpdir(), 'expo-preview-pool-independent-'));
+  const desktop = await acquirePreviewDevice({
+    runId: 'desktop-run',
+    kind: 'desktop',
+    availableTargets: async () => ['shared-desktop'],
+    root: poolRoot,
+    waitSeconds: 3,
+  });
+  let secondDesktopResolved = false;
+  const secondDesktopPromise = acquirePreviewDevice({
+    runId: 'second-desktop-run',
+    kind: 'desktop',
+    availableTargets: async () => ['shared-desktop'],
+    root: poolRoot,
+    waitSeconds: 3,
+  }).then((lease) => { secondDesktopResolved = true; return lease; });
+  const phone = await acquirePreviewDevice({
+    runId: 'phone-run',
+    kind: 'phone',
+    availableTargets: async () => ['phone-target'],
+    root: poolRoot,
+    waitSeconds: 3,
+  });
+  assert.equal(phone.target, 'phone-target');
+  await new Promise((resolveWait) => setTimeout(resolveWait, 1100));
+  assert.equal(secondDesktopResolved, false);
+  await desktop.release();
+  const secondDesktop = await secondDesktopPromise;
+  assert.equal(secondDesktop.target, 'shared-desktop');
+  await phone.release();
+  await secondDesktop.release();
+  rmSync(poolRoot, { recursive: true, force: true });
+});
+
+test('preview pool refreshes dynamically discovered targets while a request is queued', async () => {
+  const poolRoot = mkdtempSync(join(tmpdir(), 'expo-preview-pool-dynamic-'));
+  let targets = [];
+  const leasePromise = acquirePreviewDevice({
+    runId: 'dynamic-desktop-run',
+    kind: 'desktop',
+    availableTargets: async () => targets,
+    root: poolRoot,
+    waitSeconds: 3,
+  });
+  await new Promise((resolveWait) => setTimeout(resolveWait, 1100));
+  targets = ['late-desktop'];
+  const lease = await leasePromise;
+  assert.equal(lease.target, 'late-desktop');
+  await lease.release();
+  rmSync(poolRoot, { recursive: true, force: true });
+});
+
+test('runner preview validation has priority over queued live viewers', async () => {
+  const poolRoot = mkdtempSync(join(tmpdir(), 'expo-preview-pool-priority-'));
+  for (const name of ['queue', 'leases', 'quarantine']) mkdirSync(join(poolRoot, name), { recursive: true });
+  writeFileSync(join(poolRoot, 'queue/live-viewer.json'), JSON.stringify({
+    schema_version: 1,
+    run_id: 'live-viewer',
+    pid: process.pid,
+    kind: 'desktop',
+    priority: 'live',
+    queued_at: new Date().toISOString(),
+  }));
+
+  const lease = await acquirePreviewDevice({
+    runId: 'build-validation',
+    kind: 'desktop',
+    availableTargets: async () => ['desktop-priority'],
+    root: poolRoot,
+    waitSeconds: 2,
+  });
+
+  assert.equal(lease.target, 'desktop-priority');
+  await lease.release();
+  rmSync(poolRoot, { recursive: true, force: true });
+});
+
+test('preview pool leases one free desktop and phone then queues the next run', async () => {
+  const poolRoot = mkdtempSync(join(tmpdir(), 'expo-preview-pool-'));
+  const pools = {
+    desktop: ['127.0.0.1:5557', '127.0.0.1:5561'],
+    phone: ['127.0.0.1:5555', '127.0.0.1:5559'],
+  };
+  const connectedTargets = async () => [...pools.desktop, ...pools.phone];
+  const first = await acquirePreviewDevices({
+    runId: 'a'.repeat(32), pools, connectedTargets, root: poolRoot, waitSeconds: 3,
+  });
+  const second = await acquirePreviewDevices({
+    runId: 'b'.repeat(32), pools, connectedTargets, root: poolRoot, waitSeconds: 3,
+  });
+  assert.notEqual(first.targets.desktop, second.targets.desktop);
+  assert.notEqual(first.targets.phone, second.targets.phone);
+
+  let thirdResolved = false;
+  const thirdPromise = acquirePreviewDevices({
+    runId: 'c'.repeat(32), pools, connectedTargets, root: poolRoot, waitSeconds: 3,
+  }).then((lease) => { thirdResolved = true; return lease; });
+  await new Promise((resolveWait) => setTimeout(resolveWait, 1100));
+  assert.equal(thirdResolved, false);
+  await first.release();
+  const third = await thirdPromise;
+  assert.equal(third.targets.desktop, first.targets.desktop);
+  assert.equal(third.targets.phone, first.targets.phone);
+  await second.release();
+  await third.release();
+  rmSync(poolRoot, { recursive: true, force: true });
+});
+
+test('preview pool supports desktop-only validation when no phone emulator is configured', async () => {
+  const poolRoot = mkdtempSync(join(tmpdir(), 'expo-preview-pool-desktop-only-'));
+  const pools = {
+    desktop: ['127.0.0.1:5555'],
+    phone: [],
+  };
+  const lease = await acquirePreviewDevices({
+    runId: 'f'.repeat(32),
+    pools,
+    connectedTargets: async () => ['127.0.0.1:5555'],
+    root: poolRoot,
+    waitSeconds: 3,
+  });
+  assert.deepEqual(lease.targets, { desktop: '127.0.0.1:5555', phone: '' });
+  const runnableTargets = Object.fromEntries(
+    Object.entries(lease.targets).filter(([, target]) => Boolean(target)),
+  );
+  assert.deepEqual(runnableTargets, { desktop: '127.0.0.1:5555' });
+  assert.deepEqual(lease.records.map(({ kind, target }) => ({ kind, target })), [
+    { kind: 'desktop', target: '127.0.0.1:5555' },
+  ]);
+  await lease.release();
+  rmSync(poolRoot, { recursive: true, force: true });
+});
+
+test('preview pool quarantines a failed target and leases its same-kind fallback', async () => {
+  const poolRoot = mkdtempSync(join(tmpdir(), 'expo-preview-pool-failover-'));
+  const pools = {
+    desktop: ['127.0.0.1:5557', '127.0.0.1:5561'],
+    phone: ['127.0.0.1:5555', '127.0.0.1:5559'],
+  };
+  const connectedTargets = async () => [...pools.desktop, ...pools.phone];
+  const first = await acquirePreviewDevices({
+    runId: 'd'.repeat(32), pools, connectedTargets, root: poolRoot, waitSeconds: 3,
+  });
+  const failedDesktop = first.targets.desktop;
+  await first.quarantine(failedDesktop, 'shell did not reach foreground');
+  await first.release();
+
+  const replacement = await acquirePreviewDevices({
+    runId: 'e'.repeat(32), pools, connectedTargets, root: poolRoot, waitSeconds: 3,
+  });
+  assert.notEqual(replacement.targets.desktop, failedDesktop);
+  assert.equal(replacement.targets.phone, first.targets.phone);
+  await replacement.release();
+  rmSync(poolRoot, { recursive: true, force: true });
+});
+
+test('preview pool configuration accepts comma-separated device lists', () => {
+  assert.deepEqual(configuredPreviewPools({
+    HP_HDC_DESKTOP_TARGETS: '127.0.0.1:5557,127.0.0.1:5561',
+    HP_HDC_PHONE_TARGETS: '127.0.0.1:5555, 127.0.0.1:5559',
+  }), {
+    desktop: ['127.0.0.1:5557', '127.0.0.1:5561'],
+    phone: ['127.0.0.1:5555', '127.0.0.1:5559'],
+  });
+});
+
+test('foreground bundle inspection distinguishes Harmony Go from the system launcher', () => {
+  const launcher = { children: [{ attributes: { bundleName: 'com.ohos.sceneboard' } }] };
+  const harmonyGo = { children: [{ attributes: { bundleName: 'host.exp.exponent.harmony' } }] };
+  assert.deepEqual(visibleBundleNames(launcher), ['com.ohos.sceneboard']);
+  assert.deepEqual(visibleBundleNames(harmonyGo), ['host.exp.exponent.harmony']);
+});
+
+test('exact-app identity accepts the universal shell title below a phone status bar', () => {
+  const manifestId = 'remote-ui-ea02ff4f9333452b9f6c3ea3185d49b8';
+  const layout = { children: [{ attributes: { bundleName: 'host.exp.exponent.harmony', type: 'root' }, children: [
+    { attributes: { type: 'Text', text: manifestId, bounds: '[70,241][1231,511]', visible: 'true' } },
+    { attributes: { id: 'timer-ring', type: 'Custom', bounds: '[40,756][1280,1800]', visible: 'true' } },
+  ] }] };
+  const identity = inspectCurrentMiniApp(layout, manifestId, ['timer-ring']);
+  assert.equal(identity.ok, true, identity.errors.join('; '));
+  assert.equal(identity.currentProjectBounds, '[70,241][1231,511]');
+});
+
+test('exact-app identity does not confuse a catalog card with the current shell title', () => {
+  const manifestId = 'remote-ui-wanted';
+  const layout = { children: [{ attributes: { bundleName: 'host.exp.exponent.harmony', type: 'root' }, children: [
+    { attributes: { type: 'Text', text: 'remote-ui-other', visible: 'true' } },
+    { attributes: { type: 'Button', text: '项目', visible: 'true' } },
+    { attributes: { type: 'Text', text: manifestId, visible: 'true' } },
+    { attributes: { id: 'timer-ring', type: 'Custom', visible: 'true' } },
+  ] }] };
+  const identity = inspectCurrentMiniApp(layout, manifestId, ['timer-ring']);
+  assert.equal(identity.ok, false);
+  assert.match(identity.errors.join('; '), /current-project title/);
+});
+
+test('HDC textual start failures are rejected even when the process exits zero', () => {
+  assert.equal(hdcOutputFailed('start ability successfully.\n'), false);
+  assert.equal(hdcOutputFailed('error: failed to start ability.\nError Code:10106102'), true);
+  assert.equal(hdcOutputFailed('[Fail][E003001] Invalid bundle name: host.exp.exponent.harmony'), true);
+});
+
+test('Harmony Go preview wakes and unlocks a reused target and retries a locked launch once', () => {
+  const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
+  assert.match(runner, /function wakeAndUnlockHarmonyTarget\(target\)/);
+  assert.match(runner, /'power-shell', 'wakeup'/);
+  assert.match(runner, /'uiInput', 'swipe'/);
+  assert.match(runner, /10106102\|device screen is locked/);
+  assert.match(runner, /wakeAndUnlockHarmonyTarget\(target\);\s*hdcRun\(args\);/);
+});
+
+test('Expo initial preview requests only a dynamically discovered desktop shell', () => {
+  const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
+  assert.match(runner, /acquirePreviewDevice\(\{/);
+  assert.match(runner, /kind: 'desktop'/);
+  assert.match(runner, /discoverHdcPreviewPools\(hdc, connected\)\.desktop/);
+  assert.match(runner, /prioritizeHdcPreviewTargets\(discovered, pools\.desktop\)/);
+  assert.match(runner, /launchPreviewState = \{\s*desktop:/);
+  assert.doesNotMatch(runner, /launchPreviewState = \{\s*desktop:[\s\S]{0,120}phone:/);
+  assert.doesNotMatch(runner, /splitTargets\(o\.phoneTargets\)/);
+  assert.doesNotMatch(runner, /acquirePreviewDevices\(\{/);
 });
 
 test('runner resets the persisted Harmony Go catalog origin before exact-app launch', () => {
@@ -264,8 +647,32 @@ test('runner resets the persisted Harmony Go catalog origin before exact-app lau
   assert.match(runner, /action: 'set-catalog-origin'/);
   assert.match(runner, /action: 'refresh-catalog'/);
   assert.match(runner, /Harmony Go catalog did not expose mini app/);
+  assert.ok(runner.includes("'shell', `printf '${origin}\\\\n' > ${configPath}`"));
+  assert.doesNotMatch(runner, /'shell', '-b', bundleName, `printf/);
+  assert.doesNotMatch(runner, /'shell', '-b', bundleName, 'cat'/);
   assert.ok(runner.indexOf("action: 'set-catalog-origin'") < runner.indexOf("action: 'refresh-catalog'"));
   assert.ok(runner.indexOf('await prepareCatalog') < runner.indexOf('const remove = relatedButton'));
+});
+
+test('runner scrolls a long Harmony Go catalog before declaring the app missing', () => {
+  const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
+  assert.match(runner, /function revealCatalogProject\(/);
+  assert.match(runner, /action: 'scroll-catalog'/);
+  assert.match(runner, /'uiInput', 'swipe'/);
+  assert.match(runner, /catalogViewport\(/);
+  assert.match(runner, /layout = await revealCatalogProject\(/);
+  assert.match(runner, /primary desktop preview failed on \$\{live\.target\}: \$\{desktopFailure\}/);
+});
+
+test('runner waits for the exact catalog card to install and the exact product to render', () => {
+  const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
+  assert.match(runner, /function catalogProjectCard\(/);
+  assert.match(runner, /ids\.size === 1 && ids\.has\(identity\)/);
+  assert.match(runner, /function waitForInstalledMiniApp\(/);
+  assert.match(runner, /timed out waiting for mini app \$\{manifestId\} to install/);
+  assert.match(runner, /\(candidate\) => inspectCurrentMiniApp\(candidate, manifestId, productMarkers\)\.ok/);
+  assert.doesNotMatch(runner, /const identityButton = collect\(/);
+  assert.ok(runner.indexOf("assertCurrentMiniApp(layout, manifestId, productMarkers, 'launch-product')") < runner.indexOf("'screenCap'"));
 });
 
 test('external controller atomically records live generation, repair, and completion state', () => {
@@ -348,6 +755,7 @@ test('runner publishes a validated SDK pool HAP into the run-owned output', () =
         hapPath,
         hapSha256,
         bundleName: 'com.example.product',
+        buildMode: 'release',
       }));
       return { status: 0, stdout: 'ok', stderr: '' };
     },
@@ -355,6 +763,8 @@ test('runner publishes a validated SDK pool HAP into the run-owned output', () =
   assert.equal(invocation.command, process.execPath);
   assert.equal(invocation.args[1], 'build');
   assert.equal(invocation.args[invocation.args.indexOf('--pool') + 1], pool);
+  assert.equal(invocation.args[invocation.args.indexOf('--build-mode') + 1], 'release');
+  assert.equal(invocation.args[invocation.args.indexOf('--device-type') + 1], 'phone');
   assert.equal(result.status, 'ready');
   assert.equal(result.slotId, 'slot-02');
   assert.equal(result.bundleName, 'com.example.product');
@@ -447,6 +857,28 @@ test('product capability selection adds exact Expo dependencies and rejects drif
   assert.notEqual(rejected.status, 0);
   assert.match(rejected.stderr, /fixed scaffold dependency react-native-svg must remain 15\.15\.4/);
   assert.match(rejected.stderr, /react-native-webview.*is unavailable/);
+});
+
+test('prepare uses the signing profile bundle identifier when provided by Remote UI', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-signing-bundle-'));
+  const project = join(workspace, 'signed-app');
+  const request = join(workspace, 'request.md');
+  writeFileSync(request, '生成一个待签名的应用。');
+  const bundleIdentifier = 'com.example.profile.slot06';
+
+  const prepared = spawnSync(process.execPath, [script, 'prepare', project, request], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      EXPO_FAST_BUNDLE_IDENTIFIER: bundleIdentifier,
+      EXPO_FAST_VERSION_CODE: '1000001',
+    },
+  });
+
+  assert.equal(prepared.status, 0, prepared.stderr);
+  const app = JSON.parse(readFileSync(join(project, 'app.json'), 'utf8'));
+  assert.equal(app.expo.harmony.bundleIdentifier, bundleIdentifier);
+  assert.equal(app.expo.harmony.versionCode, 1000001);
 });
 
 test('runtime override dependencies are derived and exact native declarations remain recoverable', () => {

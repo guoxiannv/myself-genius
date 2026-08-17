@@ -1,11 +1,13 @@
 #!/usr/bin/env node
-import { createServer } from 'node:http';
-import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { basename, extname, join, resolve } from 'node:path';
+import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { validateSmoke } from './validate-smoke.mjs';
-import { assertCurrentMiniApp, inspectCurrentMiniApp } from './layout-identity.mjs';
+import { assertCurrentMiniApp, inspectCurrentMiniApp, visibleBundleNames } from './layout-identity.mjs';
+import { discoverHdcPreviewPools, hdcOutputFailed, parseHdcForwardRules, parseHdcTargets, prioritizeHdcPreviewTargets, reversePortCandidates } from './hdc-target.mjs';
+import { acquirePreviewDevice, configuredPreviewPools } from './preview-device-pool.mjs';
 import { auditImplementationTrace } from './trace-scope.mjs';
 import { writeRunState } from './run-state.mjs';
 import { canRunRepair, repairArtifactName } from './repair-policy.mjs';
@@ -202,20 +204,203 @@ async function claudeTurn(project, mode, trace, prompt, sessionId, resume = fals
   });
   return { ms: Date.now() - started, ...outcome };
 }
-function mime(path) { return ({ '.json': 'application/json', '.js': 'application/javascript', '.map': 'application/json', '.png': 'image/png', '.jpeg': 'image/jpeg', '.jpg': 'image/jpeg' })[extname(path)] || 'application/octet-stream'; }
-async function serve(folder, port) { const server = createServer((req, res) => { const rel = decodeURIComponent((req.url || '/').split('?')[0] === '/' ? '/catalog.json' : req.url.split('?')[0]); const path = resolve(folder, `.${rel}`); if (!path.startsWith(resolve(folder)) || !existsSync(path) || !statSync(path).isFile()) { res.statusCode = 404; res.end('not found'); return; } res.setHeader('Content-Type', mime(path)); createReadStream(path).pipe(res); }); await new Promise((ok, fail) => { const onError = (error) => fail(error); server.once('error', onError); server.listen(port, '127.0.0.1', () => { server.off('error', onError); ok(); }); }); return server; }
-function hdcRun(args) { const r = spawnSync(hdc, args, { encoding: 'utf8' }); if (r.status !== 0 || /\[Fail\]/i.test(`${r.stdout}\n${r.stderr}`)) throw new Error(`hdc ${args.join(' ')} failed\n${r.stdout}${r.stderr}`); return r.stdout || ''; }
-function clearReverse(target) { const list = spawnSync(hdc, ['-t', target, 'fport', 'ls'], { encoding: 'utf8' }).stdout || ''; for (const line of list.split(/\r?\n/)) { const match = line.match(/tcp:(\d+)\s+tcp:(\d+)\s+\[Reverse\]/); if (match && match[1] === '3333') spawnSync(hdc, ['-t', target, 'fport', 'rm', `tcp:${match[1]}`, `tcp:${match[2]}`], { encoding: 'utf8' }); } }
-async function launch(project, catalogRoot, port) { const targets = hdcRun(['list', 'targets']).trim().split(/\s+/).filter(Boolean); if (!targets.length) throw new Error('no Harmony target'); const target = targets[0]; const server = await serve(catalogRoot, port); try { clearReverse(target); hdcRun(['-t', target, 'rport', 'tcp:3333', `tcp:${port}`]); hdcRun(['-t', target, 'shell', 'aa', 'force-stop', 'host.exp.exponent.harmony']); hdcRun(['-t', target, 'shell', 'aa', 'start', '-a', 'EntryAbility', '-b', 'host.exp.exponent.harmony']); return { target, server }; } catch (e) { server.close(); throw e; } }
+function hdcRun(args) {
+  const r = spawnSync(hdc, args, { encoding: 'utf8' });
+  const output = `${r.stdout || ''}\n${r.stderr || ''}`;
+  if (r.status !== 0 || hdcOutputFailed(output)) {
+    throw new Error(`hdc ${args.join(' ')} failed\n${output.trim()}`);
+  }
+  return r.stdout || '';
+}
+function reverseMappings() { return parseHdcForwardRules(hdcRun(['fport', 'ls'])); }
+function clearReverse(target, devicePort, hostPort) {
+  for (const mapping of reverseMappings()) {
+    if (
+      mapping.target !== target ||
+      mapping.direction !== 'reverse' ||
+      (mapping.devicePort !== devicePort && mapping.hostPort !== hostPort)
+    ) continue;
+    hdcRun(['-t', target, 'fport', 'rm', `tcp:${mapping.devicePort}`, `tcp:${mapping.hostPort}`]);
+  }
+}
+function ensureReverse(target, devicePort, hostPort) {
+  const active = reverseMappings().find((mapping) =>
+    mapping.target === target &&
+    mapping.direction === 'reverse' &&
+    mapping.devicePort === devicePort &&
+    mapping.hostPort === hostPort
+  );
+  if (active) return;
+  clearReverse(target, devicePort, hostPort);
+  hdcRun(['-t', target, 'rport', `tcp:${devicePort}`, `tcp:${hostPort}`]);
+  const verified = reverseMappings().some((mapping) =>
+    mapping.target === target &&
+    mapping.direction === 'reverse' &&
+    mapping.devicePort === devicePort &&
+    mapping.hostPort === hostPort
+  );
+  if (!verified) throw new Error(`HDC reverse mapping did not become active on ${target}: tcp:${devicePort} -> tcp:${hostPort}`);
+}
+function ensureReverseWithFallback(target, preferredDevicePort, hostPort) {
+  let lastError = null;
+  for (const devicePort of reversePortCandidates(preferredDevicePort)) {
+    try {
+      ensureReverse(target, devicePort, hostPort);
+      return devicePort;
+    } catch (error) {
+      lastError = error;
+      if (!/TCP Port listen failed/i.test(String(error?.message || error))) throw error;
+    }
+  }
+  throw new Error(
+    `no free Harmony Go reverse port on ${target} from tcp:${preferredDevicePort}`,
+    { cause: lastError },
+  );
+}
+function configureHarmonyGoOrigin(target, devicePort) {
+  const bundleName = 'host.exp.exponent.harmony';
+  const bundleDump = hdcRun(['-t', target, 'shell', 'bm', 'dump', '-n', bundleName]);
+  const userId = bundleDump.match(/"userId"\s*:\s*(\d+)/)?.[1];
+  if (!userId) throw new Error(`Harmony Go is not installed or has no user profile on ${target}`);
+  const configPath = `/data/app/el2/${userId}/base/${bundleName}/haps/entry/files/miniapp-server.txt`;
+  const origin = `http://127.0.0.1:${devicePort}`;
+  hdcRun(['-t', target, 'shell', `printf '${origin}\\n' > ${configPath}`]);
+  const stored = hdcRun(['-t', target, 'shell', 'cat', configPath]).trim();
+  if (stored !== origin) throw new Error(`Harmony Go server origin was not saved on ${target}: ${stored || '<empty>'}`);
+  return origin;
+}
+function frontendRunId(project) {
+  const match = basename(project).match(/([a-f0-9]{32})$/i);
+  if (!match) throw new Error(`project name does not contain a frontend run id: ${basename(project)}`);
+  return match[1].toLowerCase();
+}
+async function publishToPreviewGateway(project, catalogRoot, origin) {
+  const response = await fetch(`${origin.replace(/\/$/, '')}/internal/publications`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ run_id: frontendRunId(project), artifact_root: catalogRoot }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  const body = await response.text();
+  if (!response.ok) throw new Error(`preview gateway rejected export (${response.status}): ${body.slice(0, 1000)}`);
+  return JSON.parse(body);
+}
+function previewTargetError(kind, target, error) {
+  const wrapped = new Error(
+    `Harmony Go ${kind} preview device ${target} failed: ${String(error?.message || error)}`,
+    { cause: error },
+  );
+  wrapped.previewKind = kind;
+  wrapped.previewTarget = target;
+  return wrapped;
+}
+function wakeAndUnlockHarmonyTarget(target) {
+  hdcRun(['-t', target, 'shell', 'power-shell', 'wakeup']);
+  hdcRun([
+    '-t', target,
+    'shell', 'uitest', 'uiInput', 'swipe',
+    '1560', '1700', '1560', '500', '1000',
+  ]);
+}
+function startHarmonyGo(target) {
+  const args = ['-t', target, 'shell', 'aa', 'start', '-a', 'EntryAbility', '-b', 'host.exp.exponent.harmony'];
+  try {
+    hdcRun(args);
+  } catch (error) {
+    if (!/10106102|device screen is locked/i.test(String(error?.message || error))) throw error;
+    wakeAndUnlockHarmonyTarget(target);
+    hdcRun(args);
+  }
+}
+export function prepareHarmonyGoTarget(kind, target, devicePort, gatewayPort) {
+  try {
+    const activeDevicePort = ensureReverseWithFallback(target, devicePort, gatewayPort);
+    configureHarmonyGoOrigin(target, activeDevicePort);
+    wakeAndUnlockHarmonyTarget(target);
+    hdcRun(['-t', target, 'shell', 'uitest', 'uiInput', 'keyEvent', 'Home']);
+    hdcRun(['-t', target, 'shell', 'aa', 'force-stop', 'host.exp.exponent.harmony']);
+    startHarmonyGo(target);
+    return activeDevicePort;
+  } catch (error) {
+    throw previewTargetError(kind, target, error);
+  }
+}
+export async function verifyHarmonyGoForeground(project, kind, target) {
+  let visible = [];
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 750));
+    try {
+      const layout = dumpLayout(project, target, `launch-shell-${kind}`);
+      visible = visibleBundleNames(layout);
+      if (visible.includes('host.exp.exponent.harmony')) return;
+    } catch (error) {
+      if (attempt === 5) throw previewTargetError(kind, target, error);
+    }
+  }
+  throw previewTargetError(
+    kind,
+    target,
+    new Error(`Harmony Go did not reach the foreground; visible bundle(s): ${visible.join(', ') || 'none'}`),
+  );
+}
+async function launch(project, pools, gatewayOrigin, onWait = () => {}) {
+  const gateway = new URL(gatewayOrigin);
+  if (gateway.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(gateway.hostname)) {
+    throw new Error(`preview gateway must be a loopback HTTP origin for HDC reverse mapping: ${gatewayOrigin}`);
+  }
+  const gatewayPort = Number(gateway.port || 80);
+  const excluded = new Set();
+  let lastFailure = null;
+  for (;;) {
+    const lease = await acquirePreviewDevice({
+      runId: frontendRunId(project),
+      kind: 'desktop',
+      availableTargets: async () => {
+        const connected = parseHdcTargets(hdcRun(['list', 'targets']));
+        const discovered = discoverHdcPreviewPools(hdc, connected).desktop;
+        return prioritizeHdcPreviewTargets(discovered, pools.desktop)
+          .filter((target) => !excluded.has(target));
+      },
+      onWait: (event) => onWait({ ...event, kind: 'desktop' }),
+    });
+    const target = lease.target;
+    try {
+      const devicePort = prepareHarmonyGoTarget('desktop', target, 3333, gatewayPort);
+      await verifyHarmonyGoForeground(project, 'desktop', target);
+      return { target, previews: { desktop: target }, devicePorts: { [target]: devicePort }, lease };
+    } catch (error) {
+      lastFailure = error;
+      if (error?.previewKind && error?.previewTarget) {
+        excluded.add(error.previewTarget);
+        await lease.quarantine(error.previewTarget, error.stack || error);
+        onWait({ status: 'retrying', kind: 'desktop', target: error.previewTarget, queuedAt: new Date().toISOString() });
+        await lease.release();
+        continue;
+      }
+      await lease.release();
+      throw error;
+    }
+  }
+}
 function nodeText(node) { const a = node?.attributes || {}; return a.text || a.originalText || a.description || ''; }
 function children(node) { return node.children || []; }
 function subtreeHas(node, text) { return nodeText(node) === text || children(node).some((child) => subtreeHas(child, text)); }
 function collect(node, predicate, out = []) { if (predicate(node)) out.push(node); for (const child of children(node)) collect(child, predicate, out); return out; }
 function boundsCenter(node) { const value = node.attributes?.bounds || ''; const match = value.match(/\[(\d+),(\d+)\]\[(\d+),(\d+)\]/); if (!match) throw new Error(`node has invalid bounds: ${value}`); return [Math.round((Number(match[1]) + Number(match[3])) / 2), Math.round((Number(match[2]) + Number(match[4])) / 2)]; }
-function relatedButton(layout, identity, labels) {
-  const candidates = collect(layout, (node) => subtreeHas(node, identity) && collect(node, (child) => child.attributes?.type === 'Button' && labels.includes(nodeText(child))).length > 0);
+function catalogProjectCard(layout, identity) {
+  const projectId = /^remote-ui-[a-f0-9]{32}$/;
+  const actionLabels = new Set(['安装', '打开', '移除']);
+  const candidates = collect(layout, (node) => {
+    const ids = new Set(collect(node, (child) => projectId.test(nodeText(child))).map(nodeText));
+    const hasAction = collect(node, (child) => child.attributes?.type === 'Button' && actionLabels.has(nodeText(child))).length > 0;
+    return ids.size === 1 && ids.has(identity) && hasAction;
+  });
   candidates.sort((a, b) => JSON.stringify(a).length - JSON.stringify(b).length);
-  return candidates.length ? collect(candidates[0], (node) => node.attributes?.type === 'Button' && labels.includes(nodeText(node)))[0] : null;
+  return candidates[0] || null;
+}
+function relatedButton(layout, identity, labels) {
+  const card = catalogProjectCard(layout, identity);
+  return card ? collect(card, (node) => node.attributes?.type === 'Button' && labels.includes(nodeText(node)))[0] || null : null;
 }
 function dumpLayout(project, target, name) { const device = `/data/local/tmp/expo-fast-${process.pid}-${name}.json`; const local = join(project, '.expo-fast', `${name}.json`); hdcRun(['-t', target, 'shell', 'uitest', 'dumpLayout', '-p', device]); hdcRun(['-t', target, 'file', 'recv', device, local]); return JSON.parse(readFileSync(local, 'utf8')); }
 function tapNode(target, node) { const [x, y] = boundsCenter(node); hdcRun(['-t', target, 'shell', 'uitest', 'uiInput', 'click', String(x), String(y)]); return { x, y, bounds: node.attributes.bounds, text: nodeText(node) }; }
@@ -239,71 +424,176 @@ async function waitForLayout(project, target, name, predicate, timeoutMs = 10_00
   } while (Date.now() < deadline);
   return layout;
 }
-async function prepareCatalog(project, target, manifestId, actions) {
-  let layout = dumpLayout(project, target, 'launch-catalog');
+function catalogHasProject(layout, manifestId) {
+  return collect(layout, (node) => nodeText(node) === manifestId).length > 0;
+}
+function catalogVisibleProjectIds(layout) {
+  return [...new Set(
+    collect(layout, (node) => /^remote-ui-[a-f0-9]{32}$/.test(nodeText(node))).map(nodeText),
+  )];
+}
+function catalogViewport(layout) {
+  const candidates = collect(layout, (node) => {
+    const match = String(node.attributes?.bounds || '').match(/\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]/);
+    return node.attributes?.scrollable === 'true' && node.attributes?.visible !== 'false' && match;
+  }).map((node) => {
+    const match = String(node.attributes.bounds).match(/\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]/);
+    const left = Number(match[1]);
+    const top = Number(match[2]);
+    const right = Number(match[3]);
+    const bottom = Number(match[4]);
+    return { node, left, top, right, bottom, area: Math.max(0, right - left) * Math.max(0, bottom - top) };
+  }).sort((left, right) => right.area - left.area);
+  return candidates[0] || null;
+}
+function catalogFingerprint(layout) {
+  return collect(layout, (node) => /^remote-ui-[a-f0-9]{32}$/.test(nodeText(node)))
+    .map((node) => `${nodeText(node)}@${node.attributes?.bounds || ''}`)
+    .join('|');
+}
+async function revealCatalogProject(project, target, manifestId, layout, actions, evidenceName) {
+  let current = layout;
+  const seen = new Set();
+  // Harmony Go renders the catalog as a scroll view. The aggregate gateway can
+  // contain more projects than fit in one accessibility dump, so do not treat
+  // a connected catalog with a missing first-page card as a missing app.
+  for (let step = 0; step < 16 && !catalogHasProject(current, manifestId); step += 1) {
+    const visible = catalogVisibleProjectIds(current);
+    const signature = catalogFingerprint(current);
+    if (seen.has(signature)) break;
+    seen.add(signature);
+    const viewport = catalogViewport(current);
+    if (!viewport) break;
+    const width = viewport.right - viewport.left;
+    const height = viewport.bottom - viewport.top;
+    const action = {
+      action: 'scroll-catalog',
+      direction: 'down',
+      step: step + 1,
+      from: { x: Math.round(viewport.left + width * 0.5), y: Math.round(viewport.top + height * 0.82) },
+      to: { x: Math.round(viewport.left + width * 0.5), y: Math.round(viewport.top + height * 0.28) },
+      visible,
+    };
+    hdcRun([
+      '-t', target,
+      'shell', 'uitest', 'uiInput', 'swipe',
+      String(action.from.x), String(action.from.y),
+      String(action.to.x), String(action.to.y),
+      '500',
+    ]);
+    actions.push(action);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+    current = dumpLayout(project, target, evidenceName('launch-catalog'));
+  }
+  return current;
+}
+async function prepareCatalog(project, target, manifestId, actions, evidenceName, expectedOrigin) {
+  let layout = dumpLayout(project, target, evidenceName('launch-catalog'));
+  const foregroundBundles = visibleBundleNames(layout);
+  if (!foregroundBundles.includes('host.exp.exponent.harmony')) {
+    throw new Error(`Harmony Go did not reach the foreground on target ${target}; visible bundle(s): ${foregroundBundles.join(', ') || 'none'}`);
+  }
   const projectsTab = collect(layout, (node) => node.attributes?.type === 'Button' && nodeText(node) === '项目')[0];
   if (projectsTab) {
     actions.push({ action: 'catalog', ...tapNode(target, projectsTab) });
     await new Promise((r) => setTimeout(r, 500));
   }
-  layout = await waitForLayout(project, target, 'launch-catalog', (candidate) => {
+  layout = await waitForLayout(project, target, evidenceName('launch-catalog'), (candidate) => {
     const inputReady = collect(candidate, (node) => node.attributes?.type === 'TextInput').length > 0;
     const refreshReady = collect(candidate, (node) => node.attributes?.type === 'Button' && nodeText(node) === '刷新').length > 0;
     return inputReady && refreshReady;
   });
   let serverInput = collect(layout, (node) => node.attributes?.type === 'TextInput')[0];
   if (!serverInput) throw new Error('Harmony Go catalog server input is unavailable');
-  if (nodeText(serverInput) !== harmonyGoLocalOrigin) {
-    actions.push({ action: 'set-catalog-origin', ...replaceTextInput(target, serverInput, harmonyGoLocalOrigin) });
+  if (nodeText(serverInput) !== expectedOrigin) {
+    actions.push({ action: 'set-catalog-origin', ...replaceTextInput(target, serverInput, expectedOrigin) });
     await new Promise((r) => setTimeout(r, 500));
-    layout = dumpLayout(project, target, 'launch-catalog');
+    layout = dumpLayout(project, target, evidenceName('launch-catalog'));
     serverInput = collect(layout, (node) => node.attributes?.type === 'TextInput')[0];
-    if (!serverInput || nodeText(serverInput) !== harmonyGoLocalOrigin) {
-      throw new Error(`could not set Harmony Go catalog origin to ${harmonyGoLocalOrigin}`);
+    if (!serverInput || nodeText(serverInput) !== expectedOrigin) {
+      throw new Error(`could not set Harmony Go catalog origin to ${expectedOrigin}`);
     }
   }
   const refresh = collect(layout, (node) => node.attributes?.type === 'Button' && nodeText(node) === '刷新')[0];
   if (!refresh) throw new Error(`Harmony Go catalog refresh is unavailable; status=${catalogStatus(layout)}`);
   actions.push({ action: 'refresh-catalog', ...tapNode(target, refresh) });
-  layout = await waitForLayout(project, target, 'launch-catalog', (candidate) => {
+  layout = await waitForLayout(project, target, evidenceName('launch-catalog'), (candidate) => {
     const online = collect(candidate, (node) => nodeText(node).startsWith('开发服务已连接')).length > 0;
-    const currentApp = collect(candidate, (node) => nodeText(node) === manifestId).length > 0;
     const origin = collect(candidate, (node) => node.attributes?.type === 'TextInput')[0];
-    return online && currentApp && nodeText(origin) === harmonyGoLocalOrigin;
+    return online && nodeText(origin) === expectedOrigin;
   });
-  if (!layout || !collect(layout, (node) => nodeText(node).startsWith('开发服务已连接')).length || !collect(layout, (node) => nodeText(node) === manifestId).length) {
+  const catalogConnected = Boolean(
+    layout && collect(layout, (node) => nodeText(node).startsWith('开发服务已连接')).length,
+  );
+  if (!catalogHasProject(layout, manifestId)) {
+    layout = await revealCatalogProject(project, target, manifestId, layout, actions, evidenceName);
+  }
+  if (!catalogConnected || !layout || !catalogHasProject(layout, manifestId)) {
     const origin = collect(layout || {}, (node) => node.attributes?.type === 'TextInput')[0];
-    throw new Error(`Harmony Go catalog did not expose mini app ${manifestId} from ${harmonyGoLocalOrigin}; origin=${nodeText(origin) || 'unavailable'}; status=${catalogStatus(layout || {})}`);
+    throw new Error(`Harmony Go catalog did not expose mini app ${manifestId} from ${expectedOrigin}; origin=${nodeText(origin) || 'unavailable'}; status=${catalogStatus(layout || {})}`);
   }
   return layout;
 }
-async function installAndOpen(project, target, manifestId) {
+async function waitForInstalledMiniApp(project, target, manifestId, productMarkers, layout, actions, evidenceName, timeoutMs = 180_000) {
+  const deadline = Date.now() + timeoutMs;
+  let current = layout;
+  let identity = inspectCurrentMiniApp(current, manifestId, productMarkers);
+  while (Date.now() < deadline) {
+    if (identity.ok) return { layout: current, open: null };
+    if (!catalogHasProject(current, manifestId)) {
+      current = await revealCatalogProject(project, target, manifestId, current, actions, evidenceName);
+      identity = inspectCurrentMiniApp(current, manifestId, productMarkers);
+      if (identity.ok) return { layout: current, open: null };
+    }
+    const open = relatedButton(current, manifestId, ['打开']);
+    if (open) return { layout: current, open };
+    await new Promise((resolveWait) => setTimeout(resolveWait, 750));
+    current = dumpLayout(project, target, evidenceName('launch-installed'));
+    identity = inspectCurrentMiniApp(current, manifestId, productMarkers);
+  }
+  const card = catalogProjectCard(current, manifestId);
+  const cardActions = card
+    ? collect(card, (node) => node.attributes?.type === 'Button').map(nodeText).filter(Boolean)
+    : [];
+  throw new Error(`timed out waiting for mini app ${manifestId} to install; target card action(s)=${cardActions.join(', ') || 'unavailable'}; current identity=${identity.errors.join('; ')}`);
+}
+export async function installAndOpen(project, target, manifestId, previewKind = '', devicePort = 3333, options = {}) {
   const source = [join(project, 'App.tsx'), ...readdirSync(join(project, 'src'), { recursive: true }).filter((entry) => /\.[jt]sx?$/.test(String(entry))).map((entry) => join(project, 'src', String(entry)))].filter((path) => existsSync(path)).map((path) => readFileSync(path, 'utf8')).join('\n');
   const testIds = [...source.matchAll(/testID=["']([^"']+)["']/g)].map((match) => match[1]);
   const sharedTemplateIds = new Set(['app-shell', 'responsive-navigation', 'primary-action', 'item-count']);
   const productMarkers = testIds.filter((id) => !sharedTemplateIds.has(id) && !/^tab-(?:home|activity|settings)$/.test(id));
   if (!productMarkers.length) throw new Error(`current source has no run-specific literal testID for exact-app identity: ${manifestId}`);
+  const evidenceName = (name) => previewKind ? `${name}-${previewKind}` : name;
   const actions = [];
-  let layout = await prepareCatalog(project, target, manifestId, actions);
+  const expectedOrigin = devicePort === 3333 ? harmonyGoLocalOrigin : `http://127.0.0.1:${devicePort}`;
+  let layout = await prepareCatalog(project, target, manifestId, actions, evidenceName, expectedOrigin);
   const remove = relatedButton(layout, manifestId, ['移除']);
-  if (remove) {
+  if (remove && options.replaceInstalled !== false) {
     actions.push({ action: 'remove-stale-bundle', ...tapNode(target, remove) });
     await new Promise((r) => setTimeout(r, 2000));
-    layout = dumpLayout(project, target, 'launch-catalog');
+    layout = dumpLayout(project, target, evidenceName('launch-catalog'));
   }
   let install = relatedButton(layout, manifestId, ['安装']);
-  if (install) { actions.push({ action: 'install', ...tapNode(target, install) }); await new Promise((r) => setTimeout(r, 3000)); layout = dumpLayout(project, target, 'launch-installed'); }
-  const alreadyProduct = inspectCurrentMiniApp(layout, manifestId, productMarkers).ok;
-  if (!alreadyProduct) {
-    const identityButton = collect(layout, (node) => node.attributes?.type === 'Button' && nodeText(node) === manifestId)[0];
-    const open = identityButton || relatedButton(layout, manifestId, ['打开']);
-    if (!open) throw new Error(`could not locate installed mini app ${manifestId}`);
-    actions.push({ action: 'open', ...tapNode(target, open) }); await new Promise((r) => setTimeout(r, 3000));
+  if (!install) {
+    const refresh = collect(layout, (node) => node.attributes?.type === 'Button' && nodeText(node) === '刷新')[0];
+    if (refresh) { tapNode(target, refresh); await new Promise((r) => setTimeout(r, 1500)); layout = dumpLayout(project, target, evidenceName('launch-catalog')); install = relatedButton(layout, manifestId, ['安装']); }
   }
-  const product = dumpLayout(project, target, 'launch-product');
-  const shotDevice = `/data/local/tmp/expo-fast-${process.pid}-launch.jpeg`; const shotLocal = join(project, '.expo-fast/launch-screenshot.jpeg'); hdcRun(['-t', target, 'shell', 'uitest', 'screenCap', '-p', shotDevice]); hdcRun(['-t', target, 'file', 'recv', shotDevice, shotLocal]);
-  const identity = assertCurrentMiniApp(product, manifestId, productMarkers, 'launch-product');
-  return { result: 'PASS', target, bundleName: 'host.exp.exponent.harmony', manifestId, currentProjectTitle: identity.currentProjectTitle, currentProjectBounds: identity.currentProjectBounds, appNode: identity.productMarker, appNodeBounds: identity.productMarkerBounds, actions };
+  if (install) actions.push({ action: 'install', ...tapNode(target, install) });
+  const installed = await waitForInstalledMiniApp(project, target, manifestId, productMarkers, layout, actions, evidenceName);
+  layout = installed.layout;
+  if (installed.open) {
+    actions.push({ action: 'open', ...tapNode(target, installed.open) });
+    layout = await waitForLayout(
+      project,
+      target,
+      evidenceName('launch-product'),
+      (candidate) => inspectCurrentMiniApp(candidate, manifestId, productMarkers).ok,
+      180_000,
+    );
+  }
+  const identity = assertCurrentMiniApp(layout, manifestId, productMarkers, 'launch-product');
+  const shotDevice = `/data/local/tmp/expo-fast-${process.pid}-launch-${previewKind || 'default'}.jpeg`; const shotLocal = join(project, `.expo-fast/launch-screenshot${previewKind ? `-${previewKind}` : ''}.jpeg`); hdcRun(['-t', target, 'shell', 'uitest', 'screenCap', '-p', shotDevice]); hdcRun(['-t', target, 'file', 'recv', shotDevice, shotLocal]);
+  return { result: 'PASS', target, previewKind, screenshot: shotLocal, bundleName: 'host.exp.exponent.harmony', manifestId, currentProjectTitle: identity.currentProjectTitle, currentProjectBounds: identity.currentProjectBounds, appNode: identity.productMarker, appNodeBounds: identity.productMarkerBounds, actions };
 }
 function promptSmoke(project) { const manifest = JSON.parse(readFileSync(join(project, '.expo-fast/manifest.json'), 'utf8')); return `The current run's exact Harmony Go mini app identity is id=${manifest.id}, name=${manifest.name}. The app has exported and the Harmony Go shell is foreground. Use HDC only. First inspect layout and locate the catalog card whose visible id/name equals that exact identity; install it if needed and open that exact card. Do not open any other cached mini app. Dump layout again and require root bundleName=host.exp.exponent.harmony, the Host header current-project title exactly equal to this mini-app id, and a run-specific literal testID from current source inside product content before treating the product as open. A project-list button containing the id is not identity proof.
 
@@ -406,29 +696,8 @@ async function main() {
     metrics.generationMs = Date.now() - invocationStartedAt.getTime();
     metrics.totalMs = metrics.generationMs;
   }
-  if (o.launch !== 'false') {
-    setRunState(activeRunState.state, 'launching');
-    progress('launch Harmony Go and verify exact app identity');
-    const port = Number(o.port || 3340); const live = await launch(project, catalogRoot, port);
-    try {
-      await new Promise((r) => setTimeout(r, 5000));
-      const manifest = JSON.parse(readFileSync(join(project, '.expo-fast/manifest.json'), 'utf8'));
-      metrics.launch = { ...(await installAndOpen(project, live.target, manifest.id)), port };
-      progress(`Harmony Go launch passed · manifest=${manifest.id}`);
-      // Model-driven UI QA is deliberately opt-in: experiments showed that a
-      // second Claude turn can cost longer than the whole implementation. The
-      // default path launches deterministically and leaves optional core-flow
-      // evidence to HDC or an explicit smoke-agent run.
-      if (o.smokeAgent === 'true') {
-        const smokeTurn = await claudeTurn(project, mode, join(project, `.expo-fast/smoke-agent-trace${resume ? '-resume' : ''}.jsonl`), promptSmoke(project), randomUUID());
-        metrics.stages.smokeClaudeMs = smokeTurn.ms;
-        metrics.smoke = validateSmoke(project);
-      }
-    } finally { live.server.close(); clearReverse(live.target); }
-  }
-  if (o.validateSmoke === 'true') metrics.smoke = validateSmoke(project);
   let hap = readExistingHapResult(project);
-  if (o.hap !== 'false' && hap?.status !== 'ready') {
+  if (o.hap === 'true' && hap?.status !== 'ready') {
     const pool = resolve(o.pool || process.env.EXPO_HARMONY_POOL_ROOT || join(root, '../harmony-pool'));
     const waitSeconds = Number(o.hapWaitSeconds || process.env.EXPO_HARMONY_HAP_WAIT_SECONDS || 3600);
     setRunState(activeRunState.state, 'hap_building', { hap: { status: 'building', pool, startedAt: new Date().toISOString() } });
@@ -439,27 +708,165 @@ async function main() {
     progress(hap.status === 'ready'
       ? `unsigned HAP ready · slot=${hap.slotId || 'unknown'} · ${hap.hapPath}`
       : `unsigned HAP failed · ${hap.failureStage || 'unknown'} · ${hap.error || 'see build-result.json'}`);
-  } else if (o.hap === 'false') {
+  } else if (o.hap !== 'true') {
     hap = { status: 'skipped' };
   }
   metrics.hap = hap;
+  const gatewayOrigin = String(o.gatewayOrigin || process.env.EXPO_FAST_PREVIEW_GATEWAY_ORIGIN || 'http://127.0.0.1:3456').replace(/\/$/, '');
+  let previewFailure = null;
+  let launchPreviewState = {};
+  if (o.launch !== 'false') {
+    const manifest = JSON.parse(readFileSync(join(project, '.expo-fast/manifest.json'), 'utf8'));
+    const splitTargets = (value) => String(value || '').split(/[\s,]+/).map((target) => target.trim()).filter(Boolean);
+    const configuredPools = configuredPreviewPools();
+    const desktopPreferences = splitTargets(o.desktopTargets).length
+      ? splitTargets(o.desktopTargets)
+      : configuredPools.desktop;
+    const previewPools = { desktop: desktopPreferences };
+    try {
+      metrics.previewGateway = await publishToPreviewGateway(project, catalogRoot, gatewayOrigin);
+      launchPreviewState = {
+        desktop: { status: 'queued', target: '' },
+      };
+      writeJson(join(project, '.expo-fast/launch-previews.json'), {
+        manifestId: manifest.id,
+        status: 'queued',
+        pools: previewPools,
+        previews: launchPreviewState,
+      });
+      setRunState(activeRunState.state, 'preview_queued', {
+        hap,
+        preview: { status: 'queued', pools: previewPools },
+      });
+      progress(`wait for desktop preview device · preferred=[${previewPools.desktop.join(',')}]`);
+      const live = await launch(project, previewPools, gatewayOrigin, ({ queuedAt }) => {
+        setRunState(activeRunState.state, 'preview_queued', {
+          preview: { status: 'queued', pools: previewPools, queuedAt },
+        });
+      });
+      try {
+        setRunState(activeRunState.state, 'launching', {
+          preview: { status: 'running', leaseId: live.lease.leaseId, targets: live.previews, devicePorts: live.devicePorts },
+        });
+        launchPreviewState = Object.fromEntries(
+          Object.entries(live.previews).map(([kind, target]) => [kind, { status: 'running', target }]),
+        );
+        writeJson(join(project, '.expo-fast/launch-previews.json'), {
+          manifestId: manifest.id,
+          status: 'running',
+          leaseId: live.lease.leaseId,
+          pools: previewPools,
+          devicePorts: live.devicePorts,
+          previews: launchPreviewState,
+        });
+        progress(`desktop preview lease acquired · target=${live.previews.desktop}`);
+        await new Promise((r) => setTimeout(r, 5000));
+        const previewResults = { ...launchPreviewState };
+        const previewEntries = Object.entries(live.previews).sort(([, left], [, right]) => Number(right === live.target) - Number(left === live.target));
+        let primaryResult = null;
+        for (const [previewKind, target] of previewEntries) {
+          try {
+            const result = await installAndOpen(project, target, manifest.id, previewKind, live.devicePorts[target]);
+            previewResults[previewKind] = { status: 'complete', ...result };
+            if (target === live.target) {
+              primaryResult = result;
+              writeFileSync(join(project, '.expo-fast/launch-screenshot.jpeg'), readFileSync(result.screenshot));
+            }
+            progress(`Harmony Go ${previewKind} preview passed · target=${target}`);
+          } catch (error) {
+            previewResults[previewKind] = { status: 'failed', target, error: String(error.stack || error) };
+            console.warn(`[expo-fast] ${previewKind} preview failed on ${target}; build artifacts remain valid\n${error.stack || error}`);
+          }
+          writeJson(join(project, '.expo-fast/launch-previews.json'), {
+            manifestId: manifest.id,
+            status: Object.values(previewResults).some((entry) => entry.status === 'failed') ? 'partial' : 'running',
+            leaseId: live.lease.leaseId,
+            pools: previewPools,
+            devicePorts: live.devicePorts,
+            previews: previewResults,
+          });
+          launchPreviewState = { ...previewResults };
+        }
+        if (!primaryResult) {
+          const desktopFailure = previewResults.desktop?.error;
+          throw new Error(
+            desktopFailure
+              ? `primary desktop preview failed on ${live.target}: ${desktopFailure}`
+              : `primary desktop preview failed on ${live.target}`,
+          );
+        }
+        const failedKinds = Object.entries(previewResults).filter(([, result]) => result.status === 'failed').map(([kind]) => kind);
+        metrics.launch = { ...primaryResult, gatewayOrigin, previews: previewResults };
+        metrics.preview = { status: failedKinds.length ? 'partial' : 'complete', failedKinds, targets: live.previews, devicePorts: live.devicePorts };
+        writeJson(join(project, '.expo-fast/launch-previews.json'), {
+          manifestId: manifest.id,
+          status: metrics.preview.status,
+          pools: previewPools,
+          devicePorts: live.devicePorts,
+          previews: previewResults,
+        });
+        launchPreviewState = { ...previewResults };
+        progress(`Harmony Go preview finished · manifest=${manifest.id} · status=${metrics.preview.status}`);
+        if (o.smokeAgent === 'true') {
+          const smokeTurn = await claudeTurn(project, mode, join(project, `.expo-fast/smoke-agent-trace${resume ? '-resume' : ''}.jsonl`), promptSmoke(project), randomUUID());
+          metrics.stages.smokeClaudeMs = smokeTurn.ms;
+          metrics.smoke = validateSmoke(project);
+        }
+      } finally {
+        await live.lease.release();
+      }
+    } catch (error) {
+      previewFailure = String(error.stack || error);
+      metrics.preview = { status: 'failed', error: previewFailure };
+      const currentDesktop = launchPreviewState.desktop || { target: '' };
+      launchPreviewState = {
+        desktop: currentDesktop.status === 'complete'
+          ? currentDesktop
+          : { ...currentDesktop, status: 'failed', error: previewFailure },
+      };
+      writeJson(join(project, '.expo-fast/launch-previews.json'), {
+        manifestId: manifest.id,
+        status: 'failed',
+        pools: previewPools,
+        previews: launchPreviewState,
+        error: previewFailure,
+      });
+      setRunState(activeRunState.state, 'preview_failed', {
+        hap,
+        preview: { status: 'failed', error: previewFailure.slice(0, 4000) },
+      });
+      console.warn(`[expo-fast] preview failed; generated bundle and HAP result remain valid\n${previewFailure}`);
+    }
+  } else {
+    metrics.preview = { status: 'skipped' };
+  }
+  if (o.validateSmoke === 'true' && metrics.preview?.status === 'complete') metrics.smoke = validateSmoke(project);
   const completedAt = new Date().toISOString();
   if (resume) (metrics.resumes ||= []).push({ startedAt: invocationStartedAt.toISOString(), completedAt, ms: Date.now() - invocationStartedAt.getTime(), purpose: o.launch === 'false' ? 'reverify' : 'core-smoke' });
   metrics.completedAt = completedAt;
   metrics.totalMs = Date.now() - invocationStartedAt.getTime();
-  metrics.status = hap?.status === 'failed' ? 'partial' : 'passed';
+  metrics.status = hap?.status === 'failed' || previewFailure || metrics.preview?.status === 'partial' ? 'partial' : 'passed';
   writeJson(join(project, '.expo-fast/result.json'), metrics);
   setRunState('completed', 'done', {
-    result: hap?.status === 'failed' ? 'bundle-passed-hap-failed' : 'passed',
+    result: previewFailure
+      ? 'bundle-passed-preview-failed'
+      : hap?.status === 'failed'
+        ? 'bundle-passed-hap-failed'
+        : metrics.preview?.status === 'partial'
+          ? 'bundle-passed-preview-partial'
+          : 'passed',
     hap,
+    preview: metrics.preview,
   });
   console.log(JSON.stringify(metrics, null, 2));
-  progress(hap?.status === 'failed'
-    ? 'end-to-end live test completed · bundle passed · unsigned HAP failed'
+  progress(metrics.status === 'partial'
+    ? 'build completed with package or preview warnings'
     : 'end-to-end live test passed');
 }
-main().catch((e) => {
-  try { setRunState('failed', 'error', {}, { error: e.stack || e }); }
-  catch (stateError) { console.error(`could not write .expo-fast/state.json: ${stateError.stack || stateError}`); }
-  console.error(e.stack || e); process.exitCode = 1;
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((e) => {
+    try { setRunState('failed', 'error', {}, { error: e.stack || e }); }
+    catch (stateError) { console.error(`could not write .expo-fast/state.json: ${stateError.stack || stateError}`); }
+    console.error(e.stack || e); process.exitCode = 1;
+  });
+}

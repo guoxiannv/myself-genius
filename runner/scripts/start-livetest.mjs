@@ -1,17 +1,19 @@
 #!/usr/bin/env node
 
-import { createServer } from 'node:net';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline/promises';
+import { configuredHdcTarget, parseHdcTargets } from './hdc-target.mjs';
+import { configuredPreviewPools } from './preview-device-pool.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const resolveRunnerPath = (value) => isAbsolute(value) ? resolve(value) : resolve(root, value);
 const localEnvFile = resolveRunnerPath(process.env.EXPO_FAST_ENV_FILE || '.env');
 if (existsSync(localEnvFile)) process.loadEnvFile(localEnvFile);
 const runner = join(root, 'scripts/run-livetest.mjs');
+const dependencyController = join(root, 'scripts/dependencies.mjs');
 const defaultPrompt = join(root, 'prompts/learning-goals.md');
 const candidateConfig = JSON.parse(readFileSync(join(root, 'config/candidates.json'), 'utf8')).candidates;
 const defaults = {
@@ -49,7 +51,7 @@ Machine configuration:
   cp .env.example .env   Configure paths once in the repository-local .env.
   .env                   EXPO_FAST_APP_ROOT, EXPO_FAST_NODE,
                          EXPO_HARMONY_SDK_ROOT, EXPO_FAST_MODULE_CACHE,
-                         DEVECO_PATH, and CLAUDE_BIN.
+                         DEVECO_PATH, EXPO_FAST_HDC_TARGET, and CLAUDE_BIN.
   command options         Override per-run values such as output, prompt, and model.
 
 Run:
@@ -65,10 +67,18 @@ Run:
   --repair-effort LEVEL  Override repair effort.
   --timeout MINUTES      Main generation deadline; 0 disables it (default).
   --repair-timeout MIN   Per-repair deadline; 0 disables it (default).
-  --port PORT            Host catalog port; finds a free port from 3355 by default.
+  --port PORT            Legacy diagnostic field; preview uses the shared Gateway.
+  --target TARGET        Harmony target; also reads EXPO_FAST_HDC_TARGET,
+                         HDC_TARGET, then HP_HDC_TARGET.
+  --desktop-target ID    Desktop preview target; also reads HP_HDC_DESKTOP_TARGET.
+  --phone-target ID      Phone preview target; also reads HP_HDC_PHONE_TARGET.
+  --desktop-targets LIST Comma-separated desktop preview device pool.
+  --phone-targets LIST   Comma-separated phone preview device pool.
+  --gateway-origin URL   Shared loopback Preview Gateway origin.
+  --resume               Reverify and rerun package/preview for an existing project.
   --launch BOOL          Launch Harmony Go; true by default.
-  --hap BOOL             Build an unsigned HAP last; true by default.
-  --no-hap               Skip the final unsigned HAP build.
+  --hap BOOL             Build a per-run unsigned HAP; false in shell-preview mode.
+  --no-hap               Keep the default shell-preview behavior.
   --pool PATH            SDK fixed-slot pool; defaults to ../harmony-pool.
   --hap-wait-seconds N   FIFO slot wait timeout; defaults to 3600.
   --foreground           Run in this terminal instead of tmux.
@@ -94,7 +104,7 @@ function take(argv, index, flag) {
 }
 
 function parse(argv) {
-  const out = { positional: [], launch: true, hap: true };
+  const out = { positional: [], launch: true, hap: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '-h' || arg === '--help') out.help = true;
@@ -103,6 +113,7 @@ function parse(argv) {
     else if (arg === '--attach') out.attach = true;
     else if (arg === '--smoke-agent') out.smokeAgent = true;
     else if (arg === '--dry-run') out.dryRun = true;
+    else if (arg === '--resume') out.resume = true;
     else if (arg === '--no-launch') out.launch = false;
     else if (arg === '--no-hap') out.hap = false;
     else if (arg === '--prompt') out.prompt = take(argv, i++, arg);
@@ -119,6 +130,12 @@ function parse(argv) {
     else if (arg === '--port') out.port = Number(take(argv, i++, arg));
     else if (arg === '--pool') out.pool = take(argv, i++, arg);
     else if (arg === '--hap-wait-seconds') out.hapWaitSeconds = Number(take(argv, i++, arg));
+    else if (arg === '--target' || arg === '--hdc-target') out.target = take(argv, i++, arg);
+    else if (arg === '--desktop-target') out.desktopTarget = take(argv, i++, arg);
+    else if (arg === '--phone-target') out.phoneTarget = take(argv, i++, arg);
+    else if (arg === '--desktop-targets') out.desktopTargets = take(argv, i++, arg);
+    else if (arg === '--phone-targets') out.phoneTargets = take(argv, i++, arg);
+    else if (arg === '--gateway-origin') out.gatewayOrigin = take(argv, i++, arg);
     else if (arg === '--timeout') out.timeout = Number(take(argv, i++, arg));
     else if (arg === '--repair-timeout') out.repairTimeout = Number(take(argv, i++, arg));
     else if (arg === '--launch') out.launch = parseBoolean(take(argv, i++, arg), arg);
@@ -217,22 +234,6 @@ function commandOrPath(value) {
   return value.includes('/') ? resolveRunnerPath(value) : value;
 }
 
-function portAvailable(port) {
-  return new Promise((ok) => {
-    const server = createServer();
-    server.unref();
-    server.once('error', () => ok(false));
-    server.listen(port, '127.0.0.1', () => server.close(() => ok(true)));
-  });
-}
-
-async function freePort(preferred) {
-  for (let port = preferred; port < preferred + 100; port += 1) {
-    if (await portAvailable(port)) return port;
-  }
-  throw new Error(`no free host port found from ${preferred} to ${preferred + 99}`);
-}
-
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
@@ -264,6 +265,13 @@ function runnerArguments(plan) {
     '--hapWaitSeconds', String(plan.hapWaitSeconds),
     '--port', String(plan.port),
   ];
+  if (plan.hdcTarget) args.push('--target', plan.hdcTarget);
+  if (plan.hdcPreviewTargets.desktop) args.push('--desktopTarget', plan.hdcPreviewTargets.desktop);
+  if (plan.hdcPreviewTargets.phone) args.push('--phoneTarget', plan.hdcPreviewTargets.phone);
+  if (plan.hdcPreviewPools.desktop.length) args.push('--desktopTargets', plan.hdcPreviewPools.desktop.join(','));
+  if (plan.hdcPreviewPools.phone.length) args.push('--phoneTargets', plan.hdcPreviewPools.phone.join(','));
+  args.push('--gatewayOrigin', plan.previewGatewayOrigin);
+  if (plan.resume) args.push('--resume', 'true');
   if (plan.model !== 'automatic') args.push('--model', plan.model);
   if (plan.effort !== 'automatic') args.push('--effort', plan.effort);
   if (plan.repairModel !== 'automatic') args.push('--repairModel', plan.repairModel);
@@ -280,8 +288,10 @@ function printPlan(plan, tmuxId = '') {
   console.log(`  mode    : ${plan.candidate}`);
   console.log(`  model   : ${plan.model}/${plan.effort}`);
   console.log(`  repair  : ${plan.repairModel}/${plan.repairEffort}`);
-  console.log(`  launch  : ${plan.launch ? `Harmony Go, port ${plan.port}` : 'disabled'}`);
+  console.log(`  launch  : ${plan.launch ? `Harmony Go via ${plan.previewGatewayOrigin}` : 'disabled'}`);
   console.log(`  HAP     : ${plan.hap ? `SDK pool ${plan.pool}` : 'disabled'}`);
+  if (plan.launch) console.log(`  target  : ${plan.hdcTarget || 'allocated from preview pool'}`);
+  if (plan.launch) console.log(`  preview : desktop=[${plan.hdcPreviewPools.desktop.join(', ')}], phone=[${plan.hdcPreviewPools.phone.join(', ')}]`);
   if (!plan.foreground) {
     console.log(`  tmux    : ${plan.session}${tmuxId ? ` (${tmuxId})` : ''}`);
     console.log(`  log     : ${plan.sessionLog}`);
@@ -306,7 +316,7 @@ async function main() {
   const candidate = raw.candidate || defaults.candidate;
   const timeout = checkOptionalTimeout(raw.timeout ?? defaults.timeout, 'timeout');
   const repairTimeout = checkOptionalTimeout(raw.repairTimeout ?? defaults.repairTimeout, 'repair timeout');
-  const port = await freePort(checkNumber(raw.port ?? defaults.firstPort, 'port', 1024, 65535));
+  const port = checkNumber(raw.port ?? defaults.firstPort, 'port', 1024, 65535);
   const hapWaitSeconds = checkNumber(
     raw.hapWaitSeconds ?? Number(process.env.EXPO_HARMONY_HAP_WAIT_SECONDS || defaults.hapWaitSeconds),
     'HAP wait seconds',
@@ -326,14 +336,30 @@ async function main() {
     .filter(Boolean)
     .map(resolveRunnerPath)
     .join(delimiter);
+  const hdcTarget = raw.target || configuredHdcTarget();
+  const hdcPreviewTargets = {
+    ...(raw.desktopTarget ? { desktop: raw.desktopTarget } : {}),
+    ...(raw.phoneTarget ? { phone: raw.phoneTarget } : {}),
+  };
+  const configuredPools = configuredPreviewPools();
+  const splitTargets = (value) => String(value || '').split(/[\s,]+/).map((target) => target.trim()).filter(Boolean);
+  const hdcPreviewPools = {
+    desktop: raw.desktopTargets ? splitTargets(raw.desktopTargets) : configuredPools.desktop,
+    phone: raw.phoneTargets ? splitTargets(raw.phoneTargets) : configuredPools.phone,
+  };
+  // Device classes are discovered by the runner from connected HDC targets.
+  const previewGatewayOrigin = String(raw.gatewayOrigin || process.env.EXPO_FAST_PREVIEW_GATEWAY_ORIGIN || 'http://127.0.0.1:3456').replace(/\/$/, '');
+  if (!hdcPreviewPools.desktop.length && hdcPreviewTargets.desktop) hdcPreviewPools.desktop = [hdcPreviewTargets.desktop];
+  if (!hdcPreviewPools.phone.length && hdcPreviewTargets.phone) hdcPreviewPools.phone = [hdcPreviewTargets.phone];
   const sessionLog = join(root, '.expo-fast/session-logs', `${slug(session)}.log`);
   const plan = {
     root, configFile: existsSync(localEnvFile) ? localEnvFile : '', project, requestPath, promptKind: prompt.kind, promptSource: prompt.path || '',
     session, sessionLog, candidate, ...models, timeout, repairTimeout, port, hapWaitSeconds, pool,
     launch: raw.launch,
     hap: raw.hap && enabledByEnvironment(process.env.EXPO_HARMONY_HAP_ENABLED),
+    resume: Boolean(raw.resume),
     foreground: Boolean(raw.foreground), attach: Boolean(raw.attach),
-    smokeAgent: Boolean(raw.smokeAgent), node, sdk, deveco, claude, moduleCache,
+    smokeAgent: Boolean(raw.smokeAgent), node, sdk, deveco, claude, moduleCache, hdcTarget, hdcPreviewTargets, hdcPreviewPools, previewGatewayOrigin,
   };
 
   if (raw.dryRun) {
@@ -341,8 +367,18 @@ async function main() {
     return;
   }
 
-  if (existsSync(project) && readdirSync(project).length > 0) throw new Error(`target must be new and empty: ${project}`);
+  if (!raw.resume && existsSync(project) && readdirSync(project).length > 0) throw new Error(`target must be new and empty: ${project}`);
+  if (raw.resume && (!existsSync(project) || readdirSync(project).length === 0)) throw new Error(`resume target must be an existing generated project: ${project}`);
   if (!existsSync(node)) throw new Error(`Node runtime does not exist: ${node}`);
+  const runtimeEnv = {
+    ...process.env,
+    PATH: `${dirname(node)}:${process.env.PATH || '/usr/local/bin:/usr/bin:/bin'}`,
+  };
+  const runtimeCheck = spawnSync(node, [dependencyController, 'check'], { encoding: 'utf8', env: runtimeEnv });
+  if (runtimeCheck.status !== 0) {
+    const detail = `${runtimeCheck.stdout || ''}${runtimeCheck.stderr || ''}`.trim();
+    throw new Error(`Configured Node/npm runtime failed its preflight check: ${node}\n${detail}`);
+  }
   if (!existsSync(sdk)) throw new Error(`Expo Harmony SDK does not exist: ${sdk}`);
   if (!existsSync(deveco)) throw new Error(`DevEco Studio does not exist: ${deveco}`);
   if (!executable(claude)) throw new Error(`Claude CLI is not executable: ${claude}`);
@@ -352,9 +388,10 @@ async function main() {
   const hdc = join(deveco, 'Contents/sdk/default/openharmony/toolchains/hdc');
   if (raw.launch) {
     if (!existsSync(hdc)) throw new Error(`hdc does not exist: ${hdc}`);
-    const targets = spawnSync(hdc, ['list', 'targets'], { encoding: 'utf8' }).stdout?.trim().split(/\s+/).filter(Boolean) || [];
-    if (!targets.length) throw new Error('no Harmony target; start the DevEco emulator first');
-    if (targets.length > 1) console.warn(`Warning: runner will use the first Harmony target: ${targets[0]} (${targets.length} targets connected)`);
+    const listed = spawnSync(hdc, ['list', 'targets'], { encoding: 'utf8' });
+    if (listed.status !== 0) throw new Error(`unable to list Harmony targets: ${listed.stderr || listed.stdout || `hdc exited ${listed.status}`}`);
+    const connectedTargets = parseHdcTargets(listed.stdout);
+    if (!connectedTargets.length) throw new Error('no Harmony target; start the DevEco emulator first');
   }
 
   mkdirSync(dirname(project), { recursive: true });
@@ -374,6 +411,12 @@ async function main() {
     DEVECO_PATH: deveco,
     CLAUDE_BIN: claude,
     EXPO_FAST_LIVE_CLAUDE: process.env.EXPO_FAST_LIVE_CLAUDE || '1',
+    EXPO_FAST_HDC_TARGET: plan.hdcTarget,
+    EXPO_FAST_HDC_DESKTOP_TARGET: plan.hdcPreviewTargets.desktop || '',
+    EXPO_FAST_HDC_PHONE_TARGET: plan.hdcPreviewTargets.phone || '',
+    EXPO_FAST_HDC_DESKTOP_TARGETS: plan.hdcPreviewPools.desktop.join(','),
+    EXPO_FAST_HDC_PHONE_TARGETS: plan.hdcPreviewPools.phone.join(','),
+    EXPO_FAST_PREVIEW_GATEWAY_ORIGIN: plan.previewGatewayOrigin,
   };
 
   if (raw.foreground) {
@@ -384,7 +427,7 @@ async function main() {
     return;
   }
 
-  const exports = [
+  const exportPairs = [
     ['PATH', env.PATH],
     ['EXPO_FAST_NODE', node],
     ['EXPO_HARMONY_SDK_ROOT', sdk],
@@ -393,7 +436,17 @@ async function main() {
     ['DEVECO_PATH', deveco],
     ['CLAUDE_BIN', claude],
     ['EXPO_FAST_LIVE_CLAUDE', env.EXPO_FAST_LIVE_CLAUDE],
-  ].map(([key, value]) => `export ${key}=${shellQuote(value)}`).join('; ');
+    ['EXPO_FAST_HDC_TARGET', env.EXPO_FAST_HDC_TARGET],
+    ['EXPO_FAST_HDC_DESKTOP_TARGET', env.EXPO_FAST_HDC_DESKTOP_TARGET],
+    ['EXPO_FAST_HDC_PHONE_TARGET', env.EXPO_FAST_HDC_PHONE_TARGET],
+    ['EXPO_FAST_HDC_DESKTOP_TARGETS', env.EXPO_FAST_HDC_DESKTOP_TARGETS],
+    ['EXPO_FAST_HDC_PHONE_TARGETS', env.EXPO_FAST_HDC_PHONE_TARGETS],
+    ['EXPO_FAST_PREVIEW_GATEWAY_ORIGIN', env.EXPO_FAST_PREVIEW_GATEWAY_ORIGIN],
+  ];
+  if (process.env.EXPO_FAST_BUNDLE_IDENTIFIER) {
+    exportPairs.push(['EXPO_FAST_BUNDLE_IDENTIFIER', process.env.EXPO_FAST_BUNDLE_IDENTIFIER]);
+  }
+  const exports = exportPairs.map(([key, value]) => `export ${key}=${shellQuote(value)}`).join('; ');
   mkdirSync(dirname(sessionLog), { recursive: true });
   const projectLog = join(project, '.expo-fast/session.log');
   const runnerCommand = [node, ...args].map(shellQuote).join(' ');

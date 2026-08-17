@@ -13,8 +13,11 @@ function bounds(node) {
   const match = String(node?.attributes?.bounds || '').match(/\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]/);
   return match ? { left: Number(match[1]), top: Number(match[2]), right: Number(match[3]), bottom: Number(match[4]) } : null;
 }
+export function visibleBundleNames(layout) {
+  return [...new Set(collect(layout, (node) => Boolean(node.attributes?.bundleName)).map((node) => node.attributes.bundleName))];
+}
 function hasHarmonyGoBundle(layout) {
-  return collect(layout, (node) => node.attributes?.bundleName === 'host.exp.exponent.harmony').length > 0;
+  return visibleBundleNames(layout).includes('host.exp.exponent.harmony');
 }
 function currentProjectTitle(layout, manifestId) {
   const candidates = collect(layout, (node) => {
@@ -27,7 +30,9 @@ function currentProjectTitle(layout, manifestId) {
   if (projectsBounds) {
     return candidates.filter((node) => bounds(node).bottom <= projectsBounds.top).sort((a, b) => bounds(a).top - bounds(b).top)[0] || null;
   }
-  return candidates.find((node) => bounds(node).top < 201 && bounds(node).bottom <= 201) || null;
+  const nodes = collect(layout, () => true);
+  const navigationIndex = nodes.indexOf(projectsTab);
+  return candidates.find((node) => navigationIndex === -1 || nodes.indexOf(node) < navigationIndex) || null;
 }
 function productMarker(layout, markerIds) {
   const wanted = new Set(markerIds.filter(Boolean));

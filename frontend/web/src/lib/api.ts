@@ -5,7 +5,9 @@ import type {
   FollowUpActionResponse,
   HealthPayload,
   LivePreviewInput,
+  PreviewKind,
   RunListResponse,
+  RunPreviewSession,
   RunProgress,
   ExpoServeState,
 } from "./types"
@@ -97,6 +99,28 @@ export const api = {
       body: "{}",
     }),
 
+  startPreview: (runId: string, kind: PreviewKind) =>
+    request<{
+      ok: boolean
+      accepted: boolean
+      run_id: string
+      status: string
+      preview?: RunPreviewSession
+    }>(`/api/runs/${runId}/previews/${kind}/start`, {
+      method: "POST",
+      body: "{}",
+    }),
+
+  heartbeatPreview: (runId: string, kind: PreviewKind, visible: boolean, keepalive = false) =>
+    request<{ ok: boolean; run_id: string; kind: PreviewKind; visible: boolean }>(
+      `/api/runs/${runId}/previews/${kind}/heartbeat`,
+      {
+        method: "POST",
+        body: JSON.stringify({ visible }),
+        keepalive,
+      },
+    ),
+
   /** 将调整加入 ArkPilot 持久化 FIFO；重复请求复用 clientMessageId。 */
   enqueueFollowUp: (runId: string, text: string, clientMessageId: string) =>
     request<FollowUpActionResponse>(`/api/runs/${runId}/follow-up/messages`, {
@@ -124,7 +148,7 @@ export const api = {
       method: "DELETE",
     }),
 
-  sendLiveInput: (runId: string, body: LivePreviewInput) =>
+  sendLiveInput: (runId: string, preview: string, body: LivePreviewInput) =>
     request<{
       ok: boolean
       frame_seq: number
@@ -132,7 +156,7 @@ export const api = {
       refresh_queued: boolean
       timings: Record<string, number>
     }>(
-      `/api/runs/${runId}/live/input`,
+      `/api/runs/${runId}/live/input${preview ? `?preview=${encodeURIComponent(preview)}` : ""}`,
       {
         method: "POST",
         body: JSON.stringify(body),
@@ -140,14 +164,14 @@ export const api = {
       },
     ),
 
-  getLiveWebRTCConfig: (runId: string) =>
+  getLiveWebRTCConfig: (runId: string, preview = "") =>
     request<{
       available: boolean
       ice_servers: RTCIceServer[]
       connect_timeout_ms: number
       transport: string
       offer_path: string
-    }>(`/api/runs/${runId}/live/webrtc/config`),
+    }>(`/api/runs/${runId}/live/webrtc/config${preview ? `?preview=${encodeURIComponent(preview)}` : ""}`),
 
   createLiveWebRTCAnswer: (
     offerPath: string,

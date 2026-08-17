@@ -10,7 +10,7 @@ export function TopBar({
   compact?: boolean
 }) {
   return (
-    <header className={`relative z-10 flex items-center justify-between px-5 ${compact ? "py-2.5 sm:px-6" : "py-4 sm:px-8"}`}>
+    <header className={`relative z-[70] flex items-center justify-between px-5 ${compact ? "py-2.5 sm:px-6" : "py-4 sm:px-8"}`}>
       {left ?? (
         <Link to="/" className="flex items-center gap-2.5">
           <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-accent/15 ring-1 ring-accent/30">

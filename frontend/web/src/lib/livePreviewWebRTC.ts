@@ -13,6 +13,7 @@ export interface WebRTCFrameMetadata {
 
 type WebRTCPreviewOptions = {
   runId: string
+  preview?: string
   onOpen: () => void
   onFallback: (reason: string) => void
   onInputError: (reason: string) => void
@@ -42,7 +43,7 @@ export class LivePreviewWebRTC {
   async connect(): Promise<void> {
     try {
       const config = await retrySignaling(
-        () => api.getLiveWebRTCConfig(this.options.runId),
+        () => api.getLiveWebRTCConfig(this.options.runId, this.options.preview),
         () => this.closed,
       )
       if (!config.available) throw new Error("服务端 WebRTC 不可用")

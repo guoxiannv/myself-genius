@@ -16,7 +16,13 @@ export default defineConfig({
   server: {
     port: 5173,
     host: true,
-    allowedHosts: ["bitfun-platform.com", "127.0.0.1", "localhost"],
+    allowedHosts: [
+      "bitfun-platform.com",
+      "version2.bitfun-platform.com",
+      "version2app.bitfun-platform.com",
+      "127.0.0.1",
+      "localhost",
+    ],
     proxy: {
       // 所有后端接口与产物（二维码 / HAP / 媒体）都走 /api 透传
       "/api": {

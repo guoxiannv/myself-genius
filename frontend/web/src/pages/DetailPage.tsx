@@ -6,6 +6,7 @@ import { DevicePreview } from "@/components/detail/DevicePreview"
 import { InstallDock } from "@/components/detail/InstallDock"
 import { BuildProgress } from "@/components/detail/BuildProgress"
 import { ExpoRunPanel } from "@/components/detail/ExpoRunPanel"
+import { ExpoInstallMenu } from "@/components/detail/ExpoInstallMenu"
 import { QuestionPanel } from "@/components/detail/QuestionPanel"
 import { FollowUpPanel } from "@/components/detail/FollowUpPanel"
 import { PackageButton } from "@/components/detail/PackageButton"
@@ -83,6 +84,9 @@ export function DetailPage() {
         right={
           <div className="flex items-center gap-1.5 sm:gap-2">
             {!isExpo && <PackageButton compact runId={runId} artifacts={data?.artifacts} />}
+            {isExpo && mainBuildComplete && data && (
+              <ExpoInstallMenu runId={data.run.run_id} artifacts={data.artifacts} serve={data.expo?.serve} />
+            )}
             <AuthControl compact />
             <Link
               to="/runs"
@@ -117,7 +121,7 @@ export function DetailPage() {
         }
       />
 
-      <main className="relative z-10 mx-auto max-w-[1440px] px-5 pb-8 pt-1 lg:pb-4">
+      <main className="relative z-10 mx-auto w-full max-w-[1720px] px-3 pb-8 pt-1 sm:px-4 xl:px-5 lg:pb-4">
         {error && !data && (
           <Card className="mb-6 p-5">
             <p className="text-sm text-danger">加载失败：{error}</p>
@@ -125,7 +129,7 @@ export function DetailPage() {
         )}
 
         {/* 两栏：左 进展 / 右 真机预览（扫码安装改为右下角悬浮坞） */}
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]">
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(360px,0.8fr)_minmax(0,1.2fr)] xl:grid-cols-[minmax(420px,0.75fr)_minmax(0,1.35fr)]">
           {/* 左：进度概览 + 统一 Agent 构建会话 */}
           <div className="flex min-w-0 flex-col gap-3.5">
             {pendingQuestions.length ? (
@@ -155,15 +159,18 @@ export function DetailPage() {
 
           {/* 右：真机预览 */}
           <div className="lg:sticky lg:top-6 lg:self-start">
-            <Card glass className="p-5">
+            <section className="px-2 py-1 sm:px-3" aria-label="设备预览">
               <DevicePreview
                 artifacts={
                   data?.artifacts ?? ({ media_ready: false } as never)
                 }
                 waitingMessage={data?.ui.waiting_message || "Building…"}
                 runId={runId}
+                runtime={data?.runtime || data?.run.runtime || "arkpilot"}
+                previewPolicy={data?.preview_policy}
+                previewSessions={data?.preview_sessions}
               />
-            </Card>
+            </section>
           </div>
         </div>
       </main>
@@ -178,8 +185,8 @@ function DetailPageLoading() {
   return (
     <div className="aurora-bg relative min-h-screen">
       <TopBar compact left={<BackLink />} />
-      <main className="relative z-10 mx-auto max-w-[1440px] px-5 pb-8 pt-1 lg:pb-4">
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]">
+      <main className="relative z-10 mx-auto w-full max-w-[1720px] px-3 pb-8 pt-1 sm:px-4 xl:px-5 lg:pb-4">
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(360px,0.8fr)_minmax(0,1.2fr)] xl:grid-cols-[minmax(420px,0.75fr)_minmax(0,1.35fr)]">
           <div className="flex min-w-0 flex-col gap-3.5">
             <Card className="h-28 shrink-0 p-5">
               <div className="skeleton h-3 w-24 rounded-full" />
@@ -199,9 +206,9 @@ function DetailPageLoading() {
             </Card>
           </div>
           <div className="lg:sticky lg:top-6 lg:self-start">
-            <Card glass className="flex min-h-[570px] items-center justify-center p-5">
-              <div className="skeleton aspect-[9/19.5] w-full max-w-[228px] rounded-[2.5rem]" />
-            </Card>
+            <div className="flex min-h-[570px] items-center justify-center px-2 py-1 sm:px-3">
+              <div className="skeleton aspect-[3/2] w-full rounded-xl" />
+            </div>
           </div>
         </div>
       </main>

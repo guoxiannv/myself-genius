@@ -64,6 +64,69 @@ export interface AskUserQuestionState {
   stale?: AskUserQuestionRequest[]
 }
 
+export type PreviewKind = "desktop" | "phone"
+export type PreviewTransport = "bundle_shell" | "hap_install"
+export type PreviewStartMode = "automatic" | "on_demand"
+export type PreviewSessionStatus =
+  | "idle"
+  | "queued"
+  | "allocating"
+  | "installing"
+  | "loading_bundle"
+  | "launching"
+  | "ready"
+  | "failed"
+  | "released"
+  | string
+
+export interface RunPreviewPolicyItem {
+  enabled: boolean
+  transport: PreviewTransport
+  start_mode: PreviewStartMode
+}
+
+export interface RunPreviewPolicy {
+  default_kind: PreviewKind
+  previews: Partial<Record<PreviewKind, RunPreviewPolicyItem>>
+}
+
+export interface RunPreviewSession {
+  kind: PreviewKind
+  transport: PreviewTransport
+  status: PreviewSessionStatus
+  requested?: boolean
+  target?: string
+  lease_id?: string
+  artifact_digest?: string
+  bundle_name?: string
+  ability_name?: string
+  /** 可直接展示的同源截图 URL；历史详情优先使用。 */
+  screenshot_url?: string
+  /** 兼容后端早期字段，返回给 Web 时也应是可访问 URL。 */
+  screenshot_path?: string
+  live_available?: boolean
+  error?: string
+  updated_at?: string
+}
+
+export interface RunPreviewArtifact {
+  kind: PreviewKind
+  target: string
+  capture_status: string
+  status?: PreviewSessionStatus
+  transport?: PreviewTransport
+  requested?: boolean
+  error?: string
+  media_ready: boolean
+  media_path: string
+  media_source_path: string
+  media_type: string
+  live_ready: boolean
+  live_frame_path: string
+  live_input_path: string
+  live_webrtc_config_path: string
+}
+
 export interface RunArtifacts {
   hap_found: boolean
   hap_path: string
@@ -99,6 +162,7 @@ export interface RunArtifacts {
   live_frame_path?: string
   live_input_path?: string
   live_webrtc_config_path?: string
+  previews?: Partial<Record<PreviewKind, RunPreviewArtifact>>
   newer_hap_available: boolean
 }
 
@@ -324,6 +388,8 @@ export interface RunProgress {
   events: TimelineEvent[]
   questions?: AskUserQuestionState
   artifacts: RunArtifacts
+  preview_policy?: RunPreviewPolicy
+  preview_sessions?: Partial<Record<PreviewKind, RunPreviewSession>>
   follow_up?: FollowUpState
   follow_up_trace?: FollowUpTraceEvent[]
   ui: {
@@ -379,6 +445,8 @@ export interface RunSummary {
   media_type: string
   has_thumbnail: boolean
   thumbnail_url: string
+  default_preview_kind?: PreviewKind
+  preview_sessions?: Partial<Record<PreviewKind, RunPreviewSession>>
 }
 
 export interface RunListResponse {

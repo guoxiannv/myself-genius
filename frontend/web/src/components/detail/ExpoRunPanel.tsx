@@ -1,6 +1,5 @@
 import { Timeline } from "@/components/detail/Timeline"
 import { ExpoClaudeTraceGroups } from "@/components/detail/ExpoClaudeTraceGroups"
-import { ExpoServeControl } from "@/components/detail/ExpoServeControl"
 import { cn, formatDateTime } from "@/lib/format"
 import type { RunProgress } from "@/lib/types"
 
@@ -17,7 +16,6 @@ export function ExpoRunPanel({ data }: { data: RunProgress }) {
   const packageStatus = normalize(data.expo?.package?.status)
   const hapReady = packageStatus === "ready" && Boolean(data.artifacts.hap_download_path)
   const hapFailed = packageStatus === "failed"
-  const hapBuilding = packageStatus === "building"
   const statusLabel = failed
     ? "运行失败"
     : hapFailed
@@ -66,55 +64,6 @@ export function ExpoRunPanel({ data }: { data: RunProgress }) {
         </div>
 
         <Timeline events={data.events || []} running={running} />
-
-        <ExpoServeControl runId={data.run.run_id} value={data.expo?.serve} />
-
-        <div
-          className={cn(
-            "mx-1 mb-4 rounded-xl border px-4 py-3",
-            hapFailed
-              ? "border-danger/25 bg-danger/5"
-              : hapReady
-                ? "border-success/25 bg-success/5"
-                : "border-border bg-surface-raised/50",
-          )}
-        >
-          <div className="flex items-center gap-2">
-            {hapBuilding && (
-              <span className="h-4 w-4 animate-spin rounded-full border-2 border-accent/30 border-t-accent" />
-            )}
-            <p className="text-sm font-semibold">unsigned HAP</p>
-            <span className="ml-auto text-[11px] text-muted">{data.expo?.package?.label}</span>
-          </div>
-          {hapReady ? (
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <a
-                href={data.artifacts.hap_download_path}
-                className="inline-flex items-center justify-center rounded-lg bg-accent px-3 py-2 text-xs font-semibold text-background transition-colors hover:bg-accent-soft"
-              >
-                下载 unsigned HAP
-              </a>
-              {data.expo?.package?.bundle_name && (
-                <span className="break-all text-[11px] text-muted">{data.expo.package.bundle_name}</span>
-              )}
-              {data.expo?.package?.sha256 && (
-                <span className="w-full break-all font-mono text-[10px] text-subtle">
-                  SHA-256 {data.expo.package.sha256}
-                </span>
-              )}
-            </div>
-          ) : hapFailed ? (
-            <p className="mt-2 break-words text-xs leading-relaxed text-danger">
-              {data.expo?.package?.error || "HAP 构建失败，请查看 Runner 构建日志。bundle.js 仍可正常发布。"}
-            </p>
-          ) : packageStatus === "skipped" ? (
-            <p className="mt-2 text-xs text-muted">本次任务未启用 HAP 构建。</p>
-          ) : (
-            <p className="mt-2 text-xs text-muted">
-              {hapBuilding ? "正在等待空闲 slot 并执行热构建…" : "代码生成完成后会自动进入 HAP 构建。"}
-            </p>
-          )}
-        </div>
 
         <ExpoClaudeTraceGroups groups={data.expo?.trace_groups || []} />
       </div>

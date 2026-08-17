@@ -128,8 +128,8 @@ tmux 模式默认使用 `remote-ui-local` session，可通过
 - `HP_EXPO_FAST_ROOT`: Expo Harmony Fast Runtime 路径；Genius 仓内默认是 `../runner`
 - `HP_EXPO_FAST_APP_ROOT`: Expo 任务独立工作目录的父目录；默认是 `../expo-app`，每次构建会在这里创建新工程与对应的 Markdown Prompt
 - `HP_EXPO_FAST_ENV_FILE`: Runner 本机配置；默认是 `../runner/.env`
-- `HP_EXPO_PUBLIC_SERVE_PORT`: Harmony Go 公网预览 Gateway 端口，默认 `3456`
-- `HP_EXPO_PUBLIC_ORIGIN`: Harmony Go 中输入的公网前缀，当前默认 `https://devkit-go.yorha2b.cc`
+- `HP_EXPO_PUBLIC_SERVE_PORT`: Harmony Go 公网预览 Gateway 端口，默认 `3353`
+- `HP_EXPO_PUBLIC_ORIGIN`: Harmony Go 中使用的公网前缀，当前默认 `https://version2app.bitfun-platform.com/`
 - Profile 池模式：签名材料放 `deploy/signing/`，路径在 `deploy/profile-pool.json` 中配置；密码在 `deploy/server.env` 的 `HP_HPACK_*`
 - 单 Profile 模式：在 `deploy/server.env` 中配置 `HP_HPACK_CERT` / `HP_HPACK_PROFILE` / `HP_HPACK_KEYSTORE` 等
 - `CLOUDFLARE_TUNNEL_TOKEN`: Cloudflare Tunnel token（公网访问时需要）
@@ -139,30 +139,30 @@ tmux 模式默认使用 `remote-ui-local` session，可通过
 ### Expo Harmony Go 公网预览
 
 后端会常驻一个只监听 loopback 的静态 Gateway，默认地址是
-`http://127.0.0.1:3456`。Expo 任务完成并通过 Harmony Go 启动验证后，详情页会出现
+`http://127.0.0.1:3353`。Expo 任务完成并通过 Harmony Go 启动验证后，详情页会出现
 “开启外网预览”按钮。开启操作只把该 Run 的 `dist/harmony-go` 注册到 Gateway，不会为每个
 应用重复占用端口；关闭后对应的随机发布地址立即失效。
 
 没有 Tunnel 时可先本地验证：
 
 ```bash
-curl -fsS http://127.0.0.1:3456/health
+curl -fsS http://127.0.0.1:3353/health
 ```
 
-配置 Cloudflare Tunnel 时，将 `https://devkit-go.yorha2b.cc` 对应的 origin 指向：
+配置 Cloudflare Tunnel 时，将 `version2app.bitfun-platform.com` 对应的 origin 指向：
 
 ```text
-http://127.0.0.1:3456
+http://127.0.0.1:3353
 ```
 
 发布后的 Harmony Go 服务地址形如：
 
 ```text
-https://devkit-go.yorha2b.cc/p/<随机发布令牌>
+https://version2app.bitfun-platform.com/p/<随机发布令牌>
 ```
 
-当前 Harmony Go 不会为 catalog 请求附加 Cloudflare Access 登录凭据，因此该静态路径需要
-使用独立公开 hostname 或 Access Bypass；随机发布令牌负责避免可预测枚举。Gateway 只会读取
+当前 Harmony Go 不会为 catalog 请求附加 Cloudflare Access 登录凭据，因此 `/p/*` 需要在
+Cloudflare Access 中配置 Bypass；随机发布令牌负责避免可预测枚举。Gateway 只会读取
 `HP_EXPO_FAST_APP_ROOT` 下经过导出校验的 `dist/harmony-go`，不会暴露 Prompt 或工程源码。
 
 ### 生成的鸿蒙工程目录

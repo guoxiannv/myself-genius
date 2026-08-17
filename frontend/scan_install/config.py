@@ -94,9 +94,9 @@ EXPO_PUBLIC_SERVE_ENABLED = os.environ.get("HP_EXPO_PUBLIC_SERVE_ENABLED", "1").
     "on",
 }
 EXPO_PUBLIC_SERVE_HOST = os.environ.get("HP_EXPO_PUBLIC_SERVE_HOST", "127.0.0.1").strip() or "127.0.0.1"
-EXPO_PUBLIC_SERVE_PORT = int(os.environ.get("HP_EXPO_PUBLIC_SERVE_PORT", "3456"))
+EXPO_PUBLIC_SERVE_PORT = int(os.environ.get("HP_EXPO_PUBLIC_SERVE_PORT", "3353"))
 EXPO_PUBLIC_ORIGIN = (
-    os.environ.get("HP_EXPO_PUBLIC_ORIGIN", "https://devkit-go.yorha2b.cc/").strip().rstrip("/")
+    os.environ.get("HP_EXPO_PUBLIC_ORIGIN", "https://version2app.bitfun-platform.com/").strip().rstrip("/")
 )
 EXPO_PUBLIC_SERVE_STATE_PATH = resolve_app_path(
     os.environ.get("HP_EXPO_PUBLIC_SERVE_STATE_PATH") or "data/expo-publications.json"
@@ -125,6 +125,35 @@ if HPACK_STATIC_ROOT is not None:
     HPACK_STATIC_ROOT.mkdir(parents=True, exist_ok=True)
 
 HDC_CAPTURE_TARGET = os.environ.get("HP_HDC_TARGET", "").strip()
+HDC_DESKTOP_TARGET = os.environ.get("HP_HDC_DESKTOP_TARGET", "").strip() or HDC_CAPTURE_TARGET
+HDC_PHONE_TARGET = os.environ.get("HP_HDC_PHONE_TARGET", "").strip()
+
+
+def parse_target_pool(value: str, fallback: str = "") -> tuple[str, ...]:
+    targets = [target.strip() for target in value.replace(",", " ").split() if target.strip()]
+    if not targets and fallback:
+        targets = [fallback]
+    return tuple(dict.fromkeys(targets))
+
+
+HDC_DESKTOP_TARGETS = parse_target_pool(os.environ.get("HP_HDC_DESKTOP_TARGETS", ""), HDC_DESKTOP_TARGET)
+HDC_PHONE_TARGETS = parse_target_pool(os.environ.get("HP_HDC_PHONE_TARGETS", ""), HDC_PHONE_TARGET)
+PREVIEW_DEVICE_POOL_ROOT = Path(
+    os.environ.get("EXPO_FAST_DEVICE_POOL_ROOT")
+    or os.environ.get("HP_PREVIEW_DEVICE_POOL_ROOT")
+    or "/private/tmp/genius-expo-preview-pool"
+).expanduser().resolve()
+PREVIEW_LEASE_SECONDS = max(15, int(os.environ.get("EXPO_FAST_PREVIEW_LEASE_SECONDS", "90")))
+PREVIEW_WAIT_SECONDS = max(1, int(os.environ.get("HP_PHONE_PREVIEW_WAIT_SECONDS", "120")))
+PREVIEW_IDLE_SECONDS = max(30, int(os.environ.get("HP_PREVIEW_IDLE_SECONDS", "90")))
+PREVIEW_HIDDEN_GRACE_SECONDS = max(
+    5,
+    int(os.environ.get("HP_PREVIEW_HIDDEN_GRACE_SECONDS", "30")),
+)
+PREVIEW_MAX_SESSION_SECONDS = max(
+    PREVIEW_IDLE_SECONDS,
+    int(os.environ.get("HP_PREVIEW_MAX_SESSION_SECONDS", "600")),
+)
 DEFAULT_CAPTURE_PYTHON_BIN = APP_ROOT / ".venv" / "bin" / "python3"
 CAPTURE_PYTHON_CONFIG = os.environ.get("HP_CAPTURE_PYTHON_BIN", "").strip()
 CAPTURE_PYTHON_BIN = resolve_app_executable(CAPTURE_PYTHON_CONFIG) or (

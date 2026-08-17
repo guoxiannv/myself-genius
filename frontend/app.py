@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
@@ -43,6 +44,7 @@ LOGIN_MAX_ATTEMPTS = 5
 LOGIN_WINDOW_SEC = 10 * 60
 LOGIN_ATTEMPTS: dict[str, list[float]] = {}
 LOGIN_ATTEMPTS_LOCK = threading.Lock()
+JSON_WRITE_LOCK = threading.RLock()
 TMUX_SESSION_NAME_MAX_LENGTH = 48
 from scan_install.config import (
     ALLOWED_MEDIA_EXTENSIONS,
@@ -65,6 +67,10 @@ from scan_install.config import (
     EXPO_PUBLIC_SERVE_STATE_PATH,
     HDC_CAPTURE_SCRIPT_PATH,
     HDC_CAPTURE_TARGET,
+    HDC_DESKTOP_TARGET,
+    HDC_DESKTOP_TARGETS,
+    HDC_PHONE_TARGET,
+    HDC_PHONE_TARGETS,
     HPACK_ENABLED,
     HPACK_PACKAGER_SCRIPT_PATH,
     HPACK_STATIC_ROOT,
@@ -72,6 +78,12 @@ from scan_install.config import (
     LOG_DIR,
     MEDIA_DIR,
     PROFILE_POOL_ISOLATE_WORKSPACE,
+    PREVIEW_DEVICE_POOL_ROOT,
+    PREVIEW_HIDDEN_GRACE_SECONDS,
+    PREVIEW_IDLE_SECONDS,
+    PREVIEW_LEASE_SECONDS,
+    PREVIEW_MAX_SESSION_SECONDS,
+    PREVIEW_WAIT_SECONDS,
     RUNS_DIR,
     TARGET_WORKSPACE,
     TMUX_RUNNER_PATH,
@@ -291,7 +303,13 @@ def read_json(path: Path) -> dict[str, Any] | None:
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid4().hex}.tmp")
+    with JSON_WRITE_LOCK:
+        try:
+            temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def read_text(path: Path) -> str:
@@ -695,6 +713,8 @@ class RunRecord:
     capture_status: str = "waiting_hap"
     capture_process_pid: int | None = None
     capture_command: list[str] = field(default_factory=list)
+    preview_targets: dict[str, str] = field(default_factory=dict)
+    preview_sessions: dict[str, dict[str, Any]] = field(default_factory=dict)
     # 最近一次触发预览采集的 unsigned HAP 修改时间；用于续跑出新包后的重新采集。
     capture_hap_mtime: float = 0.0
     distribution_status: str = "waiting_hap"
@@ -742,6 +762,881 @@ def save_run(record: RunRecord) -> RunRecord:
     return record
 
 
+PREVIEW_KINDS = ("desktop", "phone")
+PHONE_PREVIEW_IN_FLIGHT: set[str] = set()
+PHONE_PREVIEW_LOCK = threading.Lock()
+PHONE_PREVIEW_HEARTBEATS: dict[str, threading.Event] = {}
+PHONE_PREVIEW_CANCELLED: set[str] = set()
+PHONE_PREVIEW_MONITORS_IN_FLIGHT: set[str] = set()
+DESKTOP_PREVIEW_IN_FLIGHT: set[str] = set()
+DESKTOP_PREVIEW_LOCK = threading.Lock()
+DESKTOP_PREVIEW_CANCELLED: set[str] = set()
+PREVIEW_VIEWERS: dict[str, dict[str, float]] = {}
+PREVIEW_VIEWERS_LOCK = threading.Lock()
+DESKTOP_PREVIEW_LAUNCH_TIMEOUT_SEC = max(
+    30,
+    int(os.environ.get("HP_DESKTOP_PREVIEW_LAUNCH_TIMEOUT_SEC", "120")),
+)
+PREVIEW_DEVICE_PROBE_TIMEOUT_SEC = 3
+
+
+def preview_policy(record: RunRecord) -> dict[str, Any]:
+    if getattr(record, "runtime", "arkpilot") == "expo":
+        return {
+            "default_kind": "desktop",
+            "previews": {
+                "desktop": {"enabled": True, "transport": "bundle_shell", "start_mode": "automatic"},
+                "phone": {"enabled": True, "transport": "hap_install", "start_mode": "on_demand"},
+            },
+        }
+    return {
+        "default_kind": "phone",
+        "previews": {
+            "phone": {"enabled": True, "transport": "hap_install", "start_mode": "automatic"},
+        },
+    }
+
+
+def preview_session_defaults(record: RunRecord, kind: str) -> dict[str, Any]:
+    config = preview_policy(record)["previews"].get(kind, {})
+    return {
+        "kind": kind,
+        "transport": str(config.get("transport") or ""),
+        "requested": False,
+        "status": "idle",
+        "target": "",
+        "lease_id": "",
+        "artifact_path": "",
+        "artifact_digest": "",
+        "bundle_name": "",
+        "ability_name": "EntryAbility",
+        "screenshot_path": "",
+        "live_available": False,
+        "error": "",
+        "updated_at": getattr(record, "updated_at", getattr(record, "created_at", "")),
+    }
+
+
+def preview_sessions_payload(record: RunRecord) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    stored_sessions = getattr(record, "preview_sessions", None) or {}
+    for kind in preview_policy(record)["previews"]:
+        result[kind] = {**preview_session_defaults(record, kind), **stored_sessions.get(kind, {})}
+        lease = read_json(preview_lease_path(str(result[kind].get("target") or ""))) if result[kind].get("target") else None
+        lease_current = bool(
+            result[kind].get("lease_id")
+            and lease
+            and lease.get("lease_id") == result[kind].get("lease_id")
+            and preview_lease_valid(lease)
+        )
+        status = str(result[kind].get("status") or "")
+        worker_active = record.run_id in (
+            DESKTOP_PREVIEW_IN_FLIGHT if kind == "desktop" else PHONE_PREVIEW_IN_FLIGHT
+        )
+        if status in {"queued", "allocating", "installing", "loading_bundle", "launching"} and not (
+            worker_active or lease_current
+        ):
+            result[kind]["status"] = "released"
+            result[kind]["live_available"] = False
+        if result[kind]["status"] == "ready" and result[kind].get("live_available") and not lease_current:
+            result[kind]["status"] = "released"
+            result[kind]["live_available"] = False
+    return result
+
+
+def preview_sessions_api_payload(record: RunRecord) -> dict[str, dict[str, Any]]:
+    sessions = preview_sessions_payload(record)
+    for kind, session in sessions.items():
+        has_screenshot = bool(session.get("screenshot_path"))
+        session["screenshot_url"] = (
+            f"/api/runs/{record.run_id}/media?preview={kind}" if has_screenshot else ""
+        )
+        session["screenshot_path"] = session["screenshot_url"]
+        session["artifact_path"] = ""
+    return sessions
+
+
+def update_preview_session(record: RunRecord, kind: str, **changes: Any) -> RunRecord:
+    sessions = dict(record.preview_sessions or {})
+    current = {**preview_session_defaults(record, kind), **sessions.get(kind, {}), **changes, "updated_at": to_iso()}
+    sessions[kind] = current
+    record.preview_sessions = sessions
+    if current.get("target"):
+        record.preview_targets = {**(record.preview_targets or {}), kind: str(current["target"])}
+    return save_run(record)
+
+
+def configured_preview_targets() -> dict[str, str]:
+    return {
+        kind: target
+        for kind, target in (("desktop", HDC_DESKTOP_TARGET), ("phone", HDC_PHONE_TARGET))
+        if target
+    }
+
+
+def configured_preview_target_pools() -> dict[str, list[str]]:
+    return {
+        "desktop": list(HDC_DESKTOP_TARGETS),
+        "phone": list(HDC_PHONE_TARGETS),
+    }
+
+
+def preview_targets_for_record(record: RunRecord) -> dict[str, str]:
+    kinds = preview_policy(record)["previews"]
+    targets = {kind: "" for kind in kinds}
+    targets.update(
+        {
+            kind: str(target).strip()
+            for kind, target in (record.preview_targets or {}).items()
+            if kind in kinds and str(target).strip()
+        }
+    )
+    if record.runtime == "expo":
+        launch_state = read_json(Path(record.workspace) / ".expo-fast" / "launch-previews.json") or {}
+        previews = launch_state.get("previews") if isinstance(launch_state.get("previews"), dict) else {}
+        for kind, entry in previews.items():
+            if kind in kinds and isinstance(entry, dict) and not targets[kind]:
+                targets[kind] = str(entry.get("target") or "").strip()
+    elif not targets.get("phone") and HDC_CAPTURE_TARGET:
+        targets["phone"] = HDC_CAPTURE_TARGET
+    return targets
+
+
+def normalize_preview_kind(record: RunRecord, requested: str = "") -> str:
+    kinds = preview_policy(record)["previews"]
+    candidate = requested.strip().lower()
+    if candidate in kinds:
+        return candidate
+    return str(preview_policy(record)["default_kind"])
+
+
+def live_preview_session_id(record: RunRecord, preview_kind: str) -> str:
+    if not record.preview_sessions and len(preview_policy(record)["previews"]) == 1:
+        return record.run_id
+    return f"{record.run_id}:{preview_kind}"
+
+
+def bind_live_preview_target(record: RunRecord, preview_kind: str) -> str:
+    session_id = live_preview_session_id(record, preview_kind)
+    target = preview_targets_for_record(record).get(preview_kind, "")
+    binder = getattr(LIVE_PREVIEW, "bind_target", None)
+    if target and callable(binder):
+        binder(session_id, target, preview_kind=preview_kind)
+    return session_id
+
+
+def preview_viewer_key(run_id: str, kind: str) -> str:
+    return f"{run_id}:{kind}"
+
+
+def mark_preview_viewer(run_id: str, kind: str, *, visible: bool) -> None:
+    now = time.monotonic()
+    key = preview_viewer_key(run_id, kind)
+    with PREVIEW_VIEWERS_LOCK:
+        state = PREVIEW_VIEWERS.setdefault(key, {})
+        if visible:
+            state["last_seen_at"] = now
+            state["hidden_since"] = 0.0
+        else:
+            state.setdefault("last_seen_at", now)
+            if not state.get("hidden_since"):
+                state["hidden_since"] = now
+
+
+def start_preview_viewer_session(run_id: str, kind: str) -> None:
+    now = time.monotonic()
+    key = preview_viewer_key(run_id, kind)
+    with PREVIEW_VIEWERS_LOCK:
+        state = PREVIEW_VIEWERS.setdefault(key, {})
+        state.setdefault("last_seen_at", now)
+        state["lease_started_at"] = now
+
+
+def preview_viewer_release_reason(run_id: str, kind: str, *, now: float | None = None) -> str:
+    checked_at = time.monotonic() if now is None else now
+    key = preview_viewer_key(run_id, kind)
+    with PREVIEW_VIEWERS_LOCK:
+        state = dict(PREVIEW_VIEWERS.get(key) or {})
+    lease_started_at = float(state.get("lease_started_at") or 0.0)
+    hidden_since = float(state.get("hidden_since") or 0.0)
+    last_seen_at = float(state.get("last_seen_at") or lease_started_at or 0.0)
+    if lease_started_at and checked_at - lease_started_at >= PREVIEW_MAX_SESSION_SECONDS:
+        return "max_session"
+    if hidden_since and checked_at - hidden_since >= PREVIEW_HIDDEN_GRACE_SECONDS:
+        return "hidden"
+    if last_seen_at and checked_at - last_seen_at >= PREVIEW_IDLE_SECONDS:
+        return "viewer_timeout"
+    return ""
+
+
+def clear_preview_viewer(run_id: str, kind: str) -> None:
+    with PREVIEW_VIEWERS_LOCK:
+        PREVIEW_VIEWERS.pop(preview_viewer_key(run_id, kind), None)
+
+
+def safe_preview_target(target: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", target)
+
+
+def preview_lease_path(target: str) -> Path:
+    return PREVIEW_DEVICE_POOL_ROOT / "leases" / f"{safe_preview_target(target)}.json"
+
+
+def preview_process_alive(pid: Any) -> bool:
+    try:
+        value = int(pid)
+        if value <= 0:
+            return False
+        os.kill(value, 0)
+        return True
+    except (TypeError, ValueError, ProcessLookupError):
+        return False
+    except PermissionError:
+        return True
+
+
+def preview_queue_names(kind: str, *, priority: str) -> list[str]:
+    queue_root = PREVIEW_DEVICE_POOL_ROOT / "queue"
+    queue_root.mkdir(parents=True, exist_ok=True)
+    names: list[str] = []
+    now = datetime.now(timezone.utc)
+    for path in queue_root.glob("*.json"):
+        ticket = read_json(path)
+        expires_at = parse_iso(str((ticket or {}).get("expires_at") or ""))
+        if not ticket or not preview_process_alive(ticket.get("pid")) or (expires_at and expires_at <= now):
+            path.unlink(missing_ok=True)
+            continue
+        ticket_priority = str(ticket.get("priority") or "build")
+        if str(ticket.get("kind") or "") == kind and ticket_priority == priority:
+            names.append(path.name)
+    return sorted(names)
+
+
+def create_live_preview_ticket(run_id: str, kind: str, wait_seconds: int) -> Path:
+    now = datetime.now(timezone.utc)
+    name = f"live-{time.time_ns():020d}-{os.getpid():010d}-{run_id}-{uuid4().hex}.json"
+    path = PREVIEW_DEVICE_POOL_ROOT / "queue" / name
+    write_json_atomic(path, {
+        "schema_version": 1,
+        "run_id": run_id,
+        "pid": os.getpid(),
+        "kind": kind,
+        "priority": "live",
+        "queued_at": now.isoformat(),
+        "expires_at": (now + timedelta(seconds=max(1, wait_seconds) + 30)).isoformat(),
+    })
+    return path
+
+
+def preview_lease_valid(payload: dict[str, Any] | None) -> bool:
+    if not payload or not preview_process_alive(payload.get("pid")):
+        return False
+    expires_at = parse_iso(str(payload.get("expires_at") or ""))
+    return bool(expires_at and expires_at > datetime.now(timezone.utc))
+
+
+def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def with_preview_allocator_lock(action: Any) -> Any:
+    PREVIEW_DEVICE_POOL_ROOT.mkdir(parents=True, exist_ok=True)
+    for name in ("queue", "leases", "quarantine"):
+        (PREVIEW_DEVICE_POOL_ROOT / name).mkdir(exist_ok=True)
+    lock_path = PREVIEW_DEVICE_POOL_ROOT / ".allocator-lock"
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            lock_path.mkdir()
+            break
+        except FileExistsError:
+            try:
+                if time.time() - lock_path.stat().st_mtime > 30:
+                    shutil.rmtree(lock_path)
+                    continue
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                raise LivePreviewError("等待模拟器资源锁超时。")
+            time.sleep(0.1)
+    try:
+        return action()
+    finally:
+        shutil.rmtree(lock_path, ignore_errors=True)
+
+
+def connected_hdc_targets() -> list[str]:
+    hdc_bin = LIVE_PREVIEW._resolve_hdc_bin()
+    result = subprocess.run(
+        [hdc_bin, "list", "targets"], capture_output=True, text=True, check=False, timeout=10
+    )
+    if result.returncode != 0:
+        raise LivePreviewError("无法读取 HarmonyOS 设备列表。")
+    return list(dict.fromkeys(
+        item.strip()
+        for item in re.split(r"\s+", result.stdout)
+        if item.strip() and item.strip() != "[Empty]"
+    ))
+
+
+def discover_preview_targets(kind: str) -> list[str]:
+    hdc_bin = LIVE_PREVIEW._resolve_hdc_bin()
+    discovered: list[str] = []
+    for target in connected_hdc_targets():
+        try:
+            result = subprocess.run(
+                [hdc_bin, "-t", target, "shell", "param", "get", "const.product.devicetype"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=PREVIEW_DEVICE_PROBE_TIMEOUT_SEC,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            # One busy or unhealthy emulator must not prevent another matching
+            # target from serving the preview request.
+            continue
+        if result.returncode != 0:
+            continue
+        device_type = f"{result.stdout} {result.stderr}".strip().lower()
+        if kind == "phone" and re.search(r"phone|mobile", device_type):
+            discovered.append(target)
+        elif kind == "desktop" and re.search(r"2in1|tablet|pc|desktop", device_type):
+            discovered.append(target)
+    preferred = configured_preview_target_pools().get(kind, [])
+    return list(dict.fromkeys([target for target in preferred if target in discovered] + discovered))
+
+
+def acquire_preview_lease(run_id: str, kind: str, *, wait_seconds: int = PREVIEW_WAIT_SECONDS) -> dict[str, Any]:
+    deadline = time.monotonic() + max(1, wait_seconds)
+    ticket_path = create_live_preview_ticket(run_id, kind, wait_seconds)
+    try:
+        while time.monotonic() < deadline:
+            candidates = discover_preview_targets(kind)
+
+            def allocate() -> dict[str, Any] | None:
+                if preview_queue_names(kind, priority="build"):
+                    return None
+                live_queue = preview_queue_names(kind, priority="live")
+                if not live_queue or live_queue[0] != ticket_path.name:
+                    return None
+                now = datetime.now(timezone.utc)
+                for target in candidates:
+                    path = preview_lease_path(target)
+                    current = read_json(path)
+                    if current and preview_lease_valid(current):
+                        continue
+                    path.unlink(missing_ok=True)
+                    quarantine = read_json(PREVIEW_DEVICE_POOL_ROOT / "quarantine" / path.name)
+                    quarantine_until = parse_iso(str((quarantine or {}).get("expires_at") or ""))
+                    if quarantine_until and quarantine_until > now:
+                        continue
+                    lease_id = uuid4().hex
+                    payload = {
+                        "schema_version": 1,
+                        "lease_id": lease_id,
+                        "run_id": run_id,
+                        "pid": os.getpid(),
+                        "target": target,
+                        "kind": kind,
+                        "leased_at": to_iso(),
+                        "heartbeat_at": to_iso(),
+                        "expires_at": (now + timedelta(seconds=PREVIEW_LEASE_SECONDS)).isoformat(),
+                    }
+                    write_json_atomic(path, payload)
+                    ticket_path.unlink(missing_ok=True)
+                    return payload
+                return None
+
+            lease = with_preview_allocator_lock(allocate)
+            if lease:
+                return lease
+            time.sleep(1)
+        raise LivePreviewError(f"等待可用的{('手机' if kind == 'phone' else '桌面')}模拟器超时。")
+    finally:
+        ticket_path.unlink(missing_ok=True)
+
+
+def start_preview_lease_heartbeat(record_id: str, kind: str, lease_id: str, target: str) -> None:
+    key = f"{record_id}:{kind}"
+    previous = PHONE_PREVIEW_HEARTBEATS.pop(key, None)
+    if previous:
+        previous.set()
+    stop = threading.Event()
+    PHONE_PREVIEW_HEARTBEATS[key] = stop
+    start_preview_viewer_session(record_id, kind)
+
+    def heartbeat() -> None:
+        refresh_interval = max(5.0, PREVIEW_LEASE_SECONDS / 3)
+        next_refresh_at = time.monotonic() + refresh_interval
+        while not stop.wait(5):
+            try:
+                record = load_run(record_id)
+                session = (record.preview_sessions or {}).get(kind, {}) if record else {}
+                release_reason = preview_viewer_release_reason(record_id, kind)
+                if record and session.get("status") in {
+                    "installing", "loading_bundle", "launching", "ready"
+                } and release_reason:
+                    release_preview_lease(record, kind)
+                    return
+            except (OSError, LivePreviewError):
+                pass
+
+            if time.monotonic() < next_refresh_at:
+                continue
+            next_refresh_at = time.monotonic() + refresh_interval
+
+            def refresh() -> None:
+                path = preview_lease_path(target)
+                current = read_json(path)
+                if not current or current.get("lease_id") != lease_id:
+                    stop.set()
+                    return
+                now = datetime.now(timezone.utc)
+                current.update(
+                    heartbeat_at=to_iso(),
+                    expires_at=(now + timedelta(seconds=PREVIEW_LEASE_SECONDS)).isoformat(),
+                )
+                write_json_atomic(path, current)
+            try:
+                with_preview_allocator_lock(refresh)
+            except (OSError, LivePreviewError):
+                continue
+
+    threading.Thread(target=heartbeat, name=f"preview-lease-{record_id[:8]}-{kind}", daemon=True).start()
+
+
+def release_preview_lease(record: RunRecord, kind: str) -> RunRecord:
+    if kind == "phone":
+        PHONE_PREVIEW_CANCELLED.add(record.run_id)
+    elif kind == "desktop":
+        DESKTOP_PREVIEW_CANCELLED.add(record.run_id)
+    session = preview_sessions_payload(record).get(kind, {})
+    lease_id = str(session.get("lease_id") or "")
+    target = str(session.get("target") or "")
+    stop = PHONE_PREVIEW_HEARTBEATS.pop(f"{record.run_id}:{kind}", None)
+    if stop:
+        stop.set()
+    clear_preview_viewer(record.run_id, kind)
+    if lease_id and target:
+        def release() -> None:
+            path = preview_lease_path(target)
+            current = read_json(path)
+            if current and current.get("lease_id") == lease_id:
+                path.unlink(missing_ok=True)
+        with_preview_allocator_lock(release)
+    releaser = getattr(LIVE_PREVIEW, "release_session", None)
+    if callable(releaser):
+        releaser(live_preview_session_id(record, kind))
+    targets = dict(record.preview_targets or {})
+    targets.pop(kind, None)
+    record.preview_targets = targets
+    return update_preview_session(
+        record,
+        kind,
+        status="released",
+        lease_id="",
+        target="",
+        live_available=False,
+        error="",
+    )
+
+
+def preempt_owner_preview_leases(record: RunRecord, kind: str) -> list[str]:
+    owner_id = str(record.owner_id or "").strip()
+    if not owner_id:
+        return []
+    released: list[str] = []
+    active_statuses = {"queued", "allocating", "installing", "loading_bundle", "launching", "ready"}
+    for candidate in iter_run_records():
+        if candidate.run_id == record.run_id or candidate.owner_id != owner_id:
+            continue
+        session = preview_sessions_payload(candidate).get(kind, {})
+        if str(session.get("status") or "") not in active_statuses and not (
+            session.get("target") or session.get("lease_id")
+        ):
+            continue
+        release_preview_lease(candidate, kind)
+        released.append(candidate.run_id)
+    return released
+
+
+def preview_hap_artifact(record: RunRecord) -> Path | None:
+    workspace = Path(record.workspace)
+    local_hap = resolve_expo_hap_artifact(workspace) if record.runtime == "expo" else find_latest_hap(workspace)
+    if local_hap and local_hap.is_file():
+        # HDC preview devices accept the local development HAP directly.  Do not
+        # replace it with an internal-testing distribution HAP: that package can
+        # install successfully but is blocked by HarmonyOS online verification.
+        return local_hap.resolve()
+    manifest = load_hpack_manifest(record.run_id)
+    signed = Path(str((manifest or {}).get("signed_hap_path") or "")).expanduser()
+    if signed.is_file():
+        return signed.resolve()
+    return None
+
+
+def preview_hap_metadata(record: RunRecord, hap_path: Path) -> tuple[str, str]:
+    bundle_name = record.signing_bundle_name
+    ability_name = "EntryAbility"
+    try:
+        with zipfile.ZipFile(hap_path) as archive:
+            module = json.loads(archive.read("module.json").decode("utf-8"))
+        bundle_name = bundle_name or str((module.get("app") or {}).get("bundleName") or "")
+        module_data = module.get("module") or {}
+        abilities = module_data.get("abilities") or []
+        if abilities and isinstance(abilities[0], dict):
+            ability_name = str(abilities[0].get("name") or ability_name)
+    except (OSError, KeyError, zipfile.BadZipFile, json.JSONDecodeError):
+        pass
+    if not bundle_name:
+        app_config = Path(record.workspace) / "AppScope" / "app.json5"
+        if app_config.is_file():
+            match = re.search(r'"bundleName"\s*:\s*"([^"]+)"', app_config.read_text(encoding="utf-8"))
+            bundle_name = match.group(1) if match else ""
+    return bundle_name, ability_name
+
+
+def run_phone_preview(record_id: str) -> None:
+    lease: dict[str, Any] | None = None
+    try:
+        record = load_run(record_id)
+        if not record:
+            return
+        hap_path = preview_hap_artifact(record)
+        if not hap_path:
+            raise LivePreviewError("当前任务还没有可安装的 HAP。")
+        digest = hashlib.sha256(hap_path.read_bytes()).hexdigest()
+        bundle_name, ability_name = preview_hap_metadata(record, hap_path)
+        record = update_preview_session(
+            record, "phone", requested=True, status="allocating", artifact_path=str(hap_path),
+            artifact_digest=digest, bundle_name=bundle_name, ability_name=ability_name, error="",
+        )
+        lease = acquire_preview_lease(record.run_id, "phone")
+        record = load_run(record_id) or record
+        record = update_preview_session(
+            record, "phone", status="installing", target=lease["target"], lease_id=lease["lease_id"]
+        )
+        if record_id in PHONE_PREVIEW_CANCELLED:
+            release_preview_lease(record, "phone")
+            return
+        start_preview_lease_heartbeat(record.run_id, "phone", lease["lease_id"], lease["target"])
+        session_id = live_preview_session_id(record, "phone")
+        LIVE_PREVIEW.bind_target(session_id, lease["target"], preview_kind="phone")
+        frame = LIVE_PREVIEW.install_and_launch(
+            session_id, hap_path=hap_path, bundle_name=bundle_name, ability_name=ability_name
+        )
+        if record_id in PHONE_PREVIEW_CANCELLED:
+            record = load_run(record_id) or record
+            release_preview_lease(record, "phone")
+            return
+        screenshot_path = MEDIA_DIR / record.run_id / "preview-phone.jpeg"
+        screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+        screenshot_path.write_bytes(frame.data)
+        record = load_run(record_id) or record
+        update_preview_session(
+            record, "phone", status="ready", screenshot_path=str(screenshot_path),
+            live_available=True, error="",
+        )
+    except Exception as exc:
+        record = load_run(record_id)
+        if record:
+            if lease:
+                record = release_preview_lease(record, "phone")
+            update_preview_session(record, "phone", status="failed", live_available=False, error=str(exc))
+    finally:
+        with PHONE_PREVIEW_LOCK:
+            PHONE_PREVIEW_IN_FLIGHT.discard(record_id)
+
+
+def start_phone_preview(record: RunRecord, *, automatic: bool = False) -> tuple[RunRecord, bool]:
+    current = preview_sessions_payload(record)["phone"]
+    if current.get("status") in {"queued", "allocating", "installing", "launching"}:
+        return record, False
+    hap_path = preview_hap_artifact(record)
+    if not hap_path:
+        if automatic:
+            return record, False
+        raise LivePreviewError("当前任务还没有可安装的 HAP。")
+    digest = hashlib.sha256(hap_path.read_bytes()).hexdigest()
+    if current.get("status") == "ready" and current.get("artifact_digest") == digest and current.get("live_available"):
+        return record, False
+    with PHONE_PREVIEW_LOCK:
+        if record.run_id in PHONE_PREVIEW_IN_FLIGHT:
+            return record, False
+        PHONE_PREVIEW_CANCELLED.discard(record.run_id)
+        PHONE_PREVIEW_IN_FLIGHT.add(record.run_id)
+    record = update_preview_session(record, "phone", requested=True, status="queued", error="")
+    threading.Thread(target=run_phone_preview, args=(record.run_id,), daemon=True).start()
+    return record, True
+
+
+def desktop_preview_artifacts(record: RunRecord) -> tuple[Path, Path, str]:
+    if record.runtime != "expo":
+        raise LivePreviewError("只有 Expo Runtime 任务支持 PC bundle 预览。")
+    workspace = Path(record.workspace)
+    source_manifest_path = workspace / ".expo-fast" / "manifest.json"
+    export_root = workspace / "dist" / "harmony-go"
+    if not source_manifest_path.is_file() or not (export_root / ".expo-harmony-go-export").is_file():
+        raise LivePreviewError("当前任务还没有可加载的 Harmony Go 导出产物。")
+    try:
+        source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LivePreviewError(f"Harmony Go manifest 无效：{exc}") from exc
+    manifest_id = str(source_manifest.get("id") or "").strip()
+    if not manifest_id:
+        raise LivePreviewError("Harmony Go manifest 缺少应用 id。")
+    export_manifest_path = export_root / "miniapps" / manifest_id / "manifest.json"
+    try:
+        export_manifest = json.loads(export_manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LivePreviewError(f"Harmony Go 导出 manifest 无效：{exc}") from exc
+    if str(export_manifest.get("id") or "").strip() != manifest_id:
+        raise LivePreviewError("Harmony Go 导出 manifest 与当前应用 id 不一致。")
+    return (
+        export_manifest_path,
+        export_root,
+        hashlib.sha256(export_manifest_path.read_bytes()).hexdigest(),
+    )
+
+
+def desktop_preview_command(record: RunRecord, target: str, *, reuse_installed: bool = False) -> list[str]:
+    script_path = (EXPO_FAST_ROOT / "scripts" / "open-desktop-preview.mjs") if EXPO_FAST_ROOT else None
+    if script_path is None or not script_path.is_file():
+        raise LivePreviewError("PC 实时预览启动脚本不存在。")
+    node_bin = os.environ.get("EXPO_FAST_NODE", "").strip() or shutil.which("node") or "node"
+    gateway_origin = EXPO_PUBLIC_GATEWAY.local_origin()
+    return [
+        node_bin,
+        str(script_path),
+        "--project",
+        record.workspace,
+        "--target",
+        target,
+        "--gatewayOrigin",
+        gateway_origin,
+        "--devicePort",
+        "3333",
+        "--reuseInstalled",
+        "true" if reuse_installed else "false",
+    ]
+
+
+def launch_desktop_bundle(record: RunRecord, target: str, *, reuse_installed: bool = False) -> None:
+    command = desktop_preview_command(record, target, reuse_installed=reuse_installed)
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=str(EXPO_FAST_ROOT or APP_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=os.environ.copy(),
+        )
+    except OSError as exc:
+        raise LivePreviewError(f"无法启动 PC 实时预览：{exc}") from exc
+
+    deadline = time.monotonic() + DESKTOP_PREVIEW_LAUNCH_TIMEOUT_SEC
+    output = ""
+    while True:
+        if record.run_id in DESKTOP_PREVIEW_CANCELLED:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            raise LivePreviewError("PC 实时预览已取消。")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            process.kill()
+            output, _ = process.communicate()
+            raise LivePreviewError(
+                f"PC 模拟器加载 bundle 超过 {DESKTOP_PREVIEW_LAUNCH_TIMEOUT_SEC} 秒。"
+            )
+        try:
+            output, _ = process.communicate(timeout=min(1.0, remaining))
+            break
+        except subprocess.TimeoutExpired:
+            continue
+
+    log_path = LOG_DIR / f"{record.run_id}.desktop-preview.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(output or "", encoding="utf-8")
+    except OSError:
+        pass
+    if process.returncode != 0:
+        detail = (output or "").strip()[-2000:]
+        raise LivePreviewError(f"PC 模拟器加载 bundle 失败：{detail or f'退出码 {process.returncode}'}")
+
+
+def run_desktop_preview(record_id: str) -> None:
+    lease: dict[str, Any] | None = None
+    try:
+        record = load_run(record_id)
+        if not record:
+            return
+        _manifest_path, export_root, digest = desktop_preview_artifacts(record)
+        previous_session = (record.preview_sessions or {}).get("desktop", {})
+        record = update_preview_session(
+            record,
+            "desktop",
+            requested=True,
+            status="allocating",
+            artifact_path=str(export_root),
+            artifact_digest=digest,
+            error="",
+        )
+        if not EXPO_PUBLIC_GATEWAY.running:
+            raise LivePreviewError("Harmony Go 本地 bundle 网关未启动。")
+        try:
+            EXPO_PUBLIC_GATEWAY.registry.register_local(record.run_id, export_root)
+        except (ExpoExportValidationError, ExpoGatewayError) as exc:
+            raise LivePreviewError(f"无法发布 PC 预览 bundle：{exc}") from exc
+
+        lease = acquire_preview_lease(record.run_id, "desktop")
+        record = load_run(record_id) or record
+        record = update_preview_session(
+            record,
+            "desktop",
+            status="loading_bundle",
+            target=lease["target"],
+            lease_id=lease["lease_id"],
+        )
+        if record_id in DESKTOP_PREVIEW_CANCELLED:
+            release_preview_lease(record, "desktop")
+            return
+        start_preview_lease_heartbeat(record.run_id, "desktop", lease["lease_id"], lease["target"])
+        session_id = live_preview_session_id(record, "desktop")
+        LIVE_PREVIEW.bind_target(session_id, lease["target"], preview_kind="desktop")
+        launch_state = read_json(Path(record.workspace) / ".expo-fast" / "launch-previews.json") or {}
+        launch_desktop = (launch_state.get("previews") or {}).get("desktop", {})
+        reuse_installed = bool(
+            previous_session.get("artifact_digest") == digest
+            and previous_session.get("screenshot_path")
+        ) or bool(
+            launch_desktop.get("status") == "complete"
+            and launch_desktop.get("target") == lease["target"]
+            and expo_preview_media_path(Path(record.workspace), "desktop")
+        )
+        launch_desktop_bundle(record, lease["target"], reuse_installed=reuse_installed)
+        if record_id in DESKTOP_PREVIEW_CANCELLED:
+            record = load_run(record_id) or record
+            release_preview_lease(record, "desktop")
+            return
+
+        frame = LIVE_PREVIEW.capture_frame(session_id)
+        screenshot_path = MEDIA_DIR / record.run_id / "preview-desktop.jpeg"
+        screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+        screenshot_path.write_bytes(frame.data)
+        record = load_run(record_id) or record
+        update_preview_session(
+            record,
+            "desktop",
+            status="ready",
+            screenshot_path=str(screenshot_path),
+            live_available=True,
+            error="",
+        )
+    except Exception as exc:
+        record = load_run(record_id)
+        if record:
+            if record_id in DESKTOP_PREVIEW_CANCELLED:
+                if lease:
+                    release_preview_lease(record, "desktop")
+                return
+            if lease:
+                record = release_preview_lease(record, "desktop")
+            update_preview_session(
+                record,
+                "desktop",
+                status="failed",
+                live_available=False,
+                error=str(exc) or "PC 实时预览启动失败。",
+            )
+    finally:
+        with DESKTOP_PREVIEW_LOCK:
+            DESKTOP_PREVIEW_IN_FLIGHT.discard(record_id)
+
+
+def start_desktop_preview(record: RunRecord, *, automatic: bool = False) -> tuple[RunRecord, bool]:
+    current = preview_sessions_payload(record)["desktop"]
+    current_status = str(current.get("status") or "").strip().lower()
+    if current_status in {"queued", "allocating", "loading_bundle", "launching"}:
+        # A daemon preview worker can disappear during a backend restart or an
+        # unexpected exception. Recover only sessions that never acquired a
+        # target/lease; an active leased worker remains authoritative.
+        with DESKTOP_PREVIEW_LOCK:
+            if record.run_id in DESKTOP_PREVIEW_IN_FLIGHT:
+                return record, False
+            current = preview_sessions_payload(record)["desktop"]
+            current_status = str(current.get("status") or "").strip().lower()
+            if current_status in {"queued", "allocating"} and not (
+                str(current.get("target") or "").strip()
+                or str(current.get("lease_id") or "").strip()
+            ):
+                record = update_preview_session(
+                    record,
+                    "desktop",
+                    status="idle",
+                    requested=False,
+                    target="",
+                    lease_id="",
+                    live_available=False,
+                    error="桌面预览会话已失联，正在重新连接。",
+                )
+            else:
+                return record, False
+    try:
+        _manifest_path, _export_root, digest = desktop_preview_artifacts(record)
+    except LivePreviewError:
+        if automatic:
+            return record, False
+        raise
+    if current.get("status") == "ready" and current.get("artifact_digest") == digest and current.get("live_available"):
+        return record, False
+    if current.get("lease_id") or current.get("target"):
+        record = release_preview_lease(record, "desktop")
+    with DESKTOP_PREVIEW_LOCK:
+        if record.run_id in DESKTOP_PREVIEW_IN_FLIGHT:
+            return record, False
+        DESKTOP_PREVIEW_CANCELLED.discard(record.run_id)
+        DESKTOP_PREVIEW_IN_FLIGHT.add(record.run_id)
+    record = update_preview_session(record, "desktop", requested=True, status="queued", error="")
+    threading.Thread(target=run_desktop_preview, args=(record.run_id,), daemon=True).start()
+    return record, True
+
+
+def monitor_hap_for_phone_preview(record_id: str) -> None:
+    try:
+        started_at = time.monotonic()
+        while time.monotonic() - started_at < CAPTURE_WAIT_TIMEOUT_SEC:
+            record = load_run(record_id)
+            if not record:
+                return
+            if preview_sessions_payload(record)["phone"].get("status") != "idle":
+                return
+            if preview_hap_artifact(record):
+                start_phone_preview(record, automatic=True)
+                return
+            time.sleep(CAPTURE_POLL_INTERVAL_SEC)
+    finally:
+        with PHONE_PREVIEW_LOCK:
+            PHONE_PREVIEW_MONITORS_IN_FLIGHT.discard(record_id)
+
+
+def start_phone_preview_monitor(record: RunRecord) -> bool:
+    with PHONE_PREVIEW_LOCK:
+        if record.run_id in PHONE_PREVIEW_MONITORS_IN_FLIGHT:
+            return False
+        PHONE_PREVIEW_MONITORS_IN_FLIGHT.add(record.run_id)
+    threading.Thread(target=monitor_hap_for_phone_preview, args=(record.run_id,), daemon=True).start()
+    return True
+
+
 def build_tmux_command(record: RunRecord) -> list[str]:
     command = [
         "node",
@@ -762,10 +1657,10 @@ def build_tmux_command(record: RunRecord) -> list[str]:
     return command
 
 
-def build_expo_fast_command(record: RunRecord) -> list[str]:
+def build_expo_fast_command(record: RunRecord, *, resume: bool = False) -> list[str]:
     if EXPO_FAST_LAUNCHER is None:
         return []
-    return [
+    command = [
         str(EXPO_FAST_LAUNCHER),
         "--project",
         record.workspace,
@@ -773,7 +1668,24 @@ def build_expo_fast_command(record: RunRecord) -> list[str]:
         record.prompt_file,
         "--session",
         record.session_name,
+        "--hap",
+        "true",
     ]
+    if resume:
+        command.append("--resume")
+    return command
+
+
+def build_expo_fast_env(record: RunRecord) -> dict[str, str]:
+    env = os.environ.copy()
+    if EXPO_FAST_ENV_FILE is not None:
+        env["EXPO_FAST_ENV_FILE"] = str(EXPO_FAST_ENV_FILE)
+    if record.signing_bundle_name:
+        env["EXPO_FAST_BUNDLE_IDENTIFIER"] = record.signing_bundle_name
+    else:
+        env.pop("EXPO_FAST_BUNDLE_IDENTIFIER", None)
+    env["EXPO_FAST_VERSION_CODE"] = str(int(datetime.now(timezone.utc).timestamp()))
+    return env
 
 
 def expo_fast_state_path(workspace: Path) -> Path:
@@ -1175,7 +2087,14 @@ def build_capture_command(record: RunRecord) -> list[str]:
 
 def find_latest_hap(workspace: Path, _created_at: str | None = None) -> Path | None:
     hap_path = workspace / EXPECTED_HAP_RELATIVE_PATH
-    return hap_path if hap_path.is_file() else None
+    if hap_path.is_file():
+        return hap_path
+    expo_haps = sorted(
+        (path for path in (workspace / ".expo-fast" / "hap").glob("*.hap") if path.is_file()),
+        key=lambda path: path.stat().st_mtime_ns,
+        reverse=True,
+    )
+    return expo_haps[0] if expo_haps else None
 
 
 def file_mtime(path: Path | None) -> float:
@@ -1618,8 +2537,14 @@ def wait_for_initial_package(record: RunRecord) -> None:
         workspace = Path(latest.workspace)
         hap_path = find_latest_hap(workspace, latest.created_at)
         qa_status = load_ui_qa_status(workspace, latest.session_name)
-        capture_settled = latest.capture_status in {"complete", "failed"}
-        if hap_path and qa_status in {"complete", "disabled"} and capture_settled:
+        stored_sessions = getattr(latest, "preview_sessions", None) or {}
+        phone_status = str(preview_sessions_payload(latest)["phone"].get("status") or "idle")
+        preview_settled = phone_status in {"ready", "failed", "released"}
+        if not stored_sessions:
+            preview_settled = str(getattr(latest, "capture_status", "idle") or "idle") in {
+                "complete", "failed", "released"
+            }
+        if hap_path and qa_status in {"complete", "disabled"} and preview_settled:
             start_hpack_packaging(latest)
             return
         if qa_status in {"failed", "error", "cancelled", "canceled"}:
@@ -1901,6 +2826,84 @@ def maybe_start_capture_monitor(record: RunRecord, hap_path: Path | None = None)
     return True
 
 
+def expo_preview_media_path(workspace: Path, preview_kind: str) -> Path | None:
+    candidate = workspace / ".expo-fast" / f"launch-screenshot-{preview_kind}.jpeg"
+    if candidate.is_file():
+        return candidate
+    legacy = workspace / ".expo-fast" / "launch-screenshot.jpeg"
+    return legacy if preview_kind == "desktop" and legacy.is_file() else None
+
+
+def build_expo_preview_payloads(
+    record: RunRecord,
+    workspace: Path,
+    run_status: str,
+) -> dict[str, dict[str, Any]]:
+    launch_state = read_json(workspace / ".expo-fast" / "launch-previews.json") or {}
+    launch_previews = launch_state.get("previews") if isinstance(launch_state.get("previews"), dict) else {}
+    preview_sessions = preview_sessions_payload(record)
+    payloads: dict[str, dict[str, Any]] = {}
+    for preview_kind, target in preview_targets_for_record(record).items():
+        entry = launch_previews.get(preview_kind) if isinstance(launch_previews.get(preview_kind), dict) else {}
+        media_path = expo_preview_media_path(workspace, preview_kind)
+        entry_status = str(entry.get("status") or "").strip().lower()
+        capture_status = (
+            "failed"
+            if entry_status == "failed"
+            else "queued"
+            if entry_status == "queued"
+            else "complete"
+            if media_path and run_status == "completed"
+            else "running"
+            if run_status == "running"
+            else "waiting_launch"
+        )
+        # A completed capture only guarantees a persisted screenshot. The runner
+        # releases its device lease after completion, so live endpoints are valid
+        # only while an explicit preview session still owns a live lease.
+        preview_session = preview_sessions.get(preview_kind, {})
+        live_ready = bool(
+            preview_session.get("status") == "ready"
+            and preview_session.get("live_available")
+        )
+        query = f"preview={preview_kind}"
+        payloads[preview_kind] = {
+            "kind": preview_kind,
+            "target": target,
+            "capture_status": capture_status,
+            "media_ready": bool(media_path),
+            "media_path": f"/api/runs/{record.run_id}/media?{query}" if media_path else "",
+            "media_source_path": str(media_path) if media_path else "",
+            "media_type": media_path.suffix.lower().lstrip(".") if media_path else "",
+            "live_ready": live_ready,
+            "live_frame_path": f"/api/runs/{record.run_id}/live/frame?{query}" if live_ready else "",
+            "live_input_path": f"/api/runs/{record.run_id}/live/input?{query}" if live_ready else "",
+            "live_webrtc_config_path": (
+                f"/api/runs/{record.run_id}/live/webrtc/config?{query}"
+                if live_ready and WEBRTC_PREVIEW is not None
+                else ""
+            ),
+        }
+    return payloads
+
+
+def ensure_expo_publication(record: RunRecord, *, can_publish: bool) -> dict[str, Any]:
+    """Publish a completed Harmony Go export once and return its current state."""
+    serve_state = EXPO_PUBLIC_GATEWAY.describe(record.run_id, can_publish=can_publish)
+    if not can_publish or serve_state.get("public_url") or not serve_state.get("can_publish"):
+        return serve_state
+    try:
+        serve_state, _created = EXPO_PUBLIC_GATEWAY.publish(
+            record.run_id,
+            Path(record.workspace) / "dist" / "harmony-go",
+        )
+    except (ExpoExportValidationError, ExpoGatewayError) as exc:
+        serve_state = EXPO_PUBLIC_GATEWAY.describe(record.run_id, can_publish=can_publish)
+        serve_state["status"] = "failed"
+        serve_state["error"] = str(exc)
+    return serve_state
+
+
 def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
     workspace = Path(record.workspace)
     expo_state = load_expo_fast_state(workspace)
@@ -1912,16 +2915,65 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
     if run_status == "completed":
         record = sync_expo_package_status(record, package_status, package_error)
 
-    launch_screenshot = workspace / ".expo-fast" / "launch-screenshot.jpeg"
-    media_path = launch_screenshot if launch_screenshot.is_file() else None
+    preview_payloads = build_expo_preview_payloads(record, workspace, run_status)
+    phone_session = preview_sessions_payload(record)["phone"]
+    phone_query = "preview=phone"
+    preview_payloads["phone"] = {
+        **preview_payloads.get("phone", {}),
+        **phone_session,
+        "capture_status": phone_session["status"],
+        "media_ready": bool(phone_session.get("screenshot_path")),
+        "media_path": f"/api/runs/{record.run_id}/media?{phone_query}" if phone_session.get("screenshot_path") else "",
+        "media_source_path": str(phone_session.get("screenshot_path") or ""),
+        "media_type": "jpeg" if phone_session.get("screenshot_path") else "",
+        "live_ready": bool(phone_session.get("live_available")),
+        "live_frame_path": f"/api/runs/{record.run_id}/live/frame?{phone_query}" if phone_session.get("live_available") else "",
+        "live_input_path": f"/api/runs/{record.run_id}/live/input?{phone_query}" if phone_session.get("live_available") else "",
+        "live_webrtc_config_path": f"/api/runs/{record.run_id}/live/webrtc/config?{phone_query}" if phone_session.get("live_available") and WEBRTC_PREVIEW is not None else "",
+    }
+    primary_preview_kind = normalize_preview_kind(record)
+    primary_preview = preview_payloads.get(primary_preview_kind, {})
+    media_path = Path(str(primary_preview.get("media_source_path"))) if primary_preview.get("media_source_path") else None
     state_name = str((expo_state or {}).get("state") or "").strip().lower()
     detail = str((expo_state or {}).get("detail") or "").strip().lower()
     detail_label = str((expo_state or {}).get("detailLabel") or "").strip()
     trace_groups = load_expo_claude_trace_groups(workspace, expo_state)
-    serve_state = EXPO_PUBLIC_GATEWAY.describe(
-        record.run_id,
-        can_publish=run_status == "completed",
+    hpack_manifest = load_hpack_manifest(record.run_id)
+    record = load_run(record.run_id) or record
+    if run_status == "completed" and package_status == "ready" and hap_path and not hpack_manifest:
+        start_hpack_packaging(record)
+        record = load_run(record.run_id) or record
+    manifest_ready = bool(hpack_manifest and hpack_manifest.get("status") == "ready")
+    package_in_flight = bool(
+        record.run_id in HPACK_PACKAGE_IN_FLIGHT or process_alive(record.distribution_process_pid)
     )
+    install_ready = manifest_ready and not package_in_flight
+    if not HPACK_ENABLED:
+        distribution_status = "disabled"
+    elif package_in_flight:
+        distribution_status = "packaging"
+    elif install_ready:
+        distribution_status = "ready"
+    elif record.distribution_status == "failed" or (
+        hpack_manifest and hpack_manifest.get("status") == "failed"
+    ):
+        distribution_status = "failed"
+    else:
+        distribution_status = "waiting_hap"
+
+    if manifest_ready and not record.first_install_url:
+        first_url = str(hpack_manifest.get("install_url") or "")
+        if first_url:
+            record.first_install_url = first_url
+            record.first_manifest_url = str(hpack_manifest.get("manifest_url") or "")
+            record.first_install_store_url = (
+                str(hpack_manifest.get("install_store_url") or "")
+                or build_install_store_url(record.first_manifest_url)
+            )
+            record.first_ready_at = to_iso()
+            record = save_run(record)
+
+    serve_state = ensure_expo_publication(record, can_publish=run_status == "completed")
     events = [
         {
             "kind": "run",
@@ -1929,6 +2981,7 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
             "summary": f"已提交 Expo 任务并启动后端会话: {record.session_name}",
         },
         *summarize_expo_fast_events(expo_state),
+        *summarize_hpack_events(hpack_manifest),
     ]
     package_event = {
         "ready": "unsigned HAP 构建完成，可以下载。",
@@ -1960,6 +3013,8 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
         "model_repair": "正在修复 Expo 应用…",
         "repair_verification": "正在验证修复结果…",
         "launching": "正在 Harmony Go 中启动并检查应用…",
+        "preview_queued": "PC 预览正在等待可用的桌面模拟器，手机预览可按需启动…",
+        "preview_failed": "生成产物已完成，设备预览失败，可稍后重新预览。",
         "hap_building": "正在等待空闲 slot 并构建 unsigned HAP…",
         "done": "Expo 生成流程已完成。",
         "error": "Expo 生成失败，请查看左侧状态。",
@@ -1972,15 +3027,11 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
         "history": [],
         "last_error": "Expo Runtime 暂不支持续跑调整。",
     }
-    distribution_status = {
-        "ready": "ready_unsigned",
-        "failed": "failed",
-        "building": "building",
-        "skipped": "skipped",
-    }.get(package_status, "waiting_generation")
     return {
         "run": asdict(record),
         "runtime": "expo",
+        "preview_policy": preview_policy(record),
+        "preview_sessions": preview_sessions_api_payload(record),
         "workspace": {
             "path": str(workspace),
             "configured": workspace.is_dir(),
@@ -2008,26 +3059,19 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
         "autopilot": None,
         "compact": None,
         "capture": {
-            "status": "complete" if media_path else "waiting_launch",
+            "status": str(primary_preview.get("capture_status") or "waiting_launch"),
             "process_pid": None,
             "command": [],
             "manifest": None,
         },
         "distribution": {
-            "enabled": False,
+            "enabled": HPACK_ENABLED,
             "status": distribution_status,
-            "process_pid": None,
-            "command": [],
-            "manifest": None,
+            "process_pid": record.distribution_process_pid,
+            "command": record.distribution_command,
+            "manifest": hpack_manifest,
         },
-        "signing": {
-            "pool_enabled": False,
-            "slot_id": "",
-            "bundle_name": "",
-            "leased_at": "",
-            "released_at": "",
-            "lease": None,
-        },
+        "signing": build_signing_payload(record),
         "status": run_status,
         "stage": detail or state_name or "waiting",
         "events": events[-20:],
@@ -2037,33 +3081,42 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
             "hap_path": str(hap_path) if hap_path else "",
             "hap_display_path": relative_to_root(hap_path, workspace) if hap_path else "",
             "hap_download_path": f"/api/runs/{record.run_id}/hap" if hap_path else "",
-            "hap_qr_path": "",
-            "install_ready": False,
-            "install_url": "",
-            "install_store_url": "",
-            "manifest_url": "",
-            "install_qr_path": "",
-            "first_install_ready": False,
-            "first_install_url": "",
-            "first_install_store_url": "",
-            "first_manifest_url": "",
-            "first_install_qr_path": "",
-            "signed_hap_path": "",
-            "signed_hap_url": "",
+            "hap_qr_path": f"/api/runs/{record.run_id}/hap-qr" if hap_path else "",
+            "install_ready": install_ready,
+            "install_url": str(hpack_manifest.get("install_url") or "") if hpack_manifest else "",
+            "install_store_url": str(hpack_manifest.get("install_store_url") or "")
+            if hpack_manifest and hpack_manifest.get("manifest_url")
+            else build_install_store_url(str(hpack_manifest.get("manifest_url") or ""))
+            if hpack_manifest
+            else "",
+            "manifest_url": str(hpack_manifest.get("manifest_url") or "") if hpack_manifest else "",
+            "install_qr_path": f"/api/runs/{record.run_id}/install-qr" if install_ready else "",
+            "first_install_ready": bool(record.first_install_url),
+            "first_install_url": record.first_install_url,
+            "first_install_store_url": record.first_install_store_url,
+            "first_manifest_url": record.first_manifest_url,
+            "first_install_qr_path": f"/api/runs/{record.run_id}/install-qr?version=first"
+            if record.first_install_url
+            else "",
+            "signed_hap_path": str(hpack_manifest.get("signed_hap_path") or "") if hpack_manifest else "",
+            "signed_hap_url": str(hpack_manifest.get("signed_hap_url") or "") if hpack_manifest else "",
             "distribution_status": distribution_status,
-            "distribution_error": package_error
+            "distribution_error": str(hpack_manifest.get("error") or "")
+            if hpack_manifest
+            else package_error
             or (str((expo_state or {}).get("error") or "") if run_status == "failed" else ""),
-            "package_can_start": False,
-            "package_current": False,
+            "package_can_start": bool(HPACK_ENABLED and hap_path and not install_ready and not package_in_flight),
+            "package_current": install_ready,
             "package_outdated": False,
             "media_ready": bool(media_path),
             "media_path": f"/api/runs/{record.run_id}/media" if media_path else "",
             "media_source_path": str(media_path) if media_path else "",
             "media_type": media_path.suffix.lower().lstrip(".") if media_path else "",
-            "live_ready": False,
-            "live_frame_path": "",
-            "live_input_path": "",
-            "live_webrtc_config_path": "",
+            "live_ready": bool(primary_preview.get("live_ready")),
+            "live_frame_path": str(primary_preview.get("live_frame_path") or ""),
+            "live_input_path": str(primary_preview.get("live_input_path") or ""),
+            "live_webrtc_config_path": str(primary_preview.get("live_webrtc_config_path") or ""),
+            "previews": preview_payloads,
             "newer_hap_available": False,
         },
         "follow_up": empty_follow_up,
@@ -2145,18 +3198,11 @@ def build_progress_payload(record: RunRecord) -> dict[str, Any]:
         seen.add(key)
         deduped.append(item)
 
-    # Runtime capture produces preview media. The tmux runner's UI QA state is
-    # the source of truth for the HPack signing gate.
-    capture_status = effective_capture_status(record, capture_manifest)
-
     hap_path = find_latest_hap(workspace, record.created_at)
-    # Follow-up may rebuild the HAP after the original capture completed or failed.
-    # A newer HAP starts a fresh capture monitor and therefore refreshes the device preview.
-    if hap_path:
-        maybe_start_capture_monitor(record, hap_path)
-        record = load_run(record.run_id) or record
-    media_path = find_latest_media(record.run_id, workspace, record.created_at)
-    if media_path and file_mtime(media_path) < record.capture_hap_mtime:
+    phone_session = preview_sessions_payload(record)["phone"]
+    capture_status = str(phone_session.get("status") or "idle")
+    media_path = Path(str(phone_session.get("screenshot_path") or ""))
+    if not media_path.is_file():
         media_path = None
 
     run_status = record.status
@@ -2252,8 +3298,23 @@ def build_progress_payload(record: RunRecord) -> dict[str, Any]:
     if run_state and not stage:
         stage = run_state.get("current_stage")
 
+    phone_query = "preview=phone"
+    phone_preview = {
+        **phone_session,
+        "capture_status": phone_session["status"],
+        "media_ready": bool(phone_session.get("screenshot_path")),
+        "media_path": f"/api/runs/{record.run_id}/media?{phone_query}" if phone_session.get("screenshot_path") else "",
+        "media_source_path": str(phone_session.get("screenshot_path") or ""),
+        "media_type": "jpeg" if phone_session.get("screenshot_path") else "",
+        "live_ready": bool(phone_session.get("live_available")),
+        "live_frame_path": f"/api/runs/{record.run_id}/live/frame?{phone_query}" if phone_session.get("live_available") else "",
+        "live_input_path": f"/api/runs/{record.run_id}/live/input?{phone_query}" if phone_session.get("live_available") else "",
+        "live_webrtc_config_path": f"/api/runs/{record.run_id}/live/webrtc/config?{phone_query}" if phone_session.get("live_available") and WEBRTC_PREVIEW is not None else "",
+    }
     return {
         "run": asdict(record),
+        "preview_policy": preview_policy(record),
+        "preview_sessions": preview_sessions_api_payload(record),
         "workspace": {
             "path": str(workspace),
             "configured": workspace.is_dir(),
@@ -2318,12 +3379,11 @@ def build_progress_payload(record: RunRecord) -> dict[str, Any]:
             "media_path": f"/api/runs/{record.run_id}/media" if media_path else "",
             "media_source_path": str(media_path) if media_path else "",
             "media_type": media_path.suffix.lower().lstrip(".") if media_path else "",
-            "live_ready": capture_status == "complete",
-            "live_frame_path": f"/api/runs/{record.run_id}/live/frame" if capture_status == "complete" else "",
-            "live_input_path": f"/api/runs/{record.run_id}/live/input" if capture_status == "complete" else "",
-            "live_webrtc_config_path": f"/api/runs/{record.run_id}/live/webrtc/config"
-            if capture_status == "complete" and WEBRTC_PREVIEW is not None
-            else "",
+            "live_ready": bool(phone_session.get("live_available")),
+            "live_frame_path": phone_preview["live_frame_path"],
+            "live_input_path": phone_preview["live_input_path"],
+            "live_webrtc_config_path": phone_preview["live_webrtc_config_path"],
+            "previews": {"phone": phone_preview},
             "newer_hap_available": newer_hap,
         },
         "follow_up": follow_up,
@@ -2331,13 +3391,13 @@ def build_progress_payload(record: RunRecord) -> dict[str, Any]:
         "ui": {
             "poll_interval_ms": DEFAULT_POLL_INTERVAL_MS,
             "waiting_message": (
-                "已检测到 HAP，正在安装应用并生成预览渲染。"
-                if capture_status == "running"
-                else f"预览渲染生成失败：{capture_manifest.get('error') or '请查看日志'}"
-                if capture_status == "failed" and capture_manifest
+                "已检测到 HAP，正在申请手机模拟器并安装应用。"
+                if capture_status in {"queued", "allocating", "installing", "launching"}
+                else f"手机模拟器预览失败：{phone_session.get('error') or '请稍后重试'}"
+                if capture_status == "failed"
                 else "Building"
                 if not media_path
-                else "已检测到演示媒体，右侧已切换为真实效果。"
+                else "手机模拟器预览已就绪。"
             ),
         },
     }
@@ -2399,6 +3459,7 @@ def monitor_expo_fast_run(record: RunRecord, launcher: subprocess.Popen[Any], lo
     if exit_code != 0 and not state:
         latest.status = "failed"
         latest.notes = f"Expo 启动器退出且未生成状态文件。exit_code={exit_code}, log={log_path}"
+        release_signing_slot_for_record(latest)
         save_run(latest)
         return
     save_run(latest)
@@ -2417,12 +3478,18 @@ def monitor_expo_fast_run(record: RunRecord, launcher: subprocess.Popen[Any], lo
             package_status = expo_hap_status(state, hap_result, status, bool(hap_path))
             package_error = expo_hap_package_error(hap_result, package_status, bool(hap_path))
             latest = save_run(latest)
-            sync_expo_package_status(latest, package_status, package_error)
+            latest = sync_expo_package_status(latest, package_status, package_error)
+            ensure_expo_publication(latest, can_publish=True)
+            if hap_path:
+                start_hpack_packaging(latest)
+            elif release_signing_slot_for_record(latest):
+                save_run(latest)
             return
         if status == "failed":
             latest.status = "failed"
             error = str((state or {}).get("error") or "").strip()
             latest.notes = error[:1000] or f"Expo Runtime 执行失败，日志: {log_path}"
+            release_signing_slot_for_record(latest)
             save_run(latest)
             return
         if latest.status != "running":
@@ -2431,22 +3498,25 @@ def monitor_expo_fast_run(record: RunRecord, launcher: subprocess.Popen[Any], lo
         time.sleep(1)
 
 
-def run_expo_fast_in_background(record: RunRecord) -> None:
+def run_expo_fast_in_background(record: RunRecord, *, resume: bool = False) -> None:
     workspace = Path(record.workspace)
-    command = build_expo_fast_command(record)
+    command = build_expo_fast_command(record, resume=resume)
     if EXPO_FAST_LAUNCHER is None or not EXPO_FAST_LAUNCHER.is_file():
         record.status = "failed"
         record.notes = f"Expo Fast 启动器不存在: {EXPO_FAST_LAUNCHER or '<未配置>'}"
+        release_signing_slot_for_record(record)
         save_run(record)
         return
     if not workspace.is_dir():
         record.status = "failed"
         record.notes = f"Expo 目标工作目录不存在或不是文件夹: {workspace}"
+        release_signing_slot_for_record(record)
         save_run(record)
         return
     if not record.prompt_file or not Path(record.prompt_file).is_file():
         record.status = "failed"
         record.notes = f"Expo Prompt 文件不存在: {record.prompt_file or '<未配置>'}"
+        release_signing_slot_for_record(record)
         save_run(record)
         return
 
@@ -2457,9 +3527,7 @@ def run_expo_fast_in_background(record: RunRecord) -> None:
         log_stream = log_path.open("ab")
         log_stream.write(f"$ {' '.join(command)}\n".encode("utf-8", errors="ignore"))
         log_stream.flush()
-        env = os.environ.copy()
-        if EXPO_FAST_ENV_FILE is not None:
-            env["EXPO_FAST_ENV_FILE"] = str(EXPO_FAST_ENV_FILE)
+        env = build_expo_fast_env(record)
         process = subprocess.Popen(
             command,
             cwd=str(EXPO_FAST_ROOT or APP_ROOT),
@@ -2474,6 +3542,7 @@ def run_expo_fast_in_background(record: RunRecord) -> None:
             log_stream.close()
         record.status = "failed"
         record.notes = f"Expo Runtime 启动失败: {exc}"
+        release_signing_slot_for_record(record)
         save_run(record)
         return
 
@@ -2486,6 +3555,18 @@ def run_expo_fast_in_background(record: RunRecord) -> None:
         args=(record, process, log_path),
         daemon=True,
     ).start()
+
+
+EXPO_PREVIEW_RETRY_LOCK = threading.Lock()
+EXPO_PREVIEW_RETRIES_IN_FLIGHT: set[str] = set()
+
+
+def run_expo_preview_retry(record: RunRecord) -> None:
+    try:
+        run_expo_fast_in_background(record, resume=True)
+    finally:
+        with EXPO_PREVIEW_RETRY_LOCK:
+            EXPO_PREVIEW_RETRIES_IN_FLIGHT.discard(record.run_id)
 
 
 def lookup_context_value(context: dict[str, Any], key: str) -> Any:
@@ -2542,7 +3623,7 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         if re.fullmatch(r"/api/runs/[a-f0-9]+/media", path):
-            return self.handle_get_media(path.split("/")[-2], head_only=True)
+            return self.handle_get_media(path.split("/")[-2], head_only=True, query=parse_qs(parsed.query))
         if re.fullmatch(r"/api/runs/[a-f0-9]+/thumbnail", path):
             return self.handle_get_thumbnail(path.split("/")[-2], head_only=True)
         if re.fullmatch(r"/api/runs/[a-f0-9]+/hap", path):
@@ -2607,19 +3688,21 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             return self.handle_detail(path.rsplit("/", 1)[-1])
         if re.fullmatch(r"/api/runs/[a-f0-9]+", path):
             return self.handle_get_run(path.rsplit("/", 1)[-1])
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/previews", path):
+            return self.handle_get_previews(path.split("/")[3])
         if re.fullmatch(r"/api/runs/[a-f0-9]+/questions", path):
             return self.handle_get_run_questions(path.split("/")[-2])
         if re.fullmatch(r"/api/runs/[a-f0-9]+/events", path):
             return self.handle_run_events(path.split("/")[-2])
         if re.fullmatch(r"/api/runs/[a-f0-9]+/media", path):
-            return self.handle_get_media(path.split("/")[-2])
+            return self.handle_get_media(path.split("/")[-2], query=parse_qs(parsed.query))
         if re.fullmatch(r"/api/runs/[a-f0-9]+/live/frame", path):
             return self.handle_get_live_frame(
                 path.split("/")[-3],
                 query=parse_qs(parsed.query),
             )
         if re.fullmatch(r"/api/runs/[a-f0-9]+/live/webrtc/config", path):
-            return self.handle_get_live_webrtc_config(path.split("/")[3])
+            return self.handle_get_live_webrtc_config(path.split("/")[3], query=parse_qs(parsed.query))
         if re.fullmatch(r"/api/runs/[a-f0-9]+/thumbnail", path):
             return self.handle_get_thumbnail(path.split("/")[-2])
         if re.fullmatch(r"/api/runs/[a-f0-9]+/hap", path):
@@ -2654,10 +3737,21 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             return self.handle_package_run(parsed.path.split("/")[3])
         if re.fullmatch(r"/api/runs/[a-f0-9]+/expo-serve", parsed.path):
             return self.handle_publish_expo_run(parsed.path.split("/")[3])
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/preview/retry", parsed.path):
+            return self.handle_retry_expo_preview(parsed.path.split("/")[3])
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/previews/(desktop|phone)/start", parsed.path):
+            parts = parsed.path.split("/")
+            return self.handle_start_preview(parts[3], parts[5])
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/previews/(desktop|phone)/release", parsed.path):
+            parts = parsed.path.split("/")
+            return self.handle_release_preview(parts[3], parts[5])
+        if re.fullmatch(r"/api/runs/[a-f0-9]+/previews/(desktop|phone)/heartbeat", parsed.path):
+            parts = parsed.path.split("/")
+            return self.handle_preview_heartbeat(parts[3], parts[5])
         if re.fullmatch(r"/api/runs/[a-f0-9]+/live/input", parsed.path):
-            return self.handle_live_input(parsed.path.split("/")[3])
+            return self.handle_live_input(parsed.path.split("/")[3], query=parse_qs(parsed.query))
         if re.fullmatch(r"/api/runs/[a-f0-9]+/live/webrtc/offer", parsed.path):
-            return self.handle_live_webrtc_offer(parsed.path.split("/")[3])
+            return self.handle_live_webrtc_offer(parsed.path.split("/")[3], query=parse_qs(parsed.query))
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
     def do_PATCH(self) -> None:
@@ -2997,7 +4091,13 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             )
             return
 
-        pool = get_signing_pool() if runtime == "arkpilot" else None
+        pool = get_signing_pool() if runtime == "arkpilot" or (runtime == "expo" and HPACK_ENABLED) else None
+        if runtime == "expo" and HPACK_ENABLED and pool is None:
+            self.send_json(
+                {"error": "Expo 手机安装需要可用的 Profile 池，请检查 HP_PROFILE_POOL_CONFIG。"},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
         if pool:
             pool.cleanup_stale()
 
@@ -3027,24 +4127,13 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             project_name = f"remote-ui-{run_id}"
             workspace = (EXPO_FAST_APP_ROOT / project_name).resolve()
             prompt_path = (EXPO_FAST_APP_ROOT / ".expo-fast-inputs" / f"{project_name}.md").resolve()
-            try:
-                EXPO_FAST_APP_ROOT.mkdir(parents=True, exist_ok=True)
-                workspace.mkdir(parents=False, exist_ok=False)
-                prompt_path.parent.mkdir(parents=True, exist_ok=True)
-                prompt_path.write_text(f"{prompt}\n", encoding="utf-8")
-            except FileExistsError:
-                self.send_json({"error": f"Expo 目标目录已存在: {workspace}"}, status=HTTPStatus.CONFLICT)
-                return
-            except OSError as exc:
-                self.send_json({"error": f"创建 Expo 工作目录或 Prompt 失败: {exc}"}, status=HTTPStatus.BAD_REQUEST)
-                return
             session_name = f"expo-fast-{project_name[:32]}"
             variant = "expo-fast"
             plan_skill = ""
             interactive_questions = False
             prompt_file = str(prompt_path)
 
-        if runtime == "arkpilot" and pool:
+        if pool:
             signing_slot = pool.acquire(run_id, session_name)
             if not signing_slot:
                 status = profile_pool_status_payload()
@@ -3057,10 +4146,32 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
                     status=HTTPStatus.SERVICE_UNAVAILABLE,
                 )
                 return
-            if PROFILE_POOL_ISOLATE_WORKSPACE:
+            if runtime == "arkpilot" and PROFILE_POOL_ISOLATE_WORKSPACE:
                 workspace = (TARGET_WORKSPACE / run_id).resolve()
-            else:
+            elif runtime == "arkpilot":
                 workspace = (TARGET_WORKSPACE / "current").resolve()
+
+        if runtime == "expo":
+            try:
+                EXPO_FAST_APP_ROOT.mkdir(parents=True, exist_ok=True)
+                workspace.mkdir(parents=False, exist_ok=False)
+                prompt_path.parent.mkdir(parents=True, exist_ok=True)
+                prompt_path.write_text(f"{prompt}\n", encoding="utf-8")
+            except FileExistsError:
+                if pool and signing_slot:
+                    pool.release(run_id)
+                self.send_json({"error": f"Expo 目标目录已存在: {workspace}"}, status=HTTPStatus.CONFLICT)
+                return
+            except OSError as exc:
+                if pool and signing_slot:
+                    pool.release(run_id)
+                try:
+                    prompt_path.unlink(missing_ok=True)
+                    workspace.rmdir()
+                except OSError:
+                    pass
+                self.send_json({"error": f"创建 Expo 工作目录或 Prompt 失败: {exc}"}, status=HTTPStatus.BAD_REQUEST)
+                return
 
         if runtime == "arkpilot":
             target_root = TARGET_WORKSPACE.expanduser().resolve()
@@ -3104,6 +4215,7 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             status="queued",
             runtime=runtime,
             prompt_file=prompt_file,
+            preview_targets={},
         )
         if signing_slot:
             try:
@@ -3117,9 +4229,9 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             threading.Thread(target=run_expo_fast_in_background, args=(record,), daemon=True).start()
         else:
             threading.Thread(target=run_tmux_in_background, args=(record,), daemon=True).start()
-            maybe_start_capture_monitor(record)
-            # 首版本等待 QA 与预览稳定后自动签名；后续调整仍由按钮手动更新。
+            # 首版本等待 QA 与手机 HAP 预览稳定后自动签名；后续调整仍由按钮手动更新。
             start_initial_package_monitor(record)
+            start_phone_preview_monitor(record)
         response: dict[str, Any] = {
             "run_id": run_id,
             "detail_url": f"/runs/{run_id}",
@@ -3273,6 +4385,16 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
                     "media_type": media_type,
                     "has_thumbnail": bool(screenshot_path),
                     "thumbnail_url": f"/api/runs/{record.run_id}/thumbnail" if screenshot_path else "",
+                    "default_preview_kind": preview_policy(record)["default_kind"],
+                    "preview_summary": {
+                        kind: {
+                            "status": session.get("status", "idle"),
+                            "transport": session.get("transport", ""),
+                            "has_screenshot": bool(session.get("screenshot_path")),
+                            "live_available": bool(session.get("live_available")),
+                        }
+                        for kind, session in preview_sessions_payload(record).items()
+                    },
                 }
             )
 
@@ -3291,6 +4413,129 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND, "Run not found")
             return
         self.send_json(latest)
+
+    def handle_get_previews(self, run_id: str) -> None:
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        self.send_json({
+            "run_id": run_id,
+            "policy": preview_policy(record),
+            "previews": preview_sessions_api_payload(record),
+        })
+
+    def handle_start_preview(self, run_id: str, kind: str) -> None:
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        config = preview_policy(record)["previews"].get(kind)
+        if not config:
+            self.send_json({"ok": False, "error": "当前模式不支持该预览类型。"}, status=HTTPStatus.CONFLICT)
+            return
+        try:
+            preempted_run_ids = preempt_owner_preview_leases(record, kind)
+            mark_preview_viewer(record.run_id, kind, visible=True)
+            if kind == "phone" and config.get("transport") == "hap_install":
+                record, accepted = start_phone_preview(record)
+            elif kind == "desktop" and config.get("transport") == "bundle_shell":
+                record, accepted = start_desktop_preview(record)
+            else:
+                raise LivePreviewError("当前预览类型的启动方式无效。")
+        except LivePreviewError as exc:
+            clear_preview_viewer(record.run_id, kind)
+            self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        self.send_json(
+            {
+                "ok": True,
+                "accepted": accepted,
+                "run_id": record.run_id,
+                "status": str(preview_sessions_payload(record)[kind].get("status") or "idle"),
+                "preview": preview_sessions_api_payload(record)[kind],
+                "preempted_run_ids": preempted_run_ids,
+            },
+            status=HTTPStatus.ACCEPTED if accepted else HTTPStatus.OK,
+        )
+
+    def handle_release_preview(self, run_id: str, kind: str) -> None:
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        if kind not in preview_policy(record)["previews"]:
+            self.send_json({"ok": False, "error": "当前模式不支持该预览类型。"}, status=HTTPStatus.CONFLICT)
+            return
+        record = release_preview_lease(record, kind)
+        self.send_json(
+            {
+                "ok": True,
+                "released": True,
+                "run_id": record.run_id,
+                "preview": preview_sessions_api_payload(record)[kind],
+            }
+        )
+
+    def handle_preview_heartbeat(self, run_id: str, kind: str) -> None:
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        if kind not in preview_policy(record)["previews"]:
+            self.send_json({"ok": False, "error": "当前模式不支持该预览类型。"}, status=HTTPStatus.CONFLICT)
+            return
+        payload = self.read_body_json()
+        visible = payload.get("visible") is True
+        session = preview_sessions_payload(record).get(kind, {})
+        if str(session.get("status") or "") not in {
+            "queued", "allocating", "installing", "loading_bundle", "launching", "ready"
+        }:
+            clear_preview_viewer(record.run_id, kind)
+            self.send_json({"ok": True, "run_id": run_id, "kind": kind, "visible": False})
+            return
+        mark_preview_viewer(record.run_id, kind, visible=visible)
+        self.send_json({"ok": True, "run_id": run_id, "kind": kind, "visible": visible})
+
+    def handle_retry_expo_preview(self, run_id: str) -> None:
+        record = self.load_accessible_run(run_id)
+        if not record:
+            return
+        if record.runtime != "expo":
+            self.send_json(
+                {"ok": False, "error": "只有 Expo Runtime 任务可以重新执行设备预览。"},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        with EXPO_PREVIEW_RETRY_LOCK:
+            if run_id in EXPO_PREVIEW_RETRIES_IN_FLIGHT or process_alive(record.process_pid):
+                self.send_json(
+                    {"ok": False, "error": "Expo 任务仍在运行或等待设备。"},
+                    status=HTTPStatus.CONFLICT,
+                )
+                return
+            EXPO_PREVIEW_RETRIES_IN_FLIGHT.add(run_id)
+        workspace = Path(record.workspace)
+        export_root = workspace / "dist" / "harmony-go"
+        if not (workspace / ".expo-fast" / "manifest.json").is_file() or not (
+            export_root / ".expo-harmony-go-export"
+        ).is_file():
+            with EXPO_PREVIEW_RETRY_LOCK:
+                EXPO_PREVIEW_RETRIES_IN_FLIGHT.discard(run_id)
+            self.send_json(
+                {"ok": False, "error": "当前任务还没有可重新预览的 Harmony Go 导出产物。"},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        record.status = "running"
+        record.notes = "已提交设备预览重试，正在重新校验产物并等待空闲模拟器。"
+        record.process_pid = None
+        record = save_run(record)
+        threading.Thread(
+            target=run_expo_preview_retry,
+            args=(record,),
+            daemon=True,
+        ).start()
+        self.send_json(
+            {"ok": True, "accepted": True, "run_id": record.run_id, "status": "preview_queued"},
+            status=HTTPStatus.ACCEPTED,
+        )
 
     def handle_publish_expo_run(self, run_id: str) -> None:
         record = self.load_accessible_run(run_id)
@@ -3359,20 +4604,37 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             return
         if record.runtime == "expo":
             progress = build_expo_progress_payload(record)
-            package = (progress.get("expo") or {}).get("package") or {}
-            status = str(package.get("status") or "waiting_generation")
-            response = {
-                "ok": status == "ready",
-                "accepted": False,
-                "status": status,
-                "error": str(package.get("error") or ""),
-            }
-            if status == "ready":
-                self.send_json(response)
-            elif status in {"building", "waiting_generation"}:
-                self.send_json(response, status=HTTPStatus.ACCEPTED)
-            else:
-                self.send_json(response, status=HTTPStatus.CONFLICT)
+            artifacts = progress.get("artifacts") if isinstance(progress.get("artifacts"), dict) else {}
+            if artifacts.get("package_current"):
+                self.send_json({"ok": True, "accepted": False, "status": "ready"})
+                return
+            if not artifacts.get("package_can_start"):
+                status = str(artifacts.get("distribution_status") or "waiting_hap")
+                message = {
+                    "packaging": "手机安装包正在签名，请勿重复提交。",
+                    "waiting_hap": "Expo unsigned HAP 尚未生成。",
+                    "failed": str(artifacts.get("distribution_error") or "手机安装包生成失败。"),
+                    "disabled": "当前环境未启用 HPack。",
+                }.get(status, "当前状态暂不能生成手机安装包。")
+                self.send_json(
+                    {"ok": False, "error": message, "code": "package_not_ready"},
+                    status=HTTPStatus.CONFLICT,
+                )
+                return
+            started = start_hpack_packaging(
+                load_run(run_id) or record,
+                replace_manifest=hpack_manifest_path(run_id).is_file(),
+            )
+            if not started:
+                self.send_json(
+                    {"ok": False, "error": "手机安装包任务已在运行或暂时无法启动。", "code": "package_busy"},
+                    status=HTTPStatus.CONFLICT,
+                )
+                return
+            self.send_json(
+                {"ok": True, "accepted": True, "status": "packaging"},
+                status=HTTPStatus.ACCEPTED,
+            )
             return
         progress = build_progress_payload(record)
         artifacts = progress.get("artifacts") if isinstance(progress.get("artifacts"), dict) else {}
@@ -3619,11 +4881,26 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
                     if not write_heartbeat():
                         break
 
-    def handle_get_media(self, run_id: str, *, head_only: bool = False) -> None:
+    def handle_get_media(
+        self,
+        run_id: str,
+        *,
+        head_only: bool = False,
+        query: dict[str, list[str]] | None = None,
+    ) -> None:
         record = self.load_accessible_run(run_id)
         if not record:
             return
-        media_path = find_latest_media(record.run_id, Path(record.workspace))
+        preview_kind = normalize_preview_kind(record, ((query or {}).get("preview") or [""])[0])
+        session = preview_sessions_payload(record).get(preview_kind, {})
+        session_media = Path(str(session.get("screenshot_path") or ""))
+        media_path = (
+            session_media
+            if session_media.is_file()
+            else expo_preview_media_path(Path(record.workspace), preview_kind)
+            if record.runtime == "expo" and preview_kind
+            else find_latest_media(record.run_id, Path(record.workspace))
+        )
         if not media_path:
             self.send_error(HTTPStatus.NOT_FOUND, "Media not found")
             return
@@ -3632,7 +4909,11 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         else:
             self.send_file(media_path)
 
-    def live_preview_is_available(self, record: RunRecord) -> bool:
+    def live_preview_is_available(self, record: RunRecord, preview_kind: str = "") -> bool:
+        kind = preview_kind or normalize_preview_kind(record)
+        session = preview_sessions_payload(record).get(kind, {})
+        if record.runtime == "expo":
+            return bool(session.get("status") == "ready" and session.get("live_available"))
         return effective_capture_status(record) == "complete"
 
     def handle_get_live_frame(
@@ -3644,10 +4925,11 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         record = self.load_accessible_run(run_id)
         if not record:
             return
-        if not self.live_preview_is_available(record):
+        query = query or {}
+        preview_kind = normalize_preview_kind(record, (query.get("preview") or [""])[0])
+        if not self.live_preview_is_available(record, preview_kind):
             self.send_json({"error": "实时预览将在真机运行验证完成后可用。"}, status=HTTPStatus.CONFLICT)
             return
-        query = query or {}
         try:
             after_sequence = max(0, int((query.get("after") or ["0"])[0]))
             wait_ms = max(0, min(int((query.get("wait_ms") or ["0"])[0]), 1500))
@@ -3655,8 +4937,9 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "帧序号或等待时间无效。"}, status=HTTPStatus.BAD_REQUEST)
             return
         try:
+            session_id = bind_live_preview_target(record, preview_kind)
             frame = LIVE_PREVIEW.wait_for_frame(
-                record.run_id,
+                session_id,
                 after_sequence=after_sequence,
                 timeout_sec=wait_ms / 1000,
             )
@@ -3709,18 +4992,25 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             }
         )
 
-    def handle_live_input(self, run_id: str) -> None:
+    def handle_live_input(
+        self,
+        run_id: str,
+        *,
+        query: dict[str, list[str]] | None = None,
+    ) -> None:
         request_started_at = time.monotonic()
         record = self.load_accessible_run(run_id)
         if not record:
             return
-        if not self.live_preview_is_available(record):
+        preview_kind = normalize_preview_kind(record, ((query or {}).get("preview") or [""])[0])
+        if not self.live_preview_is_available(record, preview_kind):
             self.send_json({"error": "实时预览将在真机运行验证完成后可用。"}, status=HTTPStatus.CONFLICT)
             return
         payload = self.read_body_json()
         action = str(payload.get("type") or "unknown")[:24]
         try:
-            frame = LIVE_PREVIEW.submit_input(record.run_id, payload)
+            session_id = bind_live_preview_target(record, preview_kind)
+            frame = LIVE_PREVIEW.submit_input(session_id, payload)
         except LiveInputValidationError as exc:
             self.log_live_input(
                 run_id=run_id,
@@ -3769,11 +5059,17 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             headers={"Server-Timing": preview_server_timing(frame.timings)},
         )
 
-    def handle_get_live_webrtc_config(self, run_id: str) -> None:
+    def handle_get_live_webrtc_config(
+        self,
+        run_id: str,
+        *,
+        query: dict[str, list[str]] | None = None,
+    ) -> None:
         record = self.load_accessible_run(run_id)
         if not record:
             return
-        if not self.live_preview_is_available(record):
+        preview_kind = normalize_preview_kind(record, ((query or {}).get("preview") or [""])[0])
+        if not self.live_preview_is_available(record, preview_kind):
             self.send_json({"error": "实时预览尚未可用。"}, status=HTTPStatus.CONFLICT)
             return
         if WEBRTC_PREVIEW is None:
@@ -3782,19 +5078,27 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
                 status=HTTPStatus.SERVICE_UNAVAILABLE,
             )
             return
+        bind_live_preview_target(record, preview_kind)
+        query_suffix = f"?preview={preview_kind}" if len(preview_targets_for_record(record)) > 1 else ""
         self.send_json(
             {
                 **WEBRTC_PREVIEW.config_payload(),
-                "offer_path": f"/api/runs/{run_id}/live/webrtc/offer",
+                "offer_path": f"/api/runs/{run_id}/live/webrtc/offer{query_suffix}",
             }
         )
 
-    def handle_live_webrtc_offer(self, run_id: str) -> None:
+    def handle_live_webrtc_offer(
+        self,
+        run_id: str,
+        *,
+        query: dict[str, list[str]] | None = None,
+    ) -> None:
         request_started_at = time.monotonic()
         record = self.load_accessible_run(run_id)
         if not record:
             return
-        if not self.live_preview_is_available(record):
+        preview_kind = normalize_preview_kind(record, ((query or {}).get("preview") or [""])[0])
+        if not self.live_preview_is_available(record, preview_kind):
             self.send_json({"error": "实时预览尚未可用。"}, status=HTTPStatus.CONFLICT)
             return
         if WEBRTC_PREVIEW is None:
@@ -3805,8 +5109,9 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             return
         payload = self.read_body_json()
         try:
+            session_id = bind_live_preview_target(record, preview_kind)
             answer = WEBRTC_PREVIEW.create_answer(
-                run_id=record.run_id,
+                run_id=session_id,
                 sdp=str(payload.get("sdp") or ""),
                 description_type=str(payload.get("type") or ""),
                 signaling_id=str(payload.get("signaling_id") or ""),
@@ -3874,7 +5179,12 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         record = self.load_accessible_run(run_id)
         if not record:
             return
-        hap_path = find_latest_hap(Path(record.workspace))
+        workspace = Path(record.workspace)
+        hap_path = (
+            resolve_expo_hap_artifact(workspace)
+            if record.runtime == "expo"
+            else find_latest_hap(workspace)
+        )
         if not hap_path:
             self.send_error(HTTPStatus.NOT_FOUND, "HAP not found")
             return

@@ -7,6 +7,7 @@ import threading
 import unittest
 from pathlib import Path
 from typing import Optional
+from unittest.mock import patch
 from urllib.parse import urlparse
 
 from scan_install.expo_gateway import ExpoPublicGateway
@@ -30,6 +31,7 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         self.original_expo_launcher = remote_ui_app.EXPO_FAST_LAUNCHER
         self.original_expo_app_root = remote_ui_app.EXPO_FAST_APP_ROOT
         self.original_run_expo = remote_ui_app.run_expo_fast_in_background
+        self.original_get_signing_pool = remote_ui_app.get_signing_pool
         self.original_trace_cache = dict(remote_ui_app.EXPO_TRACE_CACHE)
 
         remote_ui_app.RUNS_DIR = root / "runs"
@@ -39,12 +41,39 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         remote_ui_app.EXPO_FAST_LAUNCHER = remote_ui_app.EXPO_FAST_ROOT / "start-livetest.sh"
         remote_ui_app.EXPO_FAST_LAUNCHER.write_text("#!/bin/sh\n", encoding="utf-8")
         remote_ui_app.EXPO_FAST_APP_ROOT = root / "apps"
+        # HTTP tests must never acquire leases from the repository's real Profile pool.
+        class FakeSlot:
+            id = "test-slot"
+            cert = root / "test.cer"
+            profile = root / "test.p7b"
+            keystore = root / "test.p12"
+            alias = "test-alias"
+
+            @staticmethod
+            def resolved_bundle_name() -> str:
+                return "com.example.test.slot"
+
+        class FakePool:
+            def cleanup_stale(self) -> None:
+                return None
+
+            def acquire(self, _run_id: str, _session_name: str):
+                return FakeSlot()
+
+            def release(self, _run_id: str) -> bool:
+                return True
+
+        self.fake_signing_pool = FakePool()
+        remote_ui_app.get_signing_pool = lambda: self.fake_signing_pool
         remote_ui_app.EXPO_TRACE_CACHE.clear()
         self.started: list[str] = []
+        self.resumed: list[str] = []
         self.start_event = threading.Event()
 
-        def fake_start(record) -> None:
+        def fake_start(record, *, resume: bool = False) -> None:
             self.started.append(record.run_id)
+            if resume:
+                self.resumed.append(record.run_id)
             self.start_event.set()
 
         remote_ui_app.run_expo_fast_in_background = fake_start
@@ -61,6 +90,7 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         remote_ui_app.EXPO_FAST_LAUNCHER = self.original_expo_launcher
         remote_ui_app.EXPO_FAST_APP_ROOT = self.original_expo_app_root
         remote_ui_app.run_expo_fast_in_background = self.original_run_expo
+        remote_ui_app.get_signing_pool = self.original_get_signing_pool
         remote_ui_app.EXPO_TRACE_CACHE.clear()
         remote_ui_app.EXPO_TRACE_CACHE.update(self.original_trace_cache)
         self.temp_dir.cleanup()
@@ -114,8 +144,68 @@ class ExpoFastRuntimeTests(unittest.TestCase):
                 record.prompt_file,
                 "--session",
                 record.session_name,
+                "--hap",
+                "true",
             ],
         )
+        self.assertEqual(
+            remote_ui_app.build_expo_fast_command(record, resume=True)[-1],
+            "--resume",
+        )
+
+    def test_expo_process_env_uses_the_leased_profile_bundle(self) -> None:
+        now = remote_ui_app.to_iso()
+        record = remote_ui_app.RunRecord(
+            run_id="b" * 32,
+            session_name="expo-fast-signed",
+            prompt="签名 bundle 测试",
+            workspace=str(remote_ui_app.EXPO_FAST_APP_ROOT / "signed"),
+            variant="expo-fast",
+            created_at=now,
+            updated_at=now,
+            runtime="expo",
+            signing_bundle_name="com.example.profile.slot06",
+        )
+
+        env = remote_ui_app.build_expo_fast_env(record)
+
+        self.assertEqual(env["EXPO_FAST_BUNDLE_IDENTIFIER"], "com.example.profile.slot06")
+
+    def test_failed_preview_can_resume_without_regenerating_project(self) -> None:
+        status, headers, payload = self.request(
+            "POST",
+            "/api/runs",
+            body={"prompt": "预览重试测试", "runtime": "expo"},
+        )
+        self.assertEqual(status, 201)
+        self.assertTrue(self.start_event.wait(timeout=1))
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        run_id = payload["run_id"]
+        record = remote_ui_app.load_run(run_id)
+        self.assertIsNotNone(record)
+        assert record is not None
+        workspace = Path(record.workspace)
+        state_dir = workspace / ".expo-fast"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        write_harmony_go_export(workspace)
+        record.status = "failed"
+        record.process_pid = None
+        remote_ui_app.save_run(record)
+        self.start_event.clear()
+
+        status, _, retry_payload = self.request(
+            "POST",
+            f"/api/runs/{run_id}/preview/retry",
+            body={},
+            cookie=cookie,
+        )
+
+        self.assertEqual(status, 202)
+        self.assertTrue(retry_payload["accepted"])
+        self.assertEqual(retry_payload["status"], "preview_queued")
+        self.assertTrue(self.start_event.wait(timeout=1))
+        self.assertEqual(self.resumed, [run_id])
 
     def test_completed_state_maps_to_unsigned_hap_and_launch_preview(self) -> None:
         workspace = remote_ui_app.EXPO_FAST_APP_ROOT / "completed-app"
@@ -203,21 +293,29 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         )
         remote_ui_app.save_run(record)
 
-        payload = remote_ui_app.build_progress_payload(record)
+        with patch.object(remote_ui_app, "start_hpack_packaging") as start_packaging:
+            payload = remote_ui_app.build_progress_payload(record)
+
+        start_packaging.assert_called_once()
+        self.assertEqual(start_packaging.call_args.args[0].run_id, record.run_id)
 
         self.assertEqual(payload["runtime"], "expo")
         self.assertEqual(payload["status"], "completed")
         self.assertEqual(payload["stage"], "done")
         self.assertEqual(payload["expo"]["package"]["status"], "ready")
         self.assertEqual(payload["expo"]["package"]["slot_id"], "slot-01")
-        self.assertEqual(payload["artifacts"]["distribution_status"], "ready_unsigned")
+        self.assertEqual(payload["artifacts"]["distribution_status"], "waiting_hap")
+        self.assertTrue(payload["artifacts"]["package_can_start"])
         self.assertTrue(payload["artifacts"]["hap_found"])
         self.assertEqual(payload["artifacts"]["hap_path"], str(hap_path.resolve()))
         self.assertEqual(
             payload["artifacts"]["hap_download_path"],
             "/api/runs/e6f6a000000000000000000000000006/hap",
         )
-        self.assertEqual(payload["artifacts"]["hap_qr_path"], "")
+        self.assertEqual(
+            payload["artifacts"]["hap_qr_path"],
+            "/api/runs/e6f6a000000000000000000000000006/hap-qr",
+        )
         self.assertTrue(payload["artifacts"]["media_ready"])
         self.assertEqual(
             payload["artifacts"]["media_path"],
@@ -394,7 +492,7 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         self.assertEqual(grouped[1]["action_count"], 1)
         self.assertEqual(grouped[1]["message_count"], 1)
 
-    def test_expo_package_endpoint_reports_automatic_hap_progress(self) -> None:
+    def test_expo_package_endpoint_rejects_before_hap_is_ready(self) -> None:
         status, headers, payload = self.request(
             "POST",
             "/api/runs",
@@ -411,9 +509,8 @@ class ExpoFastRuntimeTests(unittest.TestCase):
             cookie=cookie,
         )
 
-        self.assertEqual(status, 202)
-        self.assertFalse(package_payload["accepted"])
-        self.assertEqual(package_payload["status"], "waiting_generation")
+        self.assertEqual(status, 409)
+        self.assertEqual(package_payload["code"], "package_not_ready")
 
     def test_completed_expo_run_can_publish_and_revoke_gateway_preview(self) -> None:
         status, headers, payload = self.request(
@@ -456,14 +553,23 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         self.assertTrue(gateway.start())
         remote_ui_app.EXPO_PUBLIC_GATEWAY = gateway
         try:
+            status, _, automatic = self.request("GET", f"/api/runs/{record.run_id}", cookie=cookie)
+            self.assertEqual(status, 200)
+            self.assertEqual(automatic["expo"]["serve"]["status"], "serving")
+            self.assertTrue(
+                automatic["expo"]["serve"]["public_url"].startswith(
+                    "https://devkit.yorha2b.cc/p/"
+                )
+            )
+
             status, _, published = self.request(
                 "POST",
                 f"/api/runs/{record.run_id}/expo-serve",
                 body={},
                 cookie=cookie,
             )
-            self.assertEqual(status, 201)
-            self.assertTrue(published["accepted"])
+            self.assertEqual(status, 200)
+            self.assertFalse(published["accepted"])
             self.assertEqual(published["serve"]["status"], "serving")
             self.assertTrue(published["serve"]["public_url"].startswith("https://devkit.yorha2b.cc/p/"))
 

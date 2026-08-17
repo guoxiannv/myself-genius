@@ -1,8 +1,13 @@
 import importlib.util
+import json
+import shutil
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "hpack_packager.py"
@@ -66,6 +71,159 @@ def profile_text(cert: str) -> str:
 
 
 class HPackPackagerSigningTests(unittest.TestCase):
+    def test_reads_expo_prebuilt_hap_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            hap_path = Path(temp_dir) / "expo-app.hap"
+            with zipfile.ZipFile(hap_path, "w") as archive:
+                archive.writestr(
+                    "pack.info",
+                    json.dumps(
+                        {
+                            "summary": {
+                                "app": {
+                                    "bundleName": "com.example.expo",
+                                    "version": {"code": 8, "name": "1.2.3"},
+                                },
+                                "modules": [
+                                    {"apiVersion": {"compatible": 21, "target": 22}}
+                                ],
+                            }
+                        }
+                    ),
+                )
+                archive.writestr(
+                    "module.json",
+                    json.dumps({
+                        "app": {
+                            "debug": False,
+                            "buildMode": "release",
+                            "minAPIVersion": 60001021,
+                            "targetAPIVersion": 60002022,
+                        },
+                        "module": {"deviceTypes": ["phone"]},
+                    }),
+                )
+
+            metadata = hpack_packager.read_hap_metadata(hap_path)
+
+            self.assertEqual(metadata["bundle_name"], "com.example.expo")
+            self.assertEqual(metadata["version_code"], 8)
+            self.assertEqual(metadata["version_name"], "1.2.3")
+            self.assertEqual(metadata["compatible_sdk"], 21)
+            self.assertEqual(metadata["target_sdk"], 22)
+            self.assertEqual(metadata["manifest_min_api"], "6.0.1(21)")
+            self.assertEqual(metadata["manifest_target_api"], "6.0.2(22)")
+            self.assertFalse(metadata["debug"])
+            self.assertEqual(metadata["build_mode"], "release")
+            self.assertEqual(metadata["device_types"], ["phone"])
+
+    def test_rejects_debug_expo_hap_for_phone_distribution(self) -> None:
+        with self.assertRaisesRegex(hpack_packager.PackagerError, "必须使用 release 构建"):
+            hpack_packager.ensure_release_hap({"debug": True, "build_mode": "debug"})
+
+    def test_rejects_hap_without_phone_device_type(self) -> None:
+        with self.assertRaisesRegex(hpack_packager.PackagerError, "必须支持 phone"):
+            hpack_packager.ensure_phone_hap({"device_types": ["2in1"]})
+
+    def test_normalizes_pro_workspace_to_phone_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module_path = Path(temp_dir) / "entry" / "src" / "main" / "module.json5"
+            module_path.parent.mkdir(parents=True)
+            module_path.write_text(
+                '{\n  "module": {\n    "deviceTypes": [\n      "phone",\n      "tablet",\n      "2in1"\n    ]\n  }\n}\n',
+                encoding="utf-8",
+            )
+
+            hpack_packager.normalize_workspace_for_phone_distribution(Path(temp_dir))
+
+            normalized = module_path.read_text(encoding="utf-8")
+            self.assertIn('"deviceTypes": [\n      "phone"\n    ]', normalized)
+            self.assertNotIn('"2in1"', normalized)
+
+    def test_packages_prebuilt_expo_hap_into_install_distribution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            static_root = root / "static"
+            unsigned_hap = root / "expo-unsigned.hap"
+            unsigned_hap.write_bytes(b"unsigned-hap")
+            cert = root / "release.cer"
+            profile = root / "release.p7b"
+            keystore = root / "release.p12"
+            for signing_file in (cert, profile, keystore):
+                signing_file.write_bytes(b"test")
+            args = SimpleNamespace(
+                static_root=str(static_root),
+                base_url="https://downloads.example.com/static/hpack",
+                deploy_domain="downloads.example.com",
+                app_name="Expo Test",
+                run_id="a" * 32,
+                output=str(root / "result" / "hpack-result.json"),
+                java_home="/fake/java",
+                hpack_bin="hpack",
+                alias="test-alias",
+                key_pwd="test-key-password",
+                keystore_pwd="test-store-password",
+                check_urls=False,
+            )
+            metadata = {
+                "bundle_name": "com.example.expo",
+                "version_code": 8,
+                "version_name": "1.2.3",
+                "compatible_sdk": 21,
+                "target_sdk": 22,
+                "manifest_min_api": "6.0.1(21)",
+                "manifest_target_api": "6.0.2(22)",
+                "debug": False,
+                "build_mode": "release",
+                "device_types": ["phone"],
+            }
+
+            def fake_run(command, cwd, _env, _secrets):
+                if command[:2] == ["hpack", "sign"]:
+                    source = Path(command[2])
+                    shutil.copy2(source, source.with_name(f"hpack-signed-{source.name}"))
+                elif "-operation" in command and command[command.index("-operation") + 1] == "sign":
+                    source = Path(command[command.index("-inputFile") + 1])
+                    output = Path(command[command.index("-outputFile") + 1])
+                    shutil.copy2(source, output)
+
+            def fake_icon(_workspace, destination):
+                icon = destination / "assets" / "AppIcon.png"
+                icon.parent.mkdir(parents=True, exist_ok=True)
+                icon.write_bytes(b"png")
+
+            def fake_manifest_sign(source, output, **_kwargs):
+                shutil.copy2(source, output)
+
+            with patch.object(hpack_packager, "run_command", side_effect=fake_run), \
+                 patch.object(hpack_packager, "ensure_app_icon", side_effect=fake_icon), \
+                 patch.object(hpack_packager, "verify_signed_hap"), \
+                 patch.object(hpack_packager, "sign_install_manifest", side_effect=fake_manifest_sign):
+                result = hpack_packager.package_prebuilt_hap(
+                    args,
+                    workspace=workspace,
+                    unsigned_hap=unsigned_hap,
+                    metadata=metadata,
+                    cert=cert,
+                    profile=profile,
+                    keystore=keystore,
+                    profile_info={"bundle_name": "com.example.expo"},
+                )
+
+            published = Path(result["published_dir"])
+            self.assertEqual(result["status"], "ready")
+            self.assertEqual(result["source"], "expo-prebuilt-hap")
+            self.assertTrue((published / "entry-default-signed.hap").is_file())
+            self.assertTrue((published / "manifest.json5").is_file())
+            self.assertTrue((published / "index.html").is_file())
+            manifest = json.loads((published / "manifest.json5").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["app"]["bundleName"], "com.example.expo")
+            self.assertEqual(manifest["app"]["minAPIVersion"], "6.0.1(21)")
+            self.assertEqual(manifest["app"]["targetAPIVersion"], "6.0.2(22)")
+            self.assertEqual(manifest["app"]["modules"][0]["deviceTypes"], ["phone"])
+
     def test_rebuild_command_targets_release_hap_for_selected_product(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
@@ -76,7 +234,23 @@ class HPackPackagerSigningTests(unittest.TestCase):
 
             def fake_run(command, cwd, env, secrets):
                 commands.append(command)
-                hap_path.write_bytes(b"fresh-hap")
+                with zipfile.ZipFile(hap_path, "w") as archive:
+                    archive.writestr(
+                        "pack.info",
+                        json.dumps({
+                            "summary": {
+                                "app": {"bundleName": "com.example.app"},
+                                "modules": [{"apiVersion": {"compatible": 22, "target": 22}}],
+                            }
+                        }),
+                    )
+                    archive.writestr(
+                        "module.json",
+                        json.dumps({
+                            "app": {"debug": False, "buildMode": "release"},
+                            "module": {"deviceTypes": ["phone"]},
+                        }),
+                    )
                 return None
 
             original_run = hpack_packager.run_command
@@ -136,6 +310,94 @@ class HPackPackagerSigningTests(unittest.TestCase):
 
             with self.assertRaisesRegex(hpack_packager.PackagerError, "不匹配"):
                 hpack_packager.ensure_profile_cert_matches(info, cert_path)
+
+    def test_keystore_identity_accepts_the_same_release_certificate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            keytool = root / "java" / "bin" / "keytool"
+            keytool.parent.mkdir(parents=True)
+            keytool.write_text("", encoding="utf-8")
+            keystore = root / "release.p12"
+            keystore.write_bytes(b"p12")
+            cert = root / "release.cer"
+            cert.write_text(CERT_A, encoding="utf-8")
+
+            def fake_run(command, _cwd, _env, _secrets):
+                output = Path(command[command.index("-file") + 1])
+                output.write_text(CERT_A, encoding="utf-8")
+                return SimpleNamespace(stdout="")
+
+            with patch.object(hpack_packager, "run_command", side_effect=fake_run), \
+                 patch.object(hpack_packager, "certificate_public_key_sha256", return_value="same-key"):
+                identity = hpack_packager.inspect_keystore_signing_identity(
+                    keystore,
+                    cert,
+                    alias="release",
+                    keystore_pwd="secret",
+                    java_home=str(root / "java"),
+                    env={},
+                )
+
+            self.assertTrue(identity["source_certificate_matches"])
+            self.assertTrue(identity["public_key_matches"])
+
+    def test_keystore_identity_allows_certificate_alignment_for_the_same_public_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            keytool = root / "java" / "bin" / "keytool"
+            keytool.parent.mkdir(parents=True)
+            keytool.write_text("", encoding="utf-8")
+            keystore = root / "release.p12"
+            keystore.write_bytes(b"p12")
+            cert = root / "release.cer"
+            cert.write_text(CERT_A, encoding="utf-8")
+
+            def fake_run(command, _cwd, _env, _secrets):
+                output = Path(command[command.index("-file") + 1])
+                output.write_text(CERT_B, encoding="utf-8")
+                return SimpleNamespace(stdout="")
+
+            with patch.object(hpack_packager, "run_command", side_effect=fake_run), \
+                 patch.object(hpack_packager, "certificate_public_key_sha256", return_value="same-key"):
+                identity = hpack_packager.inspect_keystore_signing_identity(
+                    keystore,
+                    cert,
+                    alias="release",
+                    keystore_pwd="secret",
+                    java_home=str(root / "java"),
+                    env={},
+                )
+
+            self.assertFalse(identity["source_certificate_matches"])
+            self.assertTrue(identity["public_key_matches"])
+
+    def test_keystore_identity_rejects_a_different_public_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            keytool = root / "java" / "bin" / "keytool"
+            keytool.parent.mkdir(parents=True)
+            keytool.write_text("", encoding="utf-8")
+            keystore = root / "release.p12"
+            keystore.write_bytes(b"p12")
+            cert = root / "release.cer"
+            cert.write_text(CERT_A, encoding="utf-8")
+
+            def fake_run(command, _cwd, _env, _secrets):
+                output = Path(command[command.index("-file") + 1])
+                output.write_text(CERT_B, encoding="utf-8")
+                return SimpleNamespace(stdout="")
+
+            with patch.object(hpack_packager, "run_command", side_effect=fake_run), \
+                 patch.object(hpack_packager, "certificate_public_key_sha256", side_effect=["key-b", "key-a"]):
+                with self.assertRaisesRegex(hpack_packager.PackagerError, "公钥不匹配"):
+                    hpack_packager.inspect_keystore_signing_identity(
+                        keystore,
+                        cert,
+                        alias="release",
+                        keystore_pwd="secret",
+                        java_home=str(root / "java"),
+                        env={},
+                    )
 
 
 if __name__ == "__main__":

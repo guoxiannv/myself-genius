@@ -38,6 +38,8 @@ MAX_QUEUED_INPUTS = 8
 INPUT_MIN_INTERVAL_SEC = 0.06
 PREVIEW_MAX_WIDTH = 660
 PREVIEW_JPEG_QUALITY = 75
+DESKTOP_PREVIEW_MAX_WIDTH = 3120
+DESKTOP_PREVIEW_JPEG_QUALITY = 90
 
 
 class LivePreviewError(RuntimeError):
@@ -50,6 +52,11 @@ class LiveInputValidationError(LivePreviewError):
 
 class LiveInputRateLimitError(LivePreviewError):
     """The target device already has too many queued browser inputs."""
+
+
+def _screen_is_locked_error(error: LivePreviewError) -> bool:
+    message = str(error).lower()
+    return "screen is locked" in message or "screen locked" in message or "keyguard" in message
 
 
 @dataclass(frozen=True)
@@ -78,6 +85,7 @@ class _Session:
     lock: threading.RLock
     frame_condition: threading.Condition = field(init=False)
     target: str = ""
+    preview_kind: str = ""
     remote_dir_ready: bool = False
     screen_size: tuple[int, int] | None = None
     latest_frame: Frame | None = None
@@ -242,6 +250,8 @@ class LocalLivePreview:
         input_min_interval_sec: float = INPUT_MIN_INTERVAL_SEC,
         preview_max_width: int = PREVIEW_MAX_WIDTH,
         preview_jpeg_quality: int = PREVIEW_JPEG_QUALITY,
+        desktop_preview_max_width: int = DESKTOP_PREVIEW_MAX_WIDTH,
+        desktop_preview_jpeg_quality: int = DESKTOP_PREVIEW_JPEG_QUALITY,
     ) -> None:
         self.preferred_target = preferred_target
         self.hdc_bin = hdc_bin
@@ -251,6 +261,8 @@ class LocalLivePreview:
         self.input_min_interval_sec = max(0.0, input_min_interval_sec)
         self.preview_max_width = max(320, preview_max_width)
         self.preview_jpeg_quality = max(40, min(preview_jpeg_quality, 90))
+        self.desktop_preview_max_width = max(self.preview_max_width, desktop_preview_max_width)
+        self.desktop_preview_jpeg_quality = max(40, min(desktop_preview_jpeg_quality, 95))
         self._sessions: dict[str, _Session] = {}
         self._sessions_lock = threading.Lock()
         self._default_target = ""
@@ -264,6 +276,112 @@ class LocalLivePreview:
             target = self._resolve_target(session)
         with self._target_access(target), session.lock:
             return self._capture_frame_locked(run_id, target, session)
+
+    def install_and_launch(
+        self,
+        run_id: str,
+        *,
+        hap_path: Path,
+        bundle_name: str,
+        ability_name: str = "EntryAbility",
+    ) -> Frame:
+        """Install one HAP on the bound device, launch it, and return its first frame."""
+        if not hap_path.is_file():
+            raise LivePreviewError(f"预览 HAP 不存在：{hap_path}")
+        if not bundle_name.strip():
+            raise LivePreviewError("无法启动手机预览：HAP 缺少 bundleName。")
+        session = self._session(run_id)
+        with session.lock:
+            target = self._resolve_target(session)
+        with self._target_access(target, input_priority=True), session.lock:
+            self._run(target, "shell", "aa", "force-stop", bundle_name, check=False)
+            self._run(target, "shell", "bm", "uninstall", "-n", bundle_name, check=False)
+            self._run(target, "install", "-r", str(hap_path))
+            self._wake_and_unlock(target, session)
+            try:
+                self._run(
+                    target,
+                    "shell",
+                    "aa",
+                    "start",
+                    "-b",
+                    bundle_name,
+                    "-a",
+                    ability_name or "EntryAbility",
+                )
+            except LivePreviewError as exc:
+                if not _screen_is_locked_error(exc):
+                    raise
+                self._wake_and_unlock(target, session)
+                self._run(
+                    target,
+                    "shell",
+                    "aa",
+                    "start",
+                    "-b",
+                    bundle_name,
+                    "-a",
+                    ability_name or "EntryAbility",
+                )
+            time.sleep(1.0)
+            return self._capture_frame_locked(run_id, target, session)
+
+    def _wake_and_unlock(self, target: str, session: _Session) -> None:
+        self._run(target, "shell", "power-shell", "wakeup", check=False)
+        time.sleep(0.5)
+        width, height = session.screen_size or (1080, 1920)
+        x1, y1 = normalized_to_pixel((0.5, 0.82), (width, height))
+        x2, y2 = normalized_to_pixel((0.5, 0.25), (width, height))
+        self._run(
+            target,
+            "shell",
+            "uitest",
+            "uiInput",
+            "swipe",
+            str(x1),
+            str(y1),
+            str(x2),
+            str(y2),
+            "1000",
+            check=False,
+        )
+        time.sleep(0.5)
+
+    def release_session(self, run_id: str) -> None:
+        """Forget one logical session so a later lease may bind another target."""
+        with self._sessions_lock:
+            self._sessions.pop(run_id, None)
+
+    def last_activity_at(self, run_id: str) -> float:
+        """Return the monotonic time of the last frame captured for a live viewer."""
+        with self._sessions_lock:
+            session = self._sessions.get(run_id)
+        if session is None:
+            return 0.0
+        with session.lock:
+            return session.latest_frame_at
+
+    def bind_target(self, run_id: str, target: str, *, preview_kind: str = "") -> None:
+        """Pin one logical preview session to one physical HDC target."""
+        requested = target.strip()
+        requested_kind = preview_kind.strip().lower()
+        if not requested:
+            raise LivePreviewError("实时预览未配置 HDC target。")
+        with self._sessions_lock:
+            session = self._sessions.get(run_id)
+            if session is None:
+                self._sessions[run_id] = _Session(
+                    lock=threading.RLock(),
+                    target=requested,
+                    preview_kind=requested_kind,
+                )
+                return
+        with session.lock:
+            if session.target and session.target != requested:
+                raise LivePreviewError("实时预览会话已绑定到另一台模拟器。")
+            session.target = requested
+            if requested_kind:
+                session.preview_kind = requested_kind
 
     def _capture_frame_locked(self, run_id: str, target: str, session: _Session) -> Frame:
         if not session.remote_dir_ready:
@@ -281,10 +399,11 @@ class LocalLivePreview:
             local_path.unlink(missing_ok=True)
             self._cleanup_remote_later(target, remote_path)
         screen_size = read_jpeg_size(original_data)
+        is_desktop = session.preview_kind == "desktop"
         data, delivered_size = optimize_preview_jpeg(
             original_data,
-            max_width=self.preview_max_width,
-            quality=self.preview_jpeg_quality,
+            max_width=self.desktop_preview_max_width if is_desktop else self.preview_max_width,
+            quality=self.desktop_preview_jpeg_quality if is_desktop else self.preview_jpeg_quality,
         )
         session.screen_size = screen_size
         session.frame_sequence += 1
@@ -500,6 +619,10 @@ class LocalLivePreview:
         ).start()
 
     def _session(self, run_id: str) -> _Session:
+        with self._sessions_lock:
+            existing = self._sessions.get(run_id)
+            if existing is not None:
+                return existing
         target = self._resolve_default_target()
         with self._sessions_lock:
             return self._sessions.setdefault(

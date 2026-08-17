@@ -2,7 +2,12 @@ import subprocess
 import threading
 import time
 import unittest
+from io import BytesIO
+from unittest.mock import patch
+from unittest.mock import patch
 from pathlib import Path
+
+from PIL import Image
 
 from scan_install.live_preview import (
     LiveInputRateLimitError,
@@ -22,9 +27,10 @@ JPEG_1080_1920 = (
 
 
 class FakeHdc:
-    def __init__(self) -> None:
+    def __init__(self, jpeg_data: bytes = JPEG_1080_1920) -> None:
         self.commands: list[list[str]] = []
         self.fail_snapshot = False
+        self.jpeg_data = jpeg_data
 
     def __call__(self, command, **_kwargs):
         command = list(command)
@@ -32,8 +38,14 @@ class FakeHdc:
         if self.fail_snapshot and "snapshot_display" in command:
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="error: capture failed")
         if "file" in command and "recv" in command:
-            Path(command[-1]).write_bytes(JPEG_1080_1920)
+            Path(command[-1]).write_bytes(self.jpeg_data)
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+
+def make_jpeg(width: int, height: int) -> bytes:
+    output = BytesIO()
+    Image.new("RGB", (width, height), "white").save(output, format="JPEG", quality=85)
+    return output.getvalue()
 
 
 class LiveInputTests(unittest.TestCase):
@@ -58,6 +70,131 @@ class LiveInputTests(unittest.TestCase):
 
 
 class LocalLivePreviewTests(unittest.TestCase):
+    def test_install_and_launch_prepares_device_and_returns_first_frame(self) -> None:
+        fake_hdc = FakeHdc()
+        preview = LocalLivePreview(
+            preferred_target="emulator-phone",
+            hdc_bin="/fake/hdc",
+            command_runner=fake_hdc,
+        )
+        with patch("scan_install.live_preview.time.sleep"):
+            with patch.object(Path, "is_file", return_value=True):
+                frame = preview.install_and_launch(
+                    "run:phone",
+                    hap_path=Path("/tmp/app.hap"),
+                    bundle_name="com.example.app",
+                    ability_name="MainAbility",
+                )
+
+        commands = [command[3:] for command in fake_hdc.commands if command[1:3] == ["-t", "emulator-phone"]]
+        self.assertIn(["install", "-r", "/tmp/app.hap"], commands)
+        self.assertIn(["shell", "aa", "start", "-b", "com.example.app", "-a", "MainAbility"], commands)
+        self.assertTrue(any("power-shell" in command for command in commands))
+        self.assertEqual((frame.width, frame.height), (1080, 1920))
+
+    def test_release_session_allows_binding_a_new_target(self) -> None:
+        preview = LocalLivePreview(preferred_target="phone-one", hdc_bin="/fake/hdc", command_runner=FakeHdc())
+        preview.bind_target("run:phone", "phone-one", preview_kind="phone")
+        preview.release_session("run:phone")
+        preview.bind_target("run:phone", "phone-two", preview_kind="phone")
+        self.assertEqual(preview._session("run:phone").target, "phone-two")
+
+    def test_bound_session_does_not_resolve_an_ambiguous_default_target(self) -> None:
+        def multiple_targets(command, **_kwargs):
+            return subprocess.CompletedProcess(command, 0, stdout="phone-one\nphone-two\n", stderr="")
+
+        preview = LocalLivePreview(hdc_bin="/fake/hdc", command_runner=multiple_targets)
+        preview.bind_target("run:phone", "phone-two", preview_kind="phone")
+
+        self.assertEqual(preview._session("run:phone").target, "phone-two")
+
+    def test_install_and_launch_prepares_phone_and_returns_first_frame(self) -> None:
+        fake_hdc = FakeHdc()
+        preview = LocalLivePreview(
+            preferred_target="emulator-phone",
+            hdc_bin="/fake/hdc",
+            command_runner=fake_hdc,
+        )
+        preview.bind_target("run:phone", "emulator-phone", preview_kind="phone")
+        with patch("scan_install.live_preview.time.sleep", return_value=None):
+            with patch.object(Path, "is_file", return_value=True):
+                frame = preview.install_and_launch(
+                    "run:phone",
+                    hap_path=Path("/tmp/app.hap"),
+                    bundle_name="com.example.app",
+                )
+
+        self.assertEqual((frame.width, frame.height), (1080, 1920))
+        flattened = [command[3:] for command in fake_hdc.commands if command[1:3] == ["-t", "emulator-phone"]]
+        self.assertIn(["install", "-r", "/tmp/app.hap"], flattened)
+        self.assertIn(["shell", "aa", "start", "-b", "com.example.app", "-a", "EntryAbility"], flattened)
+        self.assertTrue(any("power-shell" in command for command in flattened))
+        self.assertTrue(any("snapshot_display" in command for command in flattened))
+
+    def test_release_session_allows_rebinding_to_another_target(self) -> None:
+        preview = LocalLivePreview(
+            preferred_target="emulator-phone",
+            hdc_bin="/fake/hdc",
+            command_runner=FakeHdc(),
+        )
+        preview.bind_target("run:phone", "phone-1", preview_kind="phone")
+        preview.release_session("run:phone")
+        preview.bind_target("run:phone", "phone-2", preview_kind="phone")
+        self.assertEqual(preview._session("run:phone").target, "phone-2")
+
+    def test_last_activity_tracks_captured_frames_and_clears_on_release(self) -> None:
+        preview = LocalLivePreview(
+            preferred_target="emulator-1",
+            hdc_bin="/fake/hdc",
+            command_runner=FakeHdc(),
+        )
+        preview.bind_target("run:desktop", "emulator-1", preview_kind="desktop")
+
+        self.assertEqual(preview.last_activity_at("run:desktop"), 0.0)
+        preview.capture_frame("run:desktop")
+        self.assertGreater(preview.last_activity_at("run:desktop"), 0.0)
+        preview.release_session("run:desktop")
+        self.assertEqual(preview.last_activity_at("run:desktop"), 0.0)
+
+    def test_logical_preview_sessions_bind_to_distinct_targets(self) -> None:
+        fake_hdc = FakeHdc()
+        preview = LocalLivePreview(
+            preferred_target="emulator-default",
+            hdc_bin="/fake/hdc",
+            command_runner=fake_hdc,
+        )
+
+        preview.bind_target("run:desktop", "emulator-desktop", preview_kind="desktop")
+        preview.bind_target("run:phone", "emulator-phone", preview_kind="phone")
+        preview.capture_frame("run:desktop")
+        preview.capture_frame("run:phone")
+
+        targets = [command[2] for command in fake_hdc.commands if len(command) > 2 and command[1] == "-t"]
+        self.assertIn("emulator-desktop", targets)
+        self.assertIn("emulator-phone", targets)
+        self.assertEqual(preview._session("run:desktop").preview_kind, "desktop")
+        self.assertEqual(preview._session("run:phone").preview_kind, "phone")
+        with self.assertRaises(LivePreviewError):
+            preview.bind_target("run:desktop", "emulator-other")
+
+    def test_desktop_preview_keeps_native_width_while_phone_uses_compact_frames(self) -> None:
+        source = make_jpeg(1200, 800)
+        preview = LocalLivePreview(
+            preferred_target="emulator-1",
+            hdc_bin="/fake/hdc",
+            command_runner=FakeHdc(source),
+            preview_max_width=660,
+            desktop_preview_max_width=3120,
+        )
+        preview.bind_target("run:desktop", "emulator-1", preview_kind="desktop")
+        preview.bind_target("run:phone", "emulator-1", preview_kind="phone")
+
+        desktop = preview.capture_frame("run:desktop")
+        phone = preview.capture_frame("run:phone")
+
+        self.assertEqual((desktop.width, desktop.height), (1200, 800))
+        self.assertEqual((phone.width, phone.height), (660, 440))
+
     def test_recent_frame_is_served_from_cache_without_another_hdc_capture(self) -> None:
         fake_hdc = FakeHdc()
         preview = LocalLivePreview(

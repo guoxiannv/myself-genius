@@ -87,6 +87,17 @@ def build_hpack_command(record: Any) -> list[str]:
         "--desc",
         f"Harmony Pilot {record.run_id[:8]} 扫码安装",
     ]
+    if str(getattr(record, "runtime", "") or "").strip().lower() == "expo":
+        hap_root = Path(record.workspace) / ".expo-fast" / "hap"
+        candidates = sorted(
+            (path for path in hap_root.glob("*.hap") if path.is_file()),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+        if candidates:
+            command.extend(["--unsigned-hap", str(candidates[0])])
+        if getattr(record, "signing_bundle_name", ""):
+            command.extend(["--bundle-name", str(record.signing_bundle_name)])
     if record.signing_cert_path:
         command.extend(["--cert", record.signing_cert_path])
     if record.signing_profile_path:
@@ -191,7 +202,19 @@ def wait_for_hap_and_package(
             time.sleep(CAPTURE_POLL_INTERVAL_SEC)
             continue
 
-        ui_qa = load_ui_qa_status(workspace, str(latest.session_name or ""))
+        is_expo = str(getattr(latest, "runtime", "") or "").strip().lower() == "expo"
+        ui_qa = (
+            "complete"
+            if is_expo and str(getattr(latest, "status", "") or "").strip().lower() in {
+                "complete",
+                "completed",
+                "done",
+                "ready",
+                "succeeded",
+                "success",
+            }
+            else load_ui_qa_status(workspace, str(latest.session_name or ""))
+        )
         if ui_qa in {"failed", "error", "cancelled", "canceled"}:
             latest.distribution_status = "failed"
             latest.distribution_process_pid = None
@@ -203,7 +226,7 @@ def wait_for_hap_and_package(
             time.sleep(CAPTURE_POLL_INTERVAL_SEC)
             continue
 
-        if record.signing_bundle_name:
+        if record.signing_bundle_name and not is_expo:
             try:
                 from scan_install.profile_pool import sync_record_bundle_to_workspace
 

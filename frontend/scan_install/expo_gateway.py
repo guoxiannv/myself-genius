@@ -33,6 +33,7 @@ class ExpoPublication:
     token: str
     artifact_root: str
     published_at: str
+    public: bool = True
 
 
 def utc_now() -> str:
@@ -162,6 +163,7 @@ class ExpoPublicationRegistry:
                     token=str(row["token"]),
                     artifact_root=str(row["artifact_root"]),
                     published_at=str(row["published_at"]),
+                    public=bool(row.get("public", True)),
                 )
             except (KeyError, TypeError):
                 continue
@@ -199,28 +201,78 @@ class ExpoPublicationRegistry:
     def find_by_token(self, token: str) -> ExpoPublication | None:
         with self._lock:
             for publication in self._publications.values():
-                if secrets.compare_digest(publication.token, token):
+                if publication.public and secrets.compare_digest(publication.token, token):
                     return publication
         return None
 
-    def publish(self, run_id: str, artifact_root: Path) -> tuple[ExpoPublication, bool, dict[str, Any]]:
+    def publications(self) -> list[ExpoPublication]:
+        with self._lock:
+            return sorted(
+                self._publications.values(),
+                key=lambda publication: (publication.published_at, publication.run_id),
+            )
+
+    def aggregate_catalog(self) -> list[dict[str, Any]]:
+        entries: dict[str, dict[str, Any]] = {}
+        for publication in self.publications():
+            root = Path(publication.artifact_root).resolve()
+            try:
+                validate_harmony_go_export(root, self.allowed_root)
+                catalog = read_json_file(root / "catalog.json", "catalog.json")
+            except ExpoExportValidationError:
+                continue
+            for entry in catalog:
+                if not isinstance(entry, dict):
+                    continue
+                app_id = str(entry.get("id") or "").strip()
+                if app_id:
+                    entries[app_id] = entry
+        return [entries[app_id] for app_id in sorted(entries)]
+
+    def resolve_aggregate_file(self, relative: str) -> Path | None:
+        requested = str(relative or "").lstrip("/")
+        if not requested:
+            return None
+        # aggregate_catalog() also resolves duplicate app ids to the newest
+        # registration, so file lookup must use the same newest-first order.
+        publications = list(reversed(self.publications()))
+        for publication in publications:
+            root = Path(publication.artifact_root).resolve()
+            try:
+                candidate = resolve_export_file(root, requested)
+                if self.allowed_root is None or not path_is_within(root, self.allowed_root):
+                    continue
+            except ExpoExportValidationError:
+                continue
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def _register(
+        self,
+        run_id: str,
+        artifact_root: Path,
+        *,
+        make_public: bool,
+    ) -> tuple[ExpoPublication, bool, dict[str, Any]]:
         if not RUN_ID_PATTERN.fullmatch(run_id):
             raise ExpoGatewayError("Invalid Expo run id")
         validation = validate_harmony_go_export(artifact_root, self.allowed_root)
         root = str(artifact_root.expanduser().resolve())
         with self._lock:
             current = self._publications.get(run_id)
-            if current and current.artifact_root == root:
+            if current and current.artifact_root == root and (current.public or not make_public):
                 return current, False, validation
             existing_tokens = {item.token for item in self._publications.values()}
-            token = secrets.token_urlsafe(24)
-            while token in existing_tokens:
+            token = current.token if current else secrets.token_urlsafe(24)
+            while not current and token in existing_tokens:
                 token = secrets.token_urlsafe(24)
             publication = ExpoPublication(
                 run_id=run_id,
                 token=token,
                 artifact_root=root,
                 published_at=utc_now(),
+                public=bool(make_public or current and current.public),
             )
             self._publications[run_id] = publication
             try:
@@ -233,17 +285,43 @@ class ExpoPublicationRegistry:
                 raise
             return publication, True, validation
 
+    def register_local(self, run_id: str, artifact_root: Path) -> tuple[ExpoPublication, bool, dict[str, Any]]:
+        return self._register(run_id, artifact_root, make_public=False)
+
+    def publish(self, run_id: str, artifact_root: Path) -> tuple[ExpoPublication, bool, dict[str, Any]]:
+        return self._register(run_id, artifact_root, make_public=True)
+
     def unpublish(self, run_id: str) -> bool:
         with self._lock:
-            removed = self._publications.pop(run_id, None)
-            if removed is not None:
+            current = self._publications.get(run_id)
+            if current is not None and current.public:
+                unpublished = ExpoPublication(
+                    run_id=current.run_id,
+                    token=current.token,
+                    artifact_root=current.artifact_root,
+                    published_at=current.published_at,
+                    public=False,
+                )
+                self._publications[run_id] = unpublished
                 try:
                     self._save()
                 except ExpoGatewayError:
-                    self._publications[run_id] = removed
+                    self._publications[run_id] = current
                     raise
                 return True
             return False
+
+    def unregister(self, run_id: str) -> bool:
+        with self._lock:
+            removed = self._publications.pop(run_id, None)
+            if removed is None:
+                return False
+            try:
+                self._save()
+            except ExpoGatewayError:
+                self._publications[run_id] = removed
+                raise
+            return True
 
 
 def content_type_for_path(path: Path) -> str:
@@ -266,6 +344,12 @@ def gateway_handler(registry: ExpoPublicationRegistry) -> type[BaseHTTPRequestHa
         def do_HEAD(self) -> None:
             self._serve(head_only=True)
 
+        def do_POST(self) -> None:
+            self._publish()
+
+        def do_DELETE(self) -> None:
+            self._unpublish()
+
         def do_OPTIONS(self) -> None:
             self.send_response(HTTPStatus.NO_CONTENT)
             self.send_header("Access-Control-Allow-Origin", "*")
@@ -285,6 +369,87 @@ def gateway_handler(registry: ExpoPublicationRegistry) -> type[BaseHTTPRequestHa
             if not head_only:
                 self.wfile.write(body)
 
+        def _send_json_value(self, payload: Any, status: HTTPStatus, *, head_only: bool = False) -> None:
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            if not head_only:
+                self.wfile.write(body)
+
+        def _send_file(self, file_path: Path, *, head_only: bool) -> None:
+            try:
+                size = file_path.stat().st_size
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", content_type_for_path(file_path))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(size))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                if not head_only:
+                    with file_path.open("rb") as stream:
+                        while chunk := stream.read(1024 * 1024):
+                            self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return
+
+        def _read_json_body(self) -> dict[str, Any]:
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+            except ValueError as exc:
+                raise ExpoGatewayError("Invalid Content-Length") from exc
+            if length <= 0 or length > 64 * 1024:
+                raise ExpoGatewayError("Invalid request body size")
+            try:
+                payload = json.loads(self.rfile.read(length))
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise ExpoGatewayError("Invalid JSON body") from exc
+            if not isinstance(payload, dict):
+                raise ExpoGatewayError("JSON body must be an object")
+            return payload
+
+        def _publish(self) -> None:
+            if urlparse(self.path).path != "/internal/publications":
+                self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
+                return
+            try:
+                payload = self._read_json_body()
+                publication, created, validation = registry.register_local(
+                    str(payload.get("run_id") or ""),
+                    Path(str(payload.get("artifact_root") or "")),
+                )
+            except (ExpoGatewayError, ExpoExportValidationError) as exc:
+                self._send_json({"error": str(exc)}, HTTPStatus.CONFLICT)
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "created": created,
+                    "publication": asdict(publication),
+                    "validation": validation,
+                    "catalog_path": "/catalog.json",
+                },
+                HTTPStatus.CREATED if created else HTTPStatus.OK,
+            )
+
+        def _unpublish(self) -> None:
+            pathname = urlparse(self.path).path
+            match = re.fullmatch(r"/internal/publications/([a-f0-9]{32})", pathname)
+            if not match:
+                self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
+                return
+            try:
+                removed = registry.unregister(match.group(1))
+            except ExpoGatewayError as exc:
+                self._send_json({"error": str(exc)}, HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            self._send_json({"ok": True, "removed": removed}, HTTPStatus.OK)
+
         def _serve(self, *, head_only: bool) -> None:
             try:
                 pathname = unquote(urlparse(self.path).path)
@@ -292,7 +457,25 @@ def gateway_handler(registry: ExpoPublicationRegistry) -> type[BaseHTTPRequestHa
                 self._send_json({"error": "Malformed URL"}, HTTPStatus.BAD_REQUEST, head_only=head_only)
                 return
             if pathname == "/health":
-                self._send_json({"ok": True, "service": "expo-harmony-gateway"}, HTTPStatus.OK, head_only=head_only)
+                self._send_json(
+                    {
+                        "ok": True,
+                        "service": "expo-harmony-gateway",
+                        "publication_count": len(registry.publications()),
+                    },
+                    HTTPStatus.OK,
+                    head_only=head_only,
+                )
+                return
+            if pathname in {"/", "/catalog.json"}:
+                self._send_json_value(registry.aggregate_catalog(), HTTPStatus.OK, head_only=head_only)
+                return
+            if pathname == "/runtime.json" or pathname.startswith("/miniapps/"):
+                aggregate_file = registry.resolve_aggregate_file(pathname)
+                if aggregate_file is None:
+                    self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND, head_only=head_only)
+                    return
+                self._send_file(aggregate_file, head_only=head_only)
                 return
             parts = pathname.lstrip("/").split("/")
             if len(parts) < 2 or parts[0] != "p" or not TOKEN_PATTERN.fullmatch(parts[1]):
@@ -314,24 +497,7 @@ def gateway_handler(registry: ExpoPublicationRegistry) -> type[BaseHTTPRequestHa
             if not file_path.is_file():
                 self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND, head_only=head_only)
                 return
-            try:
-                size = file_path.stat().st_size
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", content_type_for_path(file_path))
-                self.send_header("Cache-Control", "no-store")
-                self.send_header("Content-Length", str(size))
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.send_header("X-Content-Type-Options", "nosniff")
-                self.end_headers()
-                if not head_only:
-                    with file_path.open("rb") as stream:
-                        while chunk := stream.read(1024 * 1024):
-                            self.wfile.write(chunk)
-            except (BrokenPipeError, ConnectionResetError):
-                return
-            except OSError:
-                if not self.wfile.closed:
-                    return
+            self._send_file(file_path, head_only=head_only)
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return
@@ -426,7 +592,7 @@ class ExpoPublicGateway:
             "published_at": "",
             "error": self._start_error,
         }
-        if publication is None:
+        if publication is None or not publication.public:
             if not self.enabled:
                 base["status"] = "disabled"
             elif not self.running:

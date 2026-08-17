@@ -84,6 +84,20 @@ class ExpoPublicGatewayTests(unittest.TestCase):
         connection.close()
         return result
 
+    def json_request(self, method: str, path: str, payload: dict[str, object]):
+        connection = http.client.HTTPConnection("127.0.0.1", self.gateway.bound_port)
+        connection.request(
+            method,
+            path,
+            body=json.dumps(payload),
+            headers={"Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        body = response.read()
+        result = response.status, dict(response.getheaders()), body
+        connection.close()
+        return result
+
     def test_publish_serves_catalog_manifest_and_bundle_then_revokes(self) -> None:
         serve, created = self.gateway.publish(RUN_ID, self.artifact_root)
 
@@ -158,6 +172,58 @@ class ExpoPublicGatewayTests(unittest.TestCase):
         self.gateway.unpublish(RUN_ID)
         second_status, _, _ = self.request("GET", url_path(second["local_url"]) + "/catalog.json")
         self.assertEqual(second_status, 200)
+
+    def test_internal_registry_serves_one_aggregate_catalog(self) -> None:
+        second_root = write_harmony_go_export(self.apps_root / "second", app_id="second-app")
+        status, _, body = self.json_request(
+            "POST",
+            "/internal/publications",
+            {"run_id": RUN_ID, "artifact_root": str(self.artifact_root)},
+        )
+        self.assertEqual(status, 201)
+        internal_publication = json.loads(body)
+        self.assertTrue(internal_publication["created"])
+        self.assertFalse(internal_publication["publication"]["public"])
+        self.assertEqual(self.gateway.describe(RUN_ID, can_publish=True)["status"], "stopped")
+        status, _, _ = self.json_request(
+            "POST",
+            "/internal/publications",
+            {"run_id": "b" * 32, "artifact_root": str(second_root)},
+        )
+        self.assertEqual(status, 201)
+
+        status, _, catalog_body = self.request("GET", "/catalog.json")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            [entry["id"] for entry in json.loads(catalog_body)],
+            ["sample-app", "second-app"],
+        )
+        status, _, manifest_body = self.request("GET", "/miniapps/second-app/manifest.json")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(manifest_body)["id"], "second-app")
+        status, _, bundle_body = self.request("GET", "/miniapps/sample-app/bundle.js")
+        self.assertEqual(status, 200)
+        self.assertEqual(bundle_body, b"globalThis.__sample = true;\n")
+
+        public_state, created = self.gateway.publish(RUN_ID, self.artifact_root)
+        self.assertTrue(created)
+        self.assertEqual(public_state["status"], "serving")
+        public_path = url_path(public_state["local_url"])
+        status, _, _ = self.request("GET", public_path + "/catalog.json")
+        self.assertEqual(status, 200)
+        stopped, removed = self.gateway.unpublish(RUN_ID, can_publish=True)
+        self.assertTrue(removed)
+        self.assertEqual(stopped["status"], "stopped")
+        status, _, _ = self.request("GET", public_path + "/catalog.json")
+        self.assertEqual(status, 404)
+        status, _, catalog_body = self.request("GET", "/catalog.json")
+        self.assertIn("sample-app", [entry["id"] for entry in json.loads(catalog_body)])
+
+        status, _, body = self.request("DELETE", f"/internal/publications/{RUN_ID}")
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["removed"])
+        status, _, catalog_body = self.request("GET", "/catalog.json")
+        self.assertEqual([entry["id"] for entry in json.loads(catalog_body)], ["second-app"])
 
     def test_publish_rejects_export_outside_configured_app_root(self) -> None:
         outside = write_harmony_go_export(self.root / "outside")

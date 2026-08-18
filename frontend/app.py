@@ -2553,6 +2553,30 @@ def package_qa_gate_ready(package_outdated: bool, qa_status: str) -> bool:
 
 HPACK_PACKAGE_LOCK = threading.Lock()
 HPACK_PACKAGE_IN_FLIGHT: set[str] = set()
+EXPO_RUN_OPERATION_LOCKS_GUARD = threading.Lock()
+EXPO_RUN_OPERATION_LOCKS: dict[str, threading.RLock] = {}
+
+
+def expo_run_operation_lock(run_id: str) -> threading.RLock:
+    """Serialize per-run follow-up, rebuild, and packaging state transitions."""
+    with EXPO_RUN_OPERATION_LOCKS_GUARD:
+        return EXPO_RUN_OPERATION_LOCKS.setdefault(run_id, threading.RLock())
+
+
+def expo_runtime_operation_in_flight(record: RunRecord) -> bool:
+    return record.status == "running" or process_alive(record.process_pid)
+
+
+def expo_package_operation_ready(
+    record: RunRecord,
+    run_status: str,
+    follow_up: dict[str, Any],
+) -> bool:
+    return bool(
+        run_status == "completed"
+        and str(follow_up.get("status") or "").strip().lower() == "idle"
+        and not expo_runtime_operation_in_flight(record)
+    )
 
 
 def start_hpack_packaging(
@@ -2565,25 +2589,35 @@ def start_hpack_packaging(
         return False
     if not find_latest_hap(Path(record.workspace), record.created_at):
         return False
-    with HPACK_PACKAGE_LOCK:
+    with expo_run_operation_lock(record.run_id):
         latest = load_run(record.run_id) or record
-        if latest.run_id in HPACK_PACKAGE_IN_FLIGHT or process_alive(latest.distribution_process_pid):
-            return False
-        manifest_path = hpack_manifest_path(latest.run_id)
-        if manifest_path.is_file():
-            if not replace_manifest:
+        if latest.runtime == "expo":
+            state = load_expo_fast_state(Path(latest.workspace))
+            follow_up = load_follow_up_status(latest, state)
+            if not expo_package_operation_ready(
+                latest,
+                expo_fast_run_status(latest, state),
+                follow_up,
+            ):
                 return False
-            try:
-                manifest_path.unlink()
-            except OSError:
+        with HPACK_PACKAGE_LOCK:
+            if latest.run_id in HPACK_PACKAGE_IN_FLIGHT or process_alive(latest.distribution_process_pid):
                 return False
-        latest.distribution_status = "waiting_hap"
-        latest.distribution_process_pid = None
-        latest.distribution_command = []
-        latest.package_source_adjustment_at = latest.latest_adjustment_at
-        latest.notes = "正在编译、签名并生成安装二维码。"
-        record = save_run(latest)
-        HPACK_PACKAGE_IN_FLIGHT.add(record.run_id)
+            manifest_path = hpack_manifest_path(latest.run_id)
+            if manifest_path.is_file():
+                if not replace_manifest:
+                    return False
+                try:
+                    manifest_path.unlink()
+                except OSError:
+                    return False
+            latest.distribution_status = "waiting_hap"
+            latest.distribution_process_pid = None
+            latest.distribution_command = []
+            latest.package_source_adjustment_at = latest.latest_adjustment_at
+            latest.notes = "正在编译、签名并生成安装二维码。"
+            record = save_run(latest)
+            HPACK_PACKAGE_IN_FLIGHT.add(record.run_id)
 
     def run() -> None:
         try:
@@ -3040,9 +3074,8 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
     package_in_flight = bool(
         record.run_id in HPACK_PACKAGE_IN_FLIGHT or process_alive(record.distribution_process_pid)
     )
-    runtime_rebuild_in_flight = bool(
-        package_outdated and record.status == "running" and process_alive(record.process_pid)
-    )
+    runtime_rebuild_in_flight = expo_runtime_operation_in_flight(record)
+    package_operation_ready = expo_package_operation_ready(record, run_status, follow_up_private)
     install_ready = manifest_ready and not package_outdated and not package_in_flight
     latest_unsigned_ready = bool(hap_path and (not manifest_ready or newer_hap))
     if not HPACK_ENABLED:
@@ -3204,6 +3237,7 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
             "package_can_start": bool(
                 HPACK_ENABLED
                 and (latest_unsigned_ready or package_outdated)
+                and package_operation_ready
                 and not package_in_flight
                 and not runtime_rebuild_in_flight
                 and not install_ready
@@ -3853,7 +3887,9 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         if re.fullmatch(r"/api/runs/[a-f0-9]+/follow-up/interrupt", parsed.path):
             return self.handle_interrupt_follow_up(parsed.path.split("/")[3])
         if re.fullmatch(r"/api/runs/[a-f0-9]+/package", parsed.path):
-            return self.handle_package_run(parsed.path.split("/")[3])
+            run_id = parsed.path.split("/")[3]
+            with expo_run_operation_lock(run_id):
+                return self.handle_package_run(run_id)
         if re.fullmatch(r"/api/runs/[a-f0-9]+/expo-serve", parsed.path):
             return self.handle_publish_expo_run(parsed.path.split("/")[3])
         if re.fullmatch(r"/api/runs/[a-f0-9]+/preview/retry", parsed.path):
@@ -4886,15 +4922,31 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         if not text.strip():
             self.send_json({"ok": False, "error": "text is required", "code": "empty_message"}, status=HTTPStatus.BAD_REQUEST)
             return
-        try:
-            response = call_follow_up_control(record, "enqueue", {
-                "text": text,
-                "clientMessageId": str(body.get("clientMessageId") or ""),
-            })
-            persist_latest_adjustment(record, response)
-            self.send_json(redact_follow_up_response(response))
-        except FollowUpControlError as exc:
-            self.send_follow_up_error(exc)
+        with expo_run_operation_lock(run_id):
+            latest = load_run(run_id) or record
+            if latest.runtime == "expo" and (
+                expo_runtime_operation_in_flight(latest)
+                or latest.run_id in HPACK_PACKAGE_IN_FLIGHT
+                or process_alive(latest.distribution_process_pid)
+            ):
+                self.send_json(
+                    {
+                        "ok": False,
+                        "error": "Expo 构建或安装包任务正在运行，请完成后再提交调整。",
+                        "code": "control_busy",
+                    },
+                    status=HTTPStatus.CONFLICT,
+                )
+                return
+            try:
+                response = call_follow_up_control(latest, "enqueue", {
+                    "text": text,
+                    "clientMessageId": str(body.get("clientMessageId") or ""),
+                })
+                persist_latest_adjustment(latest, response)
+                self.send_json(redact_follow_up_response(response))
+            except FollowUpControlError as exc:
+                self.send_follow_up_error(exc)
 
     def handle_interrupt_follow_up(self, run_id: str) -> None:
         record = self.load_accessible_run(run_id)

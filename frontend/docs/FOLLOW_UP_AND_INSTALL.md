@@ -256,10 +256,11 @@ Expo 状态保存在生成工程内：
 1. 0→1 首版本在 QA、unsigned HAP 和预览稳定后自动执行一次 hpack；成功后把安装 URL、商店 URL、manifest URL 与时间写回 `RunRecord.first_*` 字段。
 2. 提交 follow-up 消息后，服务端持久化最近调整时间，并结合 active、queue、history 与 manifest 时间立即把当前安装包标记为过期；签名任务同时快照其对应的调整版本，防止签名期间新提交的调整被误判为已打包。
 3. 后续调整不会自动调用 HPack，也不重复执行首版本 QA。ArkPilot 可维护 unsigned HAP 与预览；Expo 默认只重建并验证 Bundle，完成后由详情页轮询发布，不用设备等待阻塞 follow-up FIFO。
-4. 最新预览就绪且 follow-up 空闲后，顶部显示可用的“更新安装包”按钮。
-5. 用户点击 `POST /api/runs/{id}/package` 后，按钮在整个编译、签名和二维码生成期间不可重复点击；Expo 若尚无当前 revision 的 HAP，会先执行无模型的 `--rebuild --hap true --launch false`。
-6. 生成成功后进度从 80% 变为 100%，右下角自动展开最新二维码；再次开始调整后进度退回 80%。
-7. `GET /api/runs/{id}/install-qr?version=first` 专门返回首版本二维码。
+4. 最新预览就绪、主运行状态为 `completed` 且 follow-up 明确空闲后，顶部才显示可用的“更新安装包”按钮。
+5. Expo 的 follow-up enqueue、HAP rebuild 与 HPack 启动共享 per-run 操作锁；任一构建/签名操作启动后，新的调整请求返回 `control_busy`，反向也不会在 active follow-up 期间启动 rebuild 或签名。
+6. 用户点击 `POST /api/runs/{id}/package` 后，按钮在整个编译、签名和二维码生成期间不可重复点击；Expo 若尚无当前 revision 的 HAP，会先执行无模型的 `--rebuild --hap true --launch false`。
+7. 生成成功后进度从 80% 变为 100%，右下角自动展开最新二维码；再次开始调整后进度退回 80%。
+8. `GET /api/runs/{id}/install-qr?version=first` 专门返回首版本二维码。
 
 ### 7.1 续跑后的预览刷新
 
@@ -337,4 +338,4 @@ HP_TMUX_SKIP_QA=1
 - 队列支持编辑和删除；只有 `queued` 状态允许修改，已派发消息不可变。
 - 消息正文不出现在公开队列状态中；过程展示仅提供裁剪后的 assistant/tool 摘要，不等同于完整可下载的对话归档。
 - 建议补充 Remote UI API 自动化测试：权限、空消息、ID 幂等重试、`control_busy`、会话缺失与中断超时。
-- 首版本自动签名和后续手动重签均有进程内互斥；仍建议为失败重试、并发调整和审计日志补充更完整的策略。
+- 首版本自动签名、后续手动重签和 Expo follow-up/rebuild 均有进程内 per-run 互斥；跨服务进程部署时仍需确保同一 run 固定路由到同一 Remote UI 实例，或将互斥升级为外部锁。

@@ -383,11 +383,18 @@ class ExpoFastRuntimeTests(unittest.TestCase):
             created_at=now,
             updated_at=now,
             runtime="expo",
-            status="running",
+            status="completed",
         )
         remote_ui_app.save_run(record)
 
-        with patch.object(remote_ui_app, "start_hpack_packaging") as start_packaging:
+        with (
+            patch.object(remote_ui_app, "start_hpack_packaging") as start_packaging,
+            patch.object(
+                remote_ui_app,
+                "load_follow_up_status",
+                return_value={"status": "idle", "session_id": "session-1"},
+            ),
+        ):
             payload = remote_ui_app.build_progress_payload(record)
 
         start_packaging.assert_called_once()
@@ -423,6 +430,84 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         assert saved is not None
         self.assertEqual(saved.expo_package_status, "ready")
         self.assertIn("unsigned HAP 已生成", saved.notes)
+
+    def test_expo_package_requires_completed_run_and_idle_follow_up(self) -> None:
+        now = remote_ui_app.to_iso()
+        record = remote_ui_app.RunRecord(
+            run_id="e6f6a000000000000000000000000016",
+            session_name="expo-package-operation-gate",
+            prompt="打包互斥测试",
+            workspace=str(remote_ui_app.EXPO_FAST_APP_ROOT / "package-operation-gate"),
+            variant="expo-fast",
+            created_at=now,
+            updated_at=now,
+            runtime="expo",
+            status="completed",
+        )
+
+        self.assertTrue(
+            remote_ui_app.expo_package_operation_ready(
+                record,
+                "completed",
+                {"status": "idle"},
+            )
+        )
+        self.assertFalse(
+            remote_ui_app.expo_package_operation_ready(
+                record,
+                "completed",
+                {"status": "running"},
+            )
+        )
+        self.assertFalse(
+            remote_ui_app.expo_package_operation_ready(
+                record,
+                "running",
+                {"status": "idle"},
+            )
+        )
+        record.status = "running"
+        self.assertFalse(
+            remote_ui_app.expo_package_operation_ready(
+                record,
+                "completed",
+                {"status": "idle"},
+            )
+        )
+
+    def test_expo_hpack_start_rechecks_follow_up_state_under_operation_lock(self) -> None:
+        workspace = remote_ui_app.EXPO_FAST_APP_ROOT / "hpack-follow-up-busy"
+        state_dir = workspace / ".expo-fast"
+        hap_dir = state_dir / "hap"
+        hap_dir.mkdir(parents=True)
+        (hap_dir / "busy.hap").write_bytes(b"unsigned-hap")
+        (state_dir / "state.json").write_text(
+            json.dumps({"state": "completed", "detail": "done"}),
+            encoding="utf-8",
+        )
+        now = remote_ui_app.to_iso()
+        record = remote_ui_app.RunRecord(
+            run_id="e6f6a000000000000000000000000017",
+            session_name="expo-hpack-follow-up-busy",
+            prompt="签名互斥测试",
+            workspace=str(workspace),
+            variant="expo-fast",
+            created_at=now,
+            updated_at=now,
+            runtime="expo",
+            status="completed",
+        )
+        remote_ui_app.save_run(record)
+
+        with (
+            patch.object(remote_ui_app, "HPACK_ENABLED", True),
+            patch.object(remote_ui_app, "load_follow_up_status", return_value={"status": "running"}),
+            patch.object(remote_ui_app.threading, "Thread") as worker,
+        ):
+            started = remote_ui_app.start_hpack_packaging(record)
+
+        self.assertFalse(started)
+        worker.assert_not_called()
 
     def test_expo_hap_download_rejects_artifacts_outside_the_run_output(self) -> None:
         workspace = remote_ui_app.EXPO_FAST_APP_ROOT / "escaped-hap-app"
@@ -625,6 +710,55 @@ class ExpoFastRuntimeTests(unittest.TestCase):
 
         self.assertEqual(status, 409)
         self.assertEqual(package_payload["code"], "package_not_ready")
+
+    def test_expo_follow_up_enqueue_rejects_rebuild_and_packaging_operations(self) -> None:
+        status, headers, payload = self.request(
+            "POST",
+            "/api/runs",
+            body={"prompt": "续跑互斥测试", "runtime": "expo"},
+        )
+        self.assertEqual(status, 201)
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        run_id = payload["run_id"]
+        self.assertTrue(self.start_event.wait(timeout=1))
+        record = remote_ui_app.load_run(run_id)
+        self.assertIsNotNone(record)
+        assert record is not None
+        record.status = "running"
+        record.process_pid = None
+        remote_ui_app.save_run(record)
+
+        with patch.object(remote_ui_app, "call_follow_up_control") as control:
+            status, _, busy = self.request(
+                "POST",
+                f"/api/runs/{run_id}/follow-up/messages",
+                body={"text": "改成绿色", "clientMessageId": "busy-rebuild"},
+                cookie=cookie,
+            )
+        self.assertEqual(status, 409)
+        self.assertEqual(busy["code"], "control_busy")
+        control.assert_not_called()
+
+        record = remote_ui_app.load_run(run_id)
+        self.assertIsNotNone(record)
+        assert record is not None
+        record.status = "completed"
+        record.process_pid = None
+        remote_ui_app.save_run(record)
+        remote_ui_app.HPACK_PACKAGE_IN_FLIGHT.add(run_id)
+        try:
+            with patch.object(remote_ui_app, "call_follow_up_control") as control:
+                status, _, busy = self.request(
+                    "POST",
+                    f"/api/runs/{run_id}/follow-up/messages",
+                    body={"text": "改成蓝色", "clientMessageId": "busy-package"},
+                    cookie=cookie,
+                )
+            self.assertEqual(status, 409)
+            self.assertEqual(busy["code"], "control_busy")
+            control.assert_not_called()
+        finally:
+            remote_ui_app.HPACK_PACKAGE_IN_FLIGHT.discard(run_id)
 
     def test_completed_expo_run_can_publish_and_revoke_gateway_preview(self) -> None:
         status, headers, payload = self.request(

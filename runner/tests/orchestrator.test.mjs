@@ -93,6 +93,7 @@ test('one-click launcher resolves isolated projects, prompt input, models, and t
   assert.equal(plan.repairModel, 'deepseek-v4-flash');
   assert.equal(plan.effort, 'low');
   assert.equal(plan.repairEffort, 'medium');
+  assert.equal(plan.repairLimit, 100);
   assert.equal(plan.repairTimeout, 15);
   assert.equal(plan.timeout, 0);
   assert.equal(plan.launch, false);
@@ -228,6 +229,7 @@ test('one-click launcher defaults to the tested learning-goals scenario and sing
   assert.equal(plan.effort, 'low');
   assert.equal(plan.repairModel, 'k3-256k');
   assert.equal(plan.repairEffort, 'medium');
+  assert.equal(plan.repairLimit, 100);
   assert.equal(plan.timeout, 0);
   assert.equal(plan.repairTimeout, 0);
   assert.equal(plan.foreground, false);
@@ -288,6 +290,18 @@ test('controlled Agent MCP exposes check and build without a shell tool', () => 
   const rows = result.stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
   assert.deepEqual(rows[1].result.tools.map((tool) => tool.name), ['check', 'build']);
   assert.doesNotMatch(JSON.stringify(rows[1]), /shell|command argument/i);
+  rmSync(workspace, { recursive: true, force: true });
+});
+
+test('Expo follow-up status is read-only until the initial Agent session exists', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-follow-up-status-'));
+  const controller = join(root, 'scripts/follow-up-control.mjs');
+  const result = spawnSync(process.execPath, [controller, 'status', '--cwd', workspace, '--run', 'test-run'], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.follow_up.status, 'unavailable');
+  assert.equal(output.follow_up.session_id, '');
+  assert.equal(existsSync(join(workspace, '.expo-fast')), false);
   rmSync(workspace, { recursive: true, force: true });
 });
 
@@ -1144,7 +1158,7 @@ test('external dependency controller CLI synchronizes an already installed exact
   assert.equal(evidence.actualVersions['react-native-svg'], '15.15.4');
 });
 
-test('single execution policy uses external model controls and unbounded deterministic repair', () => {
+test('single execution policy uses external model controls and caps deterministic repair at 100 attempts', () => {
   const config = JSON.parse(readFileSync(join(root, 'config/execution.json'), 'utf8'));
   assert.deepEqual(config, {
     schemaVersion: 1,
@@ -1152,6 +1166,7 @@ test('single execution policy uses external model controls and unbounded determi
     effort: 'low',
     repairModel: 'k3-256k',
     repairEffort: 'medium',
+    repairLimit: 100,
   });
   assert.equal(existsSync(join(root, 'config/candidates.json')), false);
   const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
@@ -1177,7 +1192,9 @@ test('single execution policy uses external model controls and unbounded determi
   assert.match(runner, /for \(;;\)/);
   assert.doesNotMatch(runner, /complexityScore|candidates\[mode\]|repairTurns|canRunRepair|repairPolicy/);
   assert.match(runner, /const lines = 10/);
-  assert.match(runner, /const execution = \{ model, effort, repairModel, repairEffort, repairLimit: null \}/);
+  assert.match(runner, /const execution = \{ model, effort, repairModel, repairEffort, repairLimit \}/);
+  assert.match(runner, /repairAttempt >= repairLimit/);
+  assert.match(runner, /still failed after \$\{repairLimit\} repair attempts/);
   assert.match(runner, /deterministic gates failed; starting same-session repair \$\{repairAttempt\}/);
   assert.match(runner, /status: metrics\.status/);
   assert.match(runner, /repairArtifactName\('agent-repair-trace'/);
@@ -1193,6 +1210,8 @@ test('single execution policy uses external model controls and unbounded determi
   assert.match(runner, /timeoutMinutes > 0 \? setTimeout/);
   assert.doesNotMatch(runner, /claudeTimeoutMinutes \|\| 20/);
   assert.match(runner, /resolveExecution\(o\)/);
+  const launcher = readFileSync(join(root, 'scripts/start-livetest.mjs'), 'utf8');
+  assert.match(launcher, /'--repairLimit', String\(plan\.repairLimit\)/);
   assert.doesNotMatch(runner, /--dangerously-skip-permissions/);
 });
 
@@ -1212,15 +1231,17 @@ test('initial 0-to-1 product prompt remains byte-stable while follow-up tools ev
 
 test('execution policy resolves explicit overrides and main-turn inheritance centrally', () => {
   assert.deepEqual(resolveExecution({}), {
-    model: 'k3-256k', effort: 'low', repairModel: 'k3-256k', repairEffort: 'medium',
+    model: 'k3-256k', effort: 'low', repairModel: 'k3-256k', repairEffort: 'medium', repairLimit: 100,
   });
   assert.deepEqual(resolveExecution({ model: 'main-model', effort: 'high' }), {
-    model: 'main-model', effort: 'high', repairModel: 'main-model', repairEffort: 'high',
+    model: 'main-model', effort: 'high', repairModel: 'main-model', repairEffort: 'high', repairLimit: 100,
   });
   assert.deepEqual(resolveExecution({ model: 'main-model', effort: 'low', repairModel: 'repair-model', repairEffort: 'max' }), {
-    model: 'main-model', effort: 'low', repairModel: 'repair-model', repairEffort: 'max',
+    model: 'main-model', effort: 'low', repairModel: 'repair-model', repairEffort: 'max', repairLimit: 100,
   });
   assert.throws(() => resolveExecution({ effort: 'automatic' }), /effort must be low, medium, high, or max/);
+  assert.throws(() => resolveExecution({ repairLimit: 0 }), /repair limit must be an integer between 1 and 100/);
+  assert.throws(() => resolveExecution({ repairLimit: 101 }), /repair limit must be an integer between 1 and 100/);
 });
 
 test('repair artifacts give every retry separate evidence', () => {

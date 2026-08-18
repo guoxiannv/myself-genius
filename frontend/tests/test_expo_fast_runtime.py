@@ -243,6 +243,27 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         self.assertEqual(response["follow_up"]["runtime"], "expo")
         self.assertEqual(remote_ui_app.follow_up_cli_path(record), controller)
 
+    def test_expo_follow_up_status_does_not_invoke_controller_before_session(self) -> None:
+        now = remote_ui_app.to_iso()
+        workspace = remote_ui_app.EXPO_FAST_APP_ROOT / "pending"
+        record = remote_ui_app.RunRecord(
+            run_id="d" * 32,
+            session_name="expo-pending",
+            prompt="首轮轮询测试",
+            workspace=str(workspace),
+            variant="expo-fast",
+            created_at=now,
+            updated_at=now,
+            runtime="expo",
+        )
+
+        with patch.object(remote_ui_app, "call_follow_up_control") as control:
+            follow_up = remote_ui_app.load_follow_up_status(record, None)
+
+        control.assert_not_called()
+        self.assertEqual(follow_up["status"], "unavailable")
+        self.assertFalse((workspace / ".expo-fast").exists())
+
     def test_failed_preview_can_resume_without_regenerating_project(self) -> None:
         status, headers, payload = self.request(
             "POST",

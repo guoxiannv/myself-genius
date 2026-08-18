@@ -2402,9 +2402,11 @@ def unavailable_follow_up(message: str = "续跑会话尚未就绪") -> dict[str
 
 def load_follow_up_status(record: RunRecord, run_state: dict[str, Any] | None) -> dict[str, Any]:
     """Read the runtime status mirror through its CLI; never write state files directly."""
-    if record.runtime != "expo" and (
-        not isinstance(run_state, dict) or not isinstance(run_state.get("follow_up"), dict)
-    ):
+    if record.runtime == "expo":
+        result = read_json(Path(record.workspace) / ".expo-fast" / "result.json")
+        if not isinstance(result, dict) or not str(result.get("sessionId") or "").strip():
+            return unavailable_follow_up()
+    elif not isinstance(run_state, dict) or not isinstance(run_state.get("follow_up"), dict):
         return unavailable_follow_up()
     try:
         response = call_follow_up_control(record, "status")

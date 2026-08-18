@@ -246,6 +246,7 @@ function runnerArguments(plan) {
     '--request', plan.requestPath,
     '--claudeTimeoutMinutes', String(plan.timeout),
     '--repairTimeoutMinutes', String(plan.repairTimeout),
+    '--repairLimit', String(plan.repairLimit),
     '--launch', String(plan.launch),
     '--hap', String(plan.hap),
     '--pool', plan.pool,
@@ -274,7 +275,7 @@ function printPlan(plan, tmuxId = '') {
   console.log(`  action  : ${plan.action}`);
   console.log(`  prompt  : ${plan.promptKind}${plan.promptSource ? ` (${plan.promptSource})` : ''}`);
   console.log(`  model   : ${plan.model}/${plan.effort}`);
-  console.log(`  repair  : ${plan.repairModel}/${plan.repairEffort}`);
+  console.log(`  repair  : ${plan.repairModel}/${plan.repairEffort} (max ${plan.repairLimit})`);
   console.log(`  launch  : ${plan.launch ? `Harmony Go via ${plan.previewGatewayOrigin}` : 'disabled'}`);
   console.log(`  HAP     : ${plan.hap ? `SDK pool ${plan.pool}` : 'disabled'}`);
   if (plan.launch) console.log(`  target  : ${plan.hdcTarget || 'allocated from preview pool'}`);

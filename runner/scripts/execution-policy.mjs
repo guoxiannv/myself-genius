@@ -14,9 +14,14 @@ export function resolveExecution(options = {}) {
   const effort = options.effort || executionDefaults.effort;
   const repairModel = options.repairModel || options.model || executionDefaults.repairModel || model;
   const repairEffort = options.repairEffort || options.effort || executionDefaults.repairEffort || effort;
+  const repairLimit = Number(options.repairLimit ?? executionDefaults.repairLimit);
+  const maximumRepairLimit = Number(executionDefaults.repairLimit);
   if (!model || !repairModel) throw new Error('main and repair models must be configured');
   for (const [label, value] of [['effort', effort], ['repair effort', repairEffort]]) {
     if (!effortLevels.has(value)) throw new Error(`${label} must be low, medium, high, or max`);
   }
-  return { model, effort, repairModel, repairEffort };
+  if (!Number.isInteger(repairLimit) || repairLimit < 1 || repairLimit > maximumRepairLimit) {
+    throw new Error(`repair limit must be an integer between 1 and ${maximumRepairLimit}`);
+  }
+  return { model, effort, repairModel, repairEffort, repairLimit };
 }

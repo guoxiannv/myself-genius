@@ -20,7 +20,7 @@ jobs:
         with:
           script: |
             const issue = context.payload.issue;
-            const validTitle = /^\[(frontend|runner|sdk|global)\]\s+\S.*$/;
+            const validTitle = /^\[(frontend|runner|sdk|global|evaluation)\]\s+\S.*$/;
             const invalidLabel = "invalid-title";
             const labels = issue.labels.map((label) =>
               typeof label === "string" ? label : label.name
@@ -76,6 +76,7 @@ jobs:
                   "- `[runner] 简短描述`",
                   "- `[sdk] 简短描述`",
                   "- `[global] 简短描述`",
+                  "- `[evaluation] 简短描述`",
                   "",
                   "标题修改正确后，`invalid-title` 标签会自动移除。",
                 ].join("\n"),

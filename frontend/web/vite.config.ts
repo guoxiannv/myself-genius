@@ -20,6 +20,7 @@ export default defineConfig({
       "bitfun-platform.com",
       "version2.bitfun-platform.com",
       "version2app.bitfun-platform.com",
+      "devkit.yorha2b.cc",
       "127.0.0.1",
       "localhost",
     ],

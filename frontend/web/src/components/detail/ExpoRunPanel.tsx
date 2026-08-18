@@ -25,7 +25,7 @@ export function ExpoRunPanel({ data }: { data: RunProgress }) {
         : data.expo?.package?.label || state?.detailLabel || state?.label || "正在启动"
 
   return (
-    <div className="flex h-[clamp(460px,calc(100vh-190px),680px)] min-w-0 flex-col overflow-hidden rounded-[var(--radius-card)] border border-border bg-surface/60">
+    <div className="flex h-[clamp(360px,52vh,520px)] min-w-0 flex-col overflow-hidden rounded-[var(--radius-card)] border border-border bg-surface/60">
       <div className="flex shrink-0 items-center gap-2 border-b border-border px-5 py-3.5">
         <span className="flex h-7 w-7 items-center justify-center rounded-full bg-accent/15 text-accent-soft">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">

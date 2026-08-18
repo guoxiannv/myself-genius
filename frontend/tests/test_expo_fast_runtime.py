@@ -68,11 +68,13 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         remote_ui_app.EXPO_TRACE_CACHE.clear()
         self.started: list[str] = []
         self.resumed: list[str] = []
+        self.actions: list[str] = []
         self.start_event = threading.Event()
 
-        def fake_start(record, *, resume: bool = False) -> None:
+        def fake_start(record, *, action: str = "initial", **_options) -> None:
             self.started.append(record.run_id)
-            if resume:
+            self.actions.append(action)
+            if action != "initial":
                 self.resumed.append(record.run_id)
             self.start_event.set()
 
@@ -107,6 +109,44 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         result = response.status, dict(response.getheaders()), payload
         connection.close()
         return result
+
+    def test_desktop_bundle_reuse_requires_the_same_artifact_digest(self) -> None:
+        current_digest = "new-manifest-digest"
+        previous = {"artifact_digest": "old-manifest-digest", "screenshot_path": "/tmp/old.jpeg"}
+        initial_launch = {
+            "status": "complete",
+            "target": "desktop-1",
+            "artifactDigest": "old-manifest-digest",
+        }
+        self.assertFalse(remote_ui_app.desktop_bundle_is_reusable(
+            previous,
+            initial_launch,
+            artifact_digest=current_digest,
+            target="desktop-1",
+            has_launch_media=True,
+        ))
+        initial_launch["artifactDigest"] = current_digest
+        self.assertTrue(remote_ui_app.desktop_bundle_is_reusable(
+            {},
+            initial_launch,
+            artifact_digest=current_digest,
+            target="desktop-1",
+            has_launch_media=True,
+        ))
+        previous["artifact_digest"] = current_digest
+        self.assertTrue(remote_ui_app.desktop_bundle_is_reusable(
+            previous,
+            {},
+            artifact_digest=current_digest,
+            target="desktop-1",
+            has_launch_media=False,
+        ))
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        desktop_worker = source.split("def run_desktop_preview", 1)[1].split("def start_desktop_preview", 1)[0]
+        allocating = desktop_worker.split('status="allocating",', 1)[1].split("error=\"\",", 1)[0]
+        ready = desktop_worker.split('status="ready",', 1)[1].split("error=\"\",", 1)[0]
+        self.assertNotIn("artifact_digest=digest", allocating)
+        self.assertIn("artifact_digest=digest", ready)
 
     def test_create_expo_run_creates_empty_workspace_and_markdown_prompt(self) -> None:
         prompt = "做一个支持每日打卡与连续天数统计的应用"
@@ -146,11 +186,17 @@ class ExpoFastRuntimeTests(unittest.TestCase):
                 record.session_name,
                 "--hap",
                 "true",
+                "--launch",
+                "true",
             ],
         )
         self.assertEqual(
-            remote_ui_app.build_expo_fast_command(record, resume=True)[-1],
-            "--resume",
+            remote_ui_app.build_expo_fast_command(record, action="rebuild")[-1],
+            "--rebuild",
+        )
+        self.assertEqual(
+            remote_ui_app.build_expo_fast_command(record, action="preview")[-3:],
+            ["--launch", "true", "--preview-only"],
         )
 
     def test_expo_process_env_uses_the_leased_profile_bundle(self) -> None:
@@ -170,6 +216,32 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         env = remote_ui_app.build_expo_fast_env(record)
 
         self.assertEqual(env["EXPO_FAST_BUNDLE_IDENTIFIER"], "com.example.profile.slot06")
+
+    def test_expo_follow_up_calls_runner_owned_controller(self) -> None:
+        controller = remote_ui_app.EXPO_FAST_ROOT / "follow-up-control.sh"
+        controller.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' '{\"ok\":true,\"follow_up\":{\"runtime\":\"expo\",\"status\":\"idle\",\"queue_length\":0,\"queue\":[],\"history\":[]}}'\n",
+            encoding="utf-8",
+        )
+        controller.chmod(0o755)
+        now = remote_ui_app.to_iso()
+        record = remote_ui_app.RunRecord(
+            run_id="c" * 32,
+            session_name="expo-follow-up",
+            prompt="续跑控制测试",
+            workspace=str(remote_ui_app.EXPO_FAST_APP_ROOT / "follow-up"),
+            variant="expo-fast",
+            created_at=now,
+            updated_at=now,
+            runtime="expo",
+        )
+
+        response = remote_ui_app.call_follow_up_control(record, "status")
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["follow_up"]["runtime"], "expo")
+        self.assertEqual(remote_ui_app.follow_up_cli_path(record), controller)
 
     def test_failed_preview_can_resume_without_regenerating_project(self) -> None:
         status, headers, payload = self.request(
@@ -206,6 +278,7 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         self.assertEqual(retry_payload["status"], "preview_queued")
         self.assertTrue(self.start_event.wait(timeout=1))
         self.assertEqual(self.resumed, [run_id])
+        self.assertEqual(self.actions[-1], "preview")
 
     def test_completed_state_maps_to_unsigned_hap_and_launch_preview(self) -> None:
         workspace = remote_ui_app.EXPO_FAST_APP_ROOT / "completed-app"
@@ -491,6 +564,26 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         self.assertEqual(grouped[1]["label"], "自动修复 #1")
         self.assertEqual(grouped[1]["action_count"], 1)
         self.assertEqual(grouped[1]["message_count"], 1)
+
+        revision_dir = trace_dir / "revisions" / "001-follow-up"
+        revision_dir.mkdir(parents=True)
+        follow_up_path = revision_dir / "agent-trace.jsonl"
+        follow_up_path.write_text(
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in repair_rows),
+            encoding="utf-8",
+        )
+        follow_up_repair_path = revision_dir / "agent-repair-trace.jsonl"
+        follow_up_repair_path.write_text(
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in repair_rows),
+            encoding="utf-8",
+        )
+        revised = remote_ui_app.load_expo_claude_trace_groups(workspace, state)
+        self.assertEqual(
+            [group["id"] for group in revised],
+            ["generation", "repair-1", "follow-up-1", "follow-up-1-repair-1"],
+        )
+        self.assertEqual(revised[2]["trace_file"], "revisions/001-follow-up/agent-trace.jsonl")
+        self.assertEqual(revised[2]["label"], "续跑调整 #1")
 
     def test_expo_package_endpoint_rejects_before_hap_is_ready(self) -> None:
         status, headers, payload = self.request(

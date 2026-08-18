@@ -1,20 +1,28 @@
 # Expo Harmony Fast 编排优化交接
 
-更新日期：2026-08-14（Asia/Shanghai）
+更新日期：2026-08-18（Asia/Shanghai）
 
 > 本文件主要保留 2026-08-09 至 2026-08-10 的实验结论和决策背景。当前运行入口、目录结构和脚本职责以 `README.md` 为准；历史轮次的固定数据不要改写为当前运行状态。
 
-## 0. 当前架构（2026-08-14）
+## 0. 当前架构（2026-08-18）
 
 编排现位于 Genius 仓库的 `runner/` 子目录，生成应用默认放在相邻的 `expo-app/`。运行时已停止依赖 `skills/expo-harmony-fast/SKILL.md`：模板迁到 `templates/expo-harmony/`，运行合同迁到 `docs/runtime-contract.md`，能力与模板逻辑迁到 `scripts/fast-harmony.mjs`。
 
 当前职责边界如下：
 
 - `scripts/run-livetest.mjs` 是唯一端到端状态机和模型回合控制器。
+- `scripts/execution-policy.mjs` 统一解析外部 model/effort 参数与 `config/execution.json` 默认值。
 - `scripts/fast-harmony.mjs` 只负责模板准备、capability catalog 和 capability resolution。
 - `scripts/dependencies.mjs` 统一负责 runtime pin、依赖缓存、能力依赖同步和 Harmony Go export。
 - 独立的 `scripts/catalog.mjs` 已删除；`npm run catalog -- <project>` 直接调用 `fast-harmony.mjs catalog`。
+- `direct`、`brief`、`repair` 三套 candidate 已合并为一套执行策略，`config/candidates.json` 已由 `config/execution.json` 取代。
+- 启动入口不再接受 `--candidate` 或根据请求复杂度自动分流。主回合与 repair 回合的 model/effort 均可由外部参数传入，配置文件只提供默认值。
+- 确定性门禁失败后始终在同一 session 继续 repair，Runner 内不设 repair 次数上限；模型/进程失败、每轮 `--repair-timeout`、用户停止或系统限制仍可终止。
 - 当前模型 prompt 保持不变，仍由 `scripts/run-livetest.mjs` 和复制到生成工程的 `AGENTS.md` 共同构成。
+- 首轮完成后可用 `--follow-up-file` 续跑原 Claude session；`follow-up-control.sh` 为 Remote UI 提供持久化 FIFO、编辑、删除和中断。worker 在 Agent 与最终 gate 后立即结束，不等待设备租约；Remote UI 再发布最新 Bundle。
+- follow-up/repair Agent 可调用固定工程范围的 `check`、`build`，具体实现与外层最终门禁共用 `scripts/verification.mjs`；不存在任意 shell 工具。
+- `--rebuild`、`--preview-only` 已从用户增量回合中拆开。follow-up 默认不自动重建 HAP，避免拖慢日常修改；请求最新手机安装包时再走 HAP/签名。
+- 增量 trace 位于 `.expo-fast/revisions/NNN-follow-up/`；`result.json.revisions` 保留每轮耗时/usage/repair 证据，首轮时间指标不被覆盖。
 
 ## 1. 历史交接结论
 
@@ -92,7 +100,9 @@ Bash；identity gate 拒绝可见 runtime error overlay；launch 对同 manifest
 8. `scripts/verify-product.mjs`
 9. `scripts/fast-harmony.mjs`
 10. `docs/runtime-contract.md`
-11. `config/candidates.json`
+11. `config/execution.json`
+12. `scripts/verification.mjs`
+13. `scripts/follow-up-control.mjs`
 
 完整会话记录在 `session-history/README.md` 所列文件中。
 
@@ -179,6 +189,9 @@ Cold 3 失败模式：分类 coverage ledger 过重，诱发长时间前置推�
 
 当前实现：
 
+- Harmony Go 壳 bundleName 不再硬编码旧的 `host.exp.exponent.harmony`；统一由
+  `scripts/harmony-go-runtime.mjs` 从显式覆盖、HAP 元数据或当前 SDK 默认值
+  `com.example.myapplication1.ide` 解析，并贯穿安装、启动和身份门禁。
 - 不允许“layout 任意位置包含 id”。
 - 定位 Host 当前项目标题/selected project control，要求其精确等于 manifest id。
 - 区分 catalog navigation subtree 与 product content subtree。

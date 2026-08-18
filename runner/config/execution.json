@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "model": "k3-256k",
+  "effort": "low",
+  "repairModel": "k3-256k",
+  "repairEffort": "medium"
+}

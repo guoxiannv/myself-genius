@@ -196,6 +196,39 @@ class EffectiveCaptureStatusTests(unittest.TestCase):
         self.assertTrue(accepted)
         thread.assert_called_once()
 
+    def test_completed_follow_up_refreshes_an_existing_desktop_preview(self) -> None:
+        record = remote_ui_app.RunRecord(
+            run_id="f" * 32,
+            session_name="desktop-preview-follow-up",
+            prompt="test",
+            workspace="/tmp/project",
+            variant="expo-fast",
+            created_at=remote_ui_app.to_iso(),
+            updated_at=remote_ui_app.to_iso(),
+            runtime="expo",
+            preview_sessions={"desktop": {
+                "requested": True,
+                "status": "ready",
+                "artifact_digest": "old-digest",
+                "screenshot_path": "/tmp/old.jpeg",
+            }},
+        )
+        with patch.object(
+            remote_ui_app,
+            "start_desktop_preview",
+            return_value=(record, True),
+        ) as starter:
+            latest, accepted = remote_ui_app.maybe_refresh_desktop_preview(record, "completed")
+
+        self.assertIs(latest, record)
+        self.assertTrue(accepted)
+        starter.assert_called_once_with(record, automatic=True)
+
+        with patch.object(remote_ui_app, "start_desktop_preview") as starter:
+            _, accepted = remote_ui_app.maybe_refresh_desktop_preview(record, "running")
+        self.assertFalse(accepted)
+        starter.assert_not_called()
+
     def test_viewer_state_releases_hidden_idle_and_long_sessions(self) -> None:
         run_id = "v" * 32
         kind = "desktop"

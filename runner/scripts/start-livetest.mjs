@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline/promises';
 import { configuredHdcTarget, parseHdcTargets } from './hdc-target.mjs';
 import { configuredPreviewPools } from './preview-device-pool.mjs';
+import { resolveExecution } from './execution-policy.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const resolveRunnerPath = (value) => isAbsolute(value) ? resolve(value) : resolve(root, value);
@@ -15,7 +16,6 @@ if (existsSync(localEnvFile)) process.loadEnvFile(localEnvFile);
 const runner = join(root, 'scripts/run-livetest.mjs');
 const dependencyController = join(root, 'scripts/dependencies.mjs');
 const defaultPrompt = join(root, 'prompts/learning-goals.md');
-const candidateConfig = JSON.parse(readFileSync(join(root, 'config/candidates.json'), 'utf8')).candidates;
 const defaults = {
   appRoot: resolve(root, '../expo-app'),
   node: process.execPath,
@@ -23,9 +23,6 @@ const defaults = {
   pool: resolve(root, '../harmony-pool'),
   deveco: '/Applications/DevEco-Studio.app',
   claude: 'claude',
-  candidate: 'repair',
-  effort: '',
-  repairEffort: '',
   timeout: 0,
   repairTimeout: 0,
   hapWaitSeconds: 3600,
@@ -60,7 +57,6 @@ Run:
   --output-dir PATH      Alias of --project.
   --app-root PATH        Parent for automatic project and prompt input files.
   --session NAME         tmux session name; derived from project by default.
-  --candidate MODE       repair (default), brief, direct, or auto.
   --model MODEL          Override the main model, for example deepseek-v4-flash.
   --effort LEVEL         Override main effort: low, medium, high, or max.
   --repair-model MODEL   Override the repair model.
@@ -75,7 +71,10 @@ Run:
   --desktop-targets LIST Comma-separated desktop preview device pool.
   --phone-targets LIST   Comma-separated phone preview device pool.
   --gateway-origin URL   Shared loopback Preview Gateway origin.
-  --resume               Reverify and rerun package/preview for an existing project.
+  --follow-up-file PATH  Continue the existing Agent session with a user change request.
+  --rebuild              Reverify and export an existing project without a user turn.
+  --preview-only         Republish and relaunch an already verified existing project.
+  --resume               Legacy alias for --rebuild.
   --launch BOOL          Launch Harmony Go; true by default.
   --hap BOOL             Build a per-run unsigned HAP; false in shell-preview mode.
   --no-hap               Keep the default shell-preview behavior.
@@ -93,7 +92,7 @@ Examples:
   ./start-livetest.sh --output-dir /absolute/path/my-learning-app
   ./start-livetest.sh --model deepseek-v4-flash --effort low --repair-effort medium
   ./start-livetest.sh --repair-timeout 15
-  ./start-livetest.sh --prompt-file ./prompts/ledger.md --candidate brief
+  ./start-livetest.sh --prompt-file ./prompts/ledger.md
 `;
 }
 
@@ -114,6 +113,9 @@ function parse(argv) {
     else if (arg === '--smoke-agent') out.smokeAgent = true;
     else if (arg === '--dry-run') out.dryRun = true;
     else if (arg === '--resume') out.resume = true;
+    else if (arg === '--rebuild') out.rebuild = true;
+    else if (arg === '--preview-only') out.previewOnly = true;
+    else if (arg === '--follow-up-file') out.followUpFile = take(argv, i++, arg);
     else if (arg === '--no-launch') out.launch = false;
     else if (arg === '--no-hap') out.hap = false;
     else if (arg === '--prompt') out.prompt = take(argv, i++, arg);
@@ -122,7 +124,6 @@ function parse(argv) {
     else if (arg === '--project' || arg === '--output-dir') out.project = take(argv, i++, arg);
     else if (arg === '--app-root') out.appRoot = take(argv, i++, arg);
     else if (arg === '--session') out.session = take(argv, i++, arg);
-    else if (arg === '--candidate') out.candidate = take(argv, i++, arg);
     else if (arg === '--model') out.model = take(argv, i++, arg);
     else if (arg === '--effort') out.effort = take(argv, i++, arg);
     else if (arg === '--repair-model' || arg === '--repairModel') out.repairModel = take(argv, i++, arg);
@@ -238,23 +239,9 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
-function resolveModels(options) {
-  const mode = options.candidate;
-  const configured = mode === 'auto' ? null : candidateConfig[mode];
-  if (mode !== 'auto' && !configured) throw new Error(`unknown candidate: ${mode}`);
-  const model = options.model || configured?.model || 'automatic';
-  const effort = options.effort || configured?.effort || 'automatic';
-  const repairModel = options.repairModel || options.model || configured?.repairModel || model;
-  const repairEffort = options.repairEffort || options.effort || configured?.repairEffort || effort;
-  for (const [label, value] of [['effort', effort], ['repair effort', repairEffort]]) {
-    if (value !== 'automatic' && !['low', 'medium', 'high', 'max'].includes(value)) throw new Error(`${label} must be low, medium, high, or max`);
-  }
-  return { model, effort, repairModel, repairEffort };
-}
-
 function runnerArguments(plan) {
   const args = [runner,
-    '--candidate', plan.candidate,
+    '--action', plan.action,
     '--project', plan.project,
     '--request', plan.requestPath,
     '--claudeTimeoutMinutes', String(plan.timeout),
@@ -271,11 +258,11 @@ function runnerArguments(plan) {
   if (plan.hdcPreviewPools.desktop.length) args.push('--desktopTargets', plan.hdcPreviewPools.desktop.join(','));
   if (plan.hdcPreviewPools.phone.length) args.push('--phoneTargets', plan.hdcPreviewPools.phone.join(','));
   args.push('--gatewayOrigin', plan.previewGatewayOrigin);
-  if (plan.resume) args.push('--resume', 'true');
-  if (plan.model !== 'automatic') args.push('--model', plan.model);
-  if (plan.effort !== 'automatic') args.push('--effort', plan.effort);
-  if (plan.repairModel !== 'automatic') args.push('--repairModel', plan.repairModel);
-  if (plan.repairEffort !== 'automatic') args.push('--repairEffort', plan.repairEffort);
+  if (plan.followUpPath) args.push('--followUp', plan.followUpPath);
+  args.push('--model', plan.model);
+  args.push('--effort', plan.effort);
+  args.push('--repairModel', plan.repairModel);
+  args.push('--repairEffort', plan.repairEffort);
   if (plan.smokeAgent) args.push('--smokeAgent', 'true');
   return args;
 }
@@ -284,8 +271,8 @@ function printPlan(plan, tmuxId = '') {
   console.log('');
   console.log('Expo Harmony Fast live test');
   console.log(`  project : ${plan.project}`);
+  console.log(`  action  : ${plan.action}`);
   console.log(`  prompt  : ${plan.promptKind}${plan.promptSource ? ` (${plan.promptSource})` : ''}`);
-  console.log(`  mode    : ${plan.candidate}`);
   console.log(`  model   : ${plan.model}/${plan.effort}`);
   console.log(`  repair  : ${plan.repairModel}/${plan.repairEffort}`);
   console.log(`  launch  : ${plan.launch ? `Harmony Go via ${plan.previewGatewayOrigin}` : 'disabled'}`);
@@ -307,13 +294,15 @@ function printPlan(plan, tmuxId = '') {
 async function main() {
   const raw = parse(process.argv.slice(2));
   if (raw.help) { console.log(usage()); return; }
+  const requestedActions = Number(Boolean(raw.followUpFile)) + Number(Boolean(raw.rebuild || raw.resume)) + Number(Boolean(raw.previewOnly));
+  if (requestedActions > 1) throw new Error('choose only one of --follow-up-file, --rebuild/--resume, or --preview-only');
+  const action = raw.followUpFile ? 'follow-up' : raw.previewOnly ? 'preview' : raw.rebuild || raw.resume ? 'rebuild' : 'initial';
   const prompt = await resolvePrompt(raw);
   const appRoot = resolveRunnerPath(raw.appRoot || process.env.EXPO_FAST_APP_ROOT || defaults.appRoot);
   const autoName = `${prompt.kind === 'default' ? 'learning-goals' : 'custom'}-${timestamp()}`;
   const project = await chooseProject(raw, appRoot, autoName);
   const projectName = basename(project);
   const session = raw.session || `expo-fast-${slug(projectName)}`;
-  const candidate = raw.candidate || defaults.candidate;
   const timeout = checkOptionalTimeout(raw.timeout ?? defaults.timeout, 'timeout');
   const repairTimeout = checkOptionalTimeout(raw.repairTimeout ?? defaults.repairTimeout, 'repair timeout');
   const port = checkNumber(raw.port ?? defaults.firstPort, 'port', 1024, 65535);
@@ -323,7 +312,9 @@ async function main() {
     1,
     24 * 60 * 60,
   );
-  const models = resolveModels({ ...raw, candidate });
+  const models = resolveExecution(raw);
+  const followUpPath = raw.followUpFile ? resolve(raw.followUpFile) : '';
+  if (followUpPath && !existsSync(followUpPath)) throw new Error(`follow-up file does not exist: ${followUpPath}`);
   const promptInputDir = join(dirname(project), '.expo-fast-inputs');
   const requestPath = prompt.path || join(promptInputDir, `${slug(projectName)}.md`);
   const node = resolveRunnerPath(process.env.EXPO_FAST_NODE || defaults.node);
@@ -354,10 +345,10 @@ async function main() {
   const sessionLog = join(root, '.expo-fast/session-logs', `${slug(session)}.log`);
   const plan = {
     root, configFile: existsSync(localEnvFile) ? localEnvFile : '', project, requestPath, promptKind: prompt.kind, promptSource: prompt.path || '',
-    session, sessionLog, candidate, ...models, timeout, repairTimeout, port, hapWaitSeconds, pool,
+    session, sessionLog, action, followUpPath, ...models, timeout, repairTimeout, port, hapWaitSeconds, pool,
     launch: raw.launch,
     hap: raw.hap && enabledByEnvironment(process.env.EXPO_HARMONY_HAP_ENABLED),
-    resume: Boolean(raw.resume),
+    resume: action !== 'initial',
     foreground: Boolean(raw.foreground), attach: Boolean(raw.attach),
     smokeAgent: Boolean(raw.smokeAgent), node, sdk, deveco, claude, moduleCache, hdcTarget, hdcPreviewTargets, hdcPreviewPools, previewGatewayOrigin,
   };
@@ -367,8 +358,8 @@ async function main() {
     return;
   }
 
-  if (!raw.resume && existsSync(project) && readdirSync(project).length > 0) throw new Error(`target must be new and empty: ${project}`);
-  if (raw.resume && (!existsSync(project) || readdirSync(project).length === 0)) throw new Error(`resume target must be an existing generated project: ${project}`);
+  if (action === 'initial' && existsSync(project) && readdirSync(project).length > 0) throw new Error(`target must be new and empty: ${project}`);
+  if (action !== 'initial' && (!existsSync(project) || readdirSync(project).length === 0)) throw new Error(`${action} target must be an existing generated project: ${project}`);
   if (!existsSync(node)) throw new Error(`Node runtime does not exist: ${node}`);
   const runtimeEnv = {
     ...process.env,

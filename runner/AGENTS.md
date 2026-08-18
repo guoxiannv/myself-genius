@@ -20,6 +20,9 @@
   and one column; tablet layouts use top horizontal navigation; desktop layouts put a
   fixed-width left sidebar and flexible multi-column main content inside the same
   horizontal root container. Never derive breakpoints from physical device pixels.
-- For runtime QA, verify `bundleName=host.exp.exponent.harmony` before and after the
-  action; assert an app-specific accessibility value change and save a screenshot.
-- Run `npm test` and the bundled skill-creator validator after workflow changes.
+- For runtime QA, verify the resolved Harmony Go bundle name before and after the
+  action. Resolve it from `EXPO_HARMONY_GO_BUNDLE_NAME`, then HAP metadata, with
+  `com.example.myapplication1.ide` as the fallback; assert an app-specific
+  accessibility value change and save a screenshot.
+- Run `npm test` after workflow changes. The retired skill package no longer has a
+  `SKILL.md` target for the skill-creator validator.

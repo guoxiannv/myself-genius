@@ -17,3 +17,6 @@
 
 # HPack build output (signed HAPs, manifests) served from the repo root.
 /static/
+
+# Machine-local Harmony Go shell build cache (unsigned host.exp.exponent.harmony HAP).
+/runner/.harmony-go-shell/

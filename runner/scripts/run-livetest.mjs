@@ -257,11 +257,52 @@ function ensureReverseWithFallback(target, preferredDevicePort, hostPort) {
     { cause: lastError },
   );
 }
-function configureHarmonyGoOrigin(target, devicePort) {
-  const bundleName = 'host.exp.exponent.harmony';
-  const bundleDump = hdcRun(['-t', target, 'shell', 'bm', 'dump', '-n', bundleName]);
+const harmonyGoBundleName = 'host.exp.exponent.harmony';
+function harmonyGoShellHapPath() {
+  const configured = String(process.env.EXPO_HARMONY_GO_HAP || '').trim();
+  const candidate = configured
+    ? resolve(configured)
+    : join(root, '.harmony-go-shell/harmony/entry/build/default/outputs/default/entry-default-unsigned.hap');
+  return existsSync(candidate) ? candidate : '';
+}
+function harmonyGoUserId(target) {
+  const bundleDump = hdcRun(['-t', target, 'shell', 'bm', 'dump', '-n', harmonyGoBundleName]);
   const userId = bundleDump.match(/"userId"\s*:\s*(\d+)/)?.[1];
   if (!userId) throw new Error(`Harmony Go is not installed or has no user profile on ${target}`);
+  return userId;
+}
+function pauseMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, ms);
+}
+function ensureHarmonyGoInstalled(target) {
+  try {
+    harmonyGoUserId(target);
+    return;
+  } catch {
+    // Shell is missing; fall through to install.
+  }
+  const hap = harmonyGoShellHapPath();
+  if (!hap) {
+    throw new Error(`Harmony Go is not installed on ${target} and no shell HAP is available; set EXPO_HARMONY_GO_HAP or build the shell via sdk harmony:go:build`);
+  }
+  hdcRun(['-t', target, 'install', '-r', hap]);
+  const userId = harmonyGoUserId(target);
+  // A freshly installed shell has no entry files directory yet; the first
+  // launch creates it, and configureHarmonyGoOrigin writes into it.
+  const entryFiles = `/data/app/el2/${userId}/base/${harmonyGoBundleName}/haps/entry/files`;
+  startHarmonyGo(target);
+  const deadline = Date.now() + 15000;
+  for (;;) {
+    const probe = spawnSync(hdc, ['-t', target, 'shell', `test -d ${entryFiles} && echo EXISTS`], { encoding: 'utf8' });
+    if ((probe.stdout || '').includes('EXISTS')) break;
+    if (Date.now() > deadline) throw new Error(`Harmony Go entry files directory did not appear on ${target}: ${entryFiles}`);
+    pauseMs(500);
+  }
+  hdcRun(['-t', target, 'shell', 'aa', 'force-stop', harmonyGoBundleName]);
+}
+function configureHarmonyGoOrigin(target, devicePort) {
+  const bundleName = 'host.exp.exponent.harmony';
+  const userId = harmonyGoUserId(target);
   const configPath = `/data/app/el2/${userId}/base/${bundleName}/haps/entry/files/miniapp-server.txt`;
   const origin = `http://127.0.0.1:${devicePort}`;
   hdcRun(['-t', target, 'shell', `printf '${origin}\\n' > ${configPath}`]);
@@ -314,6 +355,7 @@ function startHarmonyGo(target) {
 }
 export function prepareHarmonyGoTarget(kind, target, devicePort, gatewayPort) {
   try {
+    ensureHarmonyGoInstalled(target);
     const activeDevicePort = ensureReverseWithFallback(target, devicePort, gatewayPort);
     configureHarmonyGoOrigin(target, activeDevicePort);
     wakeAndUnlockHarmonyTarget(target);

@@ -92,7 +92,7 @@ Runner 只有一套执行策略，不再接受 `--candidate`，也不会根据�
 首轮完成后可以继续使用同一个 Agent session：
 
 - `--follow-up-file` 执行一次用户修改。Agent 可主动调用绑定当前工程的 `expo_fast.check` 和 `expo_fast.build`；结束后外层仍完整复验。Remote UI 的状态轮询随后发布最新 Bundle，设备租约不阻塞 FIFO。
-- `--rebuild` 不调用模型，只重新验证、导出，并按参数决定是否重建 HAP 或启动预览。
+- `--rebuild` 不调用模型，只重新验证、导出，并按参数决定是否重建 HAP 或启动预览；与 `--hap true` 组合时会强制 SDK pool 产出新 HAP，不复用旧的 ready 结果。
 - `--preview-only` 不调用模型也不重复确定性构建，只重新发布已有导出并启动预览。旧 `--resume` 仅作为 `--rebuild` 的兼容别名。
 - `follow-up-control.sh` 提供 `status|enqueue|update|remove|interrupt`。Remote UI 通过它管理 FIFO；每轮 trace 保存在 `.expo-fast/revisions/NNN-follow-up/`。
 

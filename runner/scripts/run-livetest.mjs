@@ -14,6 +14,7 @@ import { repairArtifactName } from './repair-artifact.mjs';
 import { readExistingHapResult, runHapPoolBuild } from './hap-build.mjs';
 import { verifyImplementation } from './verification.mjs';
 import { harmonyGoBundleName, harmonyGoShellHapPath } from './harmony-go-runtime.mjs';
+import { generateAppIconAfterBrief } from './app-icon.mjs';
 
 const root = resolve(new URL('..', import.meta.url).pathname);
 const helper = join(root, 'scripts/fast-harmony.mjs');
@@ -722,6 +723,8 @@ async function main() {
   let currentRevision = null;
   let revisionDirectory = join(project, '.expo-fast');
   let implementationTrace = join(project, '.expo-fast/agent-trace.jsonl');
+  let appIconTask = Promise.resolve(null);
+  let appIconAbortController = null;
   if (isInitial) {
     progress('prepare cold-start template and capability index');
     run(node22, [helper, 'prepare', project, request]); setRunState('generating_code', 'preparing', stateContext, { reset: true }); writeFileSync(join(project, 'AGENTS.md'), readFileSync(join(root, 'AGENTS.md'))); writeFileSync(join(project, 'CLAUDE.md'), '@AGENTS.md\n');
@@ -732,9 +735,29 @@ async function main() {
     metrics.stages.seedModulesMs = run(node22, [dependencies, 'seed', project]).ms;
     progress(`dependencies prepared · ${metrics.stages.seedModulesMs}ms`);
     sessionId = randomUUID(); metrics.sessionId = sessionId;
+    appIconAbortController = new AbortController();
+    const appIconModel = process.env.EXPO_FAST_APP_ICON_MODEL || model;
+    appIconTask = generateAppIconAfterBrief({
+      project,
+      request: requestText,
+      claude,
+      model: appIconModel,
+      signal: appIconAbortController.signal,
+    }).then((result) => {
+      progress(result.status === 'ready'
+        ? `app icon ready · source=${result.source} · ${result.durationMs}ms`
+        : `app icon ${result.status} · ${result.reason || 'using template default'}`);
+      return result;
+    });
     setRunState('generating_code', 'model_generation', { sessionId });
     progress(`implementation turn · session=${sessionId} · model=${model} · effort=${effort}`);
-    const implementationTurn = await claudeTurn(project, join(project, '.expo-fast/agent-trace.jsonl'), buildPrompt(project), sessionId, false, Number(o.claudeTimeoutMinutes || 0), o.acceptClaudeDeadline === 'true', effort, model);
+    let implementationTurn;
+    try {
+      implementationTurn = await claudeTurn(project, join(project, '.expo-fast/agent-trace.jsonl'), buildPrompt(project), sessionId, false, Number(o.claudeTimeoutMinutes || 0), o.acceptClaudeDeadline === 'true', effort, model);
+    } catch (error) {
+      appIconAbortController.abort();
+      throw error;
+    }
     metrics.stages.claudeMs = implementationTurn.ms; metrics.claudeDeadlineReached = implementationTurn.deadlineReached;
     progress(`implementation turn finished · ${metrics.stages.claudeMs}ms`);
     recoverTrace(project, metrics);
@@ -773,6 +796,12 @@ async function main() {
     if (currentRevision) currentRevision.traceScope = scope;
     if (isInitial) metrics.traceScope = scope;
     writeJson(auditPath, scope);
+  }
+  if (isInitial) {
+    // The icon task runs alongside product implementation, but Harmony Go export
+    // must observe its final app.json declaration and generated PNG assets.
+    metrics.appIcon = await appIconTask;
+    metrics.stages.appIconMs = Number(metrics.appIcon?.durationMs) || 0;
   }
   const catalogRoot = join(project, 'dist/harmony-go');
   let repairAttempt = 0;

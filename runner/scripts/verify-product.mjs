@@ -20,6 +20,12 @@ function walk(rootDir, output = []) {
 function productFiles(project) { return [join(project, 'App.tsx'), ...walk(join(project, 'src'))].filter((path) => existsSync(path) && sourceExtensions.has(extname(path))).sort(); }
 function digestFiles(paths, root) { const hash = createHash('sha256'); for (const path of paths) hash.update(relative(root, path)).update('\0').update(readFileSync(path)).update('\0'); return hash.digest('hex'); }
 function sha256(path) { return createHash('sha256').update(readFileSync(path)).digest('hex'); }
+function iconResources(icon) {
+  if (!icon) return [];
+  if (icon.type === 'single' && icon.image) return [icon.image];
+  if (icon.type === 'layered' && icon.foregroundImage && icon.backgroundImage) return [icon.foregroundImage, icon.backgroundImage];
+  return null;
+}
 function packageName(specifier) { if (specifier.startsWith('.') || specifier.startsWith('/') || specifier.startsWith('@/')) return ''; const parts = specifier.split('/'); return specifier.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]; }
 function importsFrom(source) {
   const matches = [
@@ -174,6 +180,8 @@ export function verifyHarmonyGoArtifacts(projectRoot, outputRoot = join(projectR
   const fingerprint = json(join(project, '.expo-fast/sdk-fingerprint.json'));
   const capabilityCatalog = json(join(project, '.expo-fast/capability-catalog.json'), { available: [] });
   const pkg = json(join(project, 'package.json'), {});
+  const expo = json(join(project, 'app.json'), {}).expo || {};
+  const expectsIcon = Boolean(expo.icon || expo.harmony?.icon);
   const runtime = json(runtimePath); const catalog = json(catalogPath);
   if (!runtime || !statSafe(runtimePath)) errors.push('Harmony Go runtime.json is missing, empty, or invalid.');
   if (!Array.isArray(catalog) || !statSafe(catalogPath)) errors.push('Harmony Go catalog.json is missing, empty, or invalid.');
@@ -188,6 +196,22 @@ export function verifyHarmonyGoArtifacts(projectRoot, outputRoot = join(projectR
     if (runtime?.runtimeVersion !== manifest.runtimeVersion) errors.push(`Manifest ${manifest.id} runtimeVersion differs from runtime.json.`);
     if (fingerprint?.runtimeVersion && fingerprint.runtimeVersion !== runtime?.runtimeVersion) errors.push('Exported runtimeVersion differs from the selected SDK fingerprint.');
     if (manifest.bundle?.sha256 !== actualSha256) errors.push(`Bundle SHA-256 differs from manifest for ${manifest.id}.`);
+    const exportedIconResources = iconResources(manifest.icon);
+    if (expectsIcon && !manifest.icon) errors.push(`Manifest ${manifest.id} omits the configured application icon.`);
+    if (exportedIconResources === null) errors.push(`Manifest ${manifest.id} has an invalid icon descriptor.`);
+    if (manifest.icon && JSON.stringify(entry.icon) !== JSON.stringify(manifest.icon)) errors.push(`Catalog icon differs from manifest for ${manifest.id}.`);
+    for (const resource of exportedIconResources || []) {
+      const declaredAsset = (manifest.assets || []).find((asset) => asset.path === resource.path);
+      if (!declaredAsset || JSON.stringify(declaredAsset) !== JSON.stringify(resource)) {
+        errors.push(`Manifest ${manifest.id} icon resource is absent from assets: ${resource.path || '<missing>'}.`);
+        continue;
+      }
+      const iconPath = join(output, String(resource.url || '').replace(/^\//, ''));
+      const iconSha256 = statSafe(iconPath) ? sha256(iconPath) : '';
+      if (!iconSha256) errors.push(`Icon resource is missing or empty: ${relative(project, iconPath)}`);
+      if (resource.sha256 !== iconSha256) errors.push(`Icon SHA-256 differs from manifest for ${manifest.id}: ${resource.path}.`);
+      if (statSafe(iconPath) && resource.bytes !== statSync(iconPath).size) errors.push(`Icon byte size differs from manifest for ${manifest.id}: ${resource.path}.`);
+    }
     const required = manifest.requiredPackageVersions || {};
     for (const imported of sourceAudit?.imports || []) {
       if (infrastructurePackages.has(imported) || imported.startsWith('@babel/')) continue;
@@ -197,7 +221,7 @@ export function verifyHarmonyGoArtifacts(projectRoot, outputRoot = join(projectR
       if (selected && required[imported] && required[imported] !== selected) errors.push(`Manifest ${manifest.id} requires ${imported}@${required[imported]}, but the capability catalog selected ${selected}.`);
       if (/^\d/.test(declared) && required[imported] && required[imported] !== declared) errors.push(`Manifest ${manifest.id} requires ${imported}@${required[imported]}, but package.json pins ${declared}.`);
     }
-    artifacts.push({ id: manifest.id, manifest: relative(project, manifestPath), bundle: relative(project, bundlePath), bytes: statSafe(bundlePath) ? statSync(bundlePath).size : 0, sha256: actualSha256, requiredPackageVersions: manifest.requiredPackageVersions || {} });
+    artifacts.push({ id: manifest.id, manifest: relative(project, manifestPath), bundle: relative(project, bundlePath), bytes: statSafe(bundlePath) ? statSync(bundlePath).size : 0, sha256: actualSha256, icon: manifest.icon || null, requiredPackageVersions: manifest.requiredPackageVersions || {} });
   }
   if (!artifacts.length) errors.push('Harmony Go catalog has no exported mini app artifacts.');
   if (sourceAudit?.status !== 'pass') errors.push('Source audit evidence is missing or not passing.');

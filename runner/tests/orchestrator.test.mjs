@@ -18,10 +18,151 @@ import { HAP_DEVICE_TYPES, runHapPoolBuild } from '../scripts/hap-build.mjs';
 import { launchHapPreview } from '../scripts/run-livetest.mjs';
 import { acquirePreviewDevice, acquirePreviewDevices, configuredPreviewPools } from '../scripts/preview-device-pool.mjs';
 import { bundleNameFromModuleJson, DEFAULT_HARMONY_GO_BUNDLE_NAME, resolveHarmonyGoBundleName } from '../scripts/harmony-go-runtime.mjs';
+import {
+  APP_ICON_SIZE,
+  composeIconSvg,
+  generateAppIconAfterBrief,
+  installGeneratedIcon,
+  selectIconContext,
+  validateIconSvg,
+} from '../scripts/app-icon.mjs';
 
 const root = resolve(new URL('..', import.meta.url).pathname);
 const script = join(root, 'scripts/fast-harmony.mjs');
 const dependencyController = join(root, 'scripts/dependencies.mjs');
+
+const iconBackgroundSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><defs><linearGradient id="bg_gradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FF9A62"/><stop offset="1" stop-color="#F04462"/></linearGradient></defs><rect width="1024" height="1024" fill="url(#bg_gradient)"/></svg>`;
+const iconForegroundSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><circle cx="512" cy="512" r="250" fill="#FFFFFF"/><path d="M512 315V512L650 590" fill="none" stroke="#F04462" stroke-width="72" stroke-linecap="round"/></svg>`;
+
+function writeFakeIconPng(path) {
+  const data = Buffer.alloc(33);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(data, 0);
+  data.writeUInt32BE(13, 8);
+  data.write('IHDR', 12, 'ascii');
+  data.writeUInt32BE(APP_ICON_SIZE, 16);
+  data.writeUInt32BE(APP_ICON_SIZE, 20);
+  data[24] = 8;
+  data[25] = 6;
+  writeFileSync(path, data);
+  return { rasterizer: 'test', width: APP_ICON_SIZE, height: APP_ICON_SIZE, bytes: data.length };
+}
+
+test('app icon context prefers product semantics from flexible brief shapes', () => {
+  const structured = selectIconContext({
+    spec: { product: '番茄钟', primaryFlow: '专注后休息', acceptance: '记录完成次数' },
+    plan: { files: ['ignored.ts'] },
+    capabilities: ['ignored-package'],
+  }, 'raw prompt');
+  assert.equal(structured.source, 'brief');
+  assert.match(structured.text, /Product: 番茄钟/);
+  assert.match(structured.text, /Primary flow: 专注后休息/);
+  assert.doesNotMatch(structured.text, /ignored/);
+
+  const compact = selectIconContext({ spec: '单页简单计时器', acceptance: '可暂停和重置' });
+  assert.equal(compact.source, 'brief');
+  assert.match(compact.text, /单页简单计时器/);
+  assert.equal(selectIconContext({}, '相册日记').source, 'request-fallback');
+});
+
+test('app icon SVG contract requires opaque background and safe local vector content', () => {
+  assert.equal(validateIconSvg(iconBackgroundSvg, { background: true }), iconBackgroundSvg);
+  assert.equal(validateIconSvg(iconForegroundSvg), iconForegroundSvg);
+  const composite = composeIconSvg(iconBackgroundSvg, iconForegroundSvg);
+  assert.match(composite, /composite_bg_bg_gradient/);
+  assert.match(composite, /url\(#composite_bg_bg_gradient\)/);
+  assert.throws(
+    () => validateIconSvg('<svg viewBox="0 0 1024 1024"><text>Timer</text></svg>'),
+    /element is not allowed/
+  );
+  assert.throws(
+    () => validateIconSvg('<svg viewBox="0 0 1024 1024"><rect width="1024" height="1024" fill="none"/></svg>', { background: true }),
+    /opaque full-canvas/
+  );
+  assert.throws(
+    () => validateIconSvg('<svg viewBox="0 0 1024 1024"><image href="https:\/\/example.com\/x.png"/></svg>'),
+    /unsupported document, link, or CSS/
+  );
+});
+
+test('generated icon assets declare SDK-owned Harmony layers only after all PNGs validate', () => {
+  const project = mkdtempSync(join(tmpdir(), 'expo-fast-app-icon-install-'));
+  writeFileSync(join(project, 'app.json'), `${JSON.stringify({ expo: { name: 'Timer', slug: 'timer' } })}\n`);
+  const installed = installGeneratedIcon(project, {
+    backgroundSvg: iconBackgroundSvg,
+    foregroundSvg: iconForegroundSvg,
+  }, {
+    rasterize(_svgPath, pngPath) { return writeFakeIconPng(pngPath); },
+  });
+  const app = JSON.parse(readFileSync(join(project, 'app.json'), 'utf8'));
+  assert.equal(app.expo.icon, './assets/app-icon/icon.png');
+  assert.deepEqual(app.expo.harmony.icon, {
+    foregroundImage: './assets/app-icon/foreground.png',
+    backgroundImage: './assets/app-icon/background.png',
+  });
+  assert.equal(installed.assets.background, 'assets/app-icon/background.png');
+  assert.equal(existsSync(join(project, 'plugins/with-generated-app-icon.cjs')), false);
+});
+
+test('independent icon task waits for brief and records ready or fallback evidence', async () => {
+  const project = mkdtempSync(join(tmpdir(), 'expo-fast-app-icon-task-'));
+  mkdirSync(join(project, '.expo-fast'), { recursive: true });
+  let receivedContext = '';
+  const readyPromise = generateAppIconAfterBrief({
+    project,
+    request: 'raw request',
+    model: 'test-model',
+    briefTimeoutSeconds: 2,
+    modelRunner: async ({ context }) => {
+      receivedContext = context;
+      return {
+        output: {
+          backgroundSvg: iconBackgroundSvg,
+          foregroundSvg: iconForegroundSvg,
+          palette: ['#FF9A62', '#F04462'],
+          rationale: 'A focused timer dial.',
+        },
+        stdout: '{}',
+        stderr: '',
+      };
+    },
+    installer: () => ({ assets: { composite: 'assets/app-icon/icon.png' } }),
+  });
+  setTimeout(() => {
+    writeFileSync(join(project, '.expo-fast/brief.json'), `${JSON.stringify({
+      spec: { product: '番茄钟', primaryFlow: '专注与休息循环' },
+      capabilities: ['must-not-leak'],
+    })}\n`);
+  }, 25);
+  const ready = await readyPromise;
+  assert.equal(ready.status, 'ready');
+  assert.equal(ready.source, 'brief');
+  assert.match(receivedContext, /番茄钟/);
+  assert.doesNotMatch(receivedContext, /must-not-leak/);
+
+  const failedProject = mkdtempSync(join(tmpdir(), 'expo-fast-app-icon-fallback-'));
+  mkdirSync(join(failedProject, '.expo-fast'), { recursive: true });
+  writeFileSync(join(failedProject, '.expo-fast/brief.json'), '{"spec":"计时器"}\n');
+  const fallback = await generateAppIconAfterBrief({
+    project: failedProject,
+    request: 'raw request',
+    model: 'test-model',
+    modelRunner: async () => { throw new Error('model unavailable'); },
+  });
+  assert.equal(fallback.status, 'fallback');
+  assert.match(fallback.reason, /model unavailable/);
+  assert.equal(
+    JSON.parse(readFileSync(join(failedProject, '.expo-fast/app-icon/result.json'), 'utf8')).status,
+    'fallback'
+  );
+});
+
+test('Harmony Go export waits for the independent icon declaration without serializing model work', () => {
+  const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
+  const wait = runner.indexOf('metrics.appIcon = await appIconTask');
+  const exportGate = runner.indexOf("const catalogRoot = join(project, 'dist/harmony-go')");
+  assert.ok(wait > runner.indexOf('await claudeTurn('));
+  assert.ok(exportGate > wait);
+});
 
 test('Harmony Go bundle identity prefers explicit configuration, then HAP metadata, then the SDK default', () => {
   const moduleJson = JSON.stringify({ app: { bundleName: 'com.example.from.hap' } });
@@ -1768,18 +1909,29 @@ test('artifact evidence binds runtime, manifest, bundle hash, and source digest'
   const runtimeVersion = 'expo-57.0.9+rnoh-0.84.2+harmony-api-22+go-3';
   const bundle = 'business bundle';
   const bundleHash = createHash('sha256').update(bundle).digest('hex');
+  const icon = 'published icon png';
+  const iconHash = createHash('sha256').update(icon).digest('hex');
+  const iconDescriptor = { path: '__expo_harmony_go__/icon.png', url: '/miniapps/test-app/assets/__expo_harmony_go__/icon.png', bytes: Buffer.byteLength(icon), sha256: iconHash };
+  const iconInfo = { type: 'single', image: iconDescriptor };
   writeFileSync(join(output, 'runtime.json'), JSON.stringify({ runtimeVersion }));
-  writeFileSync(join(output, 'catalog.json'), JSON.stringify([{ id: 'test-app', manifestUrl: '/miniapps/test-app/manifest.json' }]));
+  writeFileSync(join(output, 'catalog.json'), JSON.stringify([{ id: 'test-app', manifestUrl: '/miniapps/test-app/manifest.json', icon: iconInfo }]));
   writeFileSync(join(miniapp, 'bundle.js'), bundle);
-  writeFileSync(join(miniapp, 'manifest.json'), JSON.stringify({ id: 'test-app', runtimeVersion, bundle: { url: '/miniapps/test-app/bundle.js', sha256: bundleHash } }));
+  mkdirSync(join(miniapp, 'assets/__expo_harmony_go__'), { recursive: true });
+  writeFileSync(join(miniapp, 'assets/__expo_harmony_go__/icon.png'), icon);
+  writeFileSync(join(miniapp, 'manifest.json'), JSON.stringify({ id: 'test-app', runtimeVersion, bundle: { url: '/miniapps/test-app/bundle.js', sha256: bundleHash }, icon: iconInfo, assets: [iconDescriptor] }));
   writeFileSync(join(project, '.expo-fast/sdk-fingerprint.json'), JSON.stringify({ runtimeVersion }));
   writeFileSync(join(project, '.expo-fast/capability-catalog.json'), JSON.stringify({ available: [] }));
   writeFileSync(join(project, 'package.json'), JSON.stringify({ dependencies: {} }));
+  writeFileSync(join(project, 'app.json'), JSON.stringify({ expo: { icon: './assets/app-icon/icon.png' } }));
   writeFileSync(join(project, '.expo-fast/source-audit.json'), JSON.stringify({ status: 'pass', productInputSha256: 'source-digest', imports: [] }));
   const passed = verifyHarmonyGoArtifacts(project, output);
   assert.equal(passed.status, 'pass');
   assert.equal(passed.artifacts[0].sha256, bundleHash);
+  assert.deepEqual(passed.artifacts[0].icon, iconInfo);
   assert.equal(passed.productInputSha256, 'source-digest');
+  writeFileSync(join(miniapp, 'assets/__expo_harmony_go__/icon.png'), 'tampered icon');
+  assert.equal(verifyHarmonyGoArtifacts(project, output).status, 'fail');
+  writeFileSync(join(miniapp, 'assets/__expo_harmony_go__/icon.png'), icon);
   writeFileSync(join(miniapp, 'bundle.js'), 'tampered');
   assert.equal(verifyHarmonyGoArtifacts(project, output).status, 'fail');
 });

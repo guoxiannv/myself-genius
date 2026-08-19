@@ -42,6 +42,7 @@ start-livetest.sh
   -> scripts/start-livetest.mjs       参数、环境、目标目录与 tmux
   -> scripts/run-livetest.mjs         唯一的端到端状态机与模型回合
        -> scripts/execution-policy.mjs 主/repair 模型与 effort 的统一解析
+       -> scripts/app-icon.mjs        Brief 后独立生成并安装分层应用图标
        -> scripts/verification.mjs     check/build 的唯一确定性验证服务
        -> scripts/agent-tools-server.mjs 仅向续跑/修复 Agent 暴露受控 check/build
        -> scripts/fast-harmony.mjs     模板准备、能力 catalog 与能力解析
@@ -64,6 +65,7 @@ follow-up-control.sh
 - `agent-tools-server.mjs` 只提供绑定当前工程的 `check`、`build`，不接受路径或 shell 命令。初始 0→1 回合不会连接这两个工具。
 - `follow-up-control.mjs` 持久化 FIFO 与用户操作，通过原 Claude session 启动增量回合；用户正文经文件/标准输入传递，不进入 argv。worker 在 Agent 与最终确定性 gate 完成后立即释放队列，不等待设备租约。
 - `execution-policy.mjs` 是 model/effort 解析的唯一入口；`config/execution.json` 只提供主回合与 repair 回合的默认值，命令行参数可逐次覆盖。
+- `app-icon.mjs` 在 `brief.json` 可用后启动独立、无工具、无会话持久化的模型进程，使用产品/主流程/验收语义生成分层 SVG 并转为 1024×1024 PNG；任何失败都保留模板默认图标，不阻断产品生成。
 - `harmony-go-runtime.mjs` 是壳身份的唯一入口：优先读取 `EXPO_HARMONY_GO_BUNDLE_NAME`，其次读取 `EXPO_HARMONY_GO_HAP` 内嵌 `module.json`，最后使用当前 SDK 默认值 `com.example.myapplication1.ide`。安装、启动、强停、前台检查和 smoke 身份校验共享该结果。
 - `templates/expo-harmony/` 是冷启动技术模板；`docs/runtime-contract.md` 是当前 Harmony Go 运行合同。
 - `EXPERIMENT-REPORT.md` 与 `HANDOFF.md` 保留历史实验与决策背景；当前使用方式和职责以本 README 为准。
@@ -76,7 +78,7 @@ follow-up-control.sh
 
 1. 从技术模板准备空工程，生成能力 catalog、SDK fingerprint 和紧凑能力索引。
 2. 固定 Harmony Go runtime 核心依赖，并从兼容缓存或 npm 安装基线依赖。
-3. 运行主模型回合，只允许在目标工程边界内读写产品文件。
+3. 运行主模型回合，只允许在目标工程边界内读写产品文件；`brief.json` 出现后，另一个独立模型进程并行生成应用图标。
 4. 解析并同步模型选择的精确能力依赖，执行 typecheck、trace-scope 和 source audit。
 5. 若确定性诊断失败，使用同一会话执行聚合 repair，再完整复验；单次运行最多执行 100 轮 repair，达到上限后保留最后诊断并终止。
 6. 通过 SDK Harmony CLI 导出 Bundle/catalog，执行 artifact audit。
@@ -114,6 +116,11 @@ Runner 只有一套执行策略，不再接受 `--candidate`，也不会根据�
   capability-selection.json
   module-cache.json
   brief.json
+  app-icon/
+    result.json
+    background.svg
+    foreground.svg
+    icon.svg
   agent-trace.jsonl
   agent-repair-trace*.jsonl
   trace-scope-audit*.json
@@ -133,6 +140,8 @@ Runner 只有一套执行策略，不再接受 `--candidate`，也不会根据�
 ```
 
 `manifest.json` 单独存在不代表端到端成功；应以 `result.json`、各项 gate 和运行时交互证据共同判断。`result.json.execution` 记录本次实际使用的主/repair 模型、effort 和 `repairLimit: 100`。`result.json.revisions` 记录首轮和每次 follow-up，初始 `generationMs`/`totalMs` 不会被后续操作覆盖；后续耗时写入 revision、`operations`/`resumes` 与 `lastOperationMs`。
+
+生成成功后，Expo 工程中的源资产位于 `assets/app-icon/`：`app.json#expo.icon` 指向合成 PNG，`app.json#expo.harmony.icon` 声明前景和背景层。HAP prebuild 时由 SDK 将分层资源写入 AppScope 与 entry module，并同步更新应用图标和主 EntryAbility 图标；Runner 不携带原生 config plugin，启动窗口图标仍由 splash 独立控制，固定 SDK pool 也不保存产品图标源码。首次 Harmony Go export 会在主实现完成后汇合并行图标任务，SDK 将图标作为带 URL、大小和 SHA-256 的 manifest asset 与 `bundle.js` 一起发布；Harmony Go 的远端 catalog 和离线已安装列表都会显示图标。图标任务状态与耗时记录在 `.expo-fast/app-icon/result.json` 和最终 metrics 中。可通过 `.env` 中的 `EXPO_FAST_APP_ICON_*` 参数单独关闭、换模型或调整超时。
 
 ## 开发与验证
 

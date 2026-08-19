@@ -19,6 +19,29 @@ and artifact audit). They accept no path or command arguments and never expose a
 Both tools and the authoritative outer gate call `scripts/verification.mjs`; an Agent tool
 success does not bypass final orchestration verification.
 
+The initial turn also starts one independent app-icon task as soon as
+`.expo-fast/brief.json` becomes valid JSON. Only the brief's product, primary-flow, and
+acceptance semantics are sent to that task; technical plan and capability fields are
+excluded. The task asks a tool-less Claude turn for separate 1024×1024 background and
+foreground SVG layers, validates the restricted SVG surface, and rasterizes three PNGs
+(background, foreground, and composite). It runs concurrently with implementation and
+deterministic gates, never consumes the product Agent session, and falls back to the
+template icon on timeout, invalid output, or rasterizer failure.
+
+Generated icon source assets live in `assets/app-icon/` in the Expo project. The runner
+writes the composite fallback to `expo.icon` and the two layer paths to
+`expo.harmony.icon`. The SDK owns native materialization during HAP prebuild: it writes
+the layered-image resources into AppScope and the entry module, then points the app and
+main `EntryAbility` icons at the generated resource. The start-window icon remains
+independently controlled by splash configuration. This keeps the SDK pool's `harmony/`
+directory deterministic and avoids product-Agent native edits.
+
+The icon task remains concurrent with the implementation turn. Before the first Harmony
+Go export, the orchestrator joins that task so `export:harmony` observes the final icon
+declaration. The SDK publishes the single or layered PNG resources beside `bundle.js`,
+records their URL, byte size, and SHA-256 in both catalog and manifest metadata, and the
+Harmony Go shell renders them from the server or its installed offline asset cache.
+
 After a successful initial run, `--follow-up-file` resumes the original Claude session
 and writes revision-scoped trace evidence. `--rebuild` performs deterministic verification
 and export without a model turn, while `--preview-only` republishes an existing verified
@@ -93,6 +116,11 @@ Evidence written per run:
   sdk-fingerprint.json
   module-cache.json
   brief.json              # compact Spec → Plan → Code brief
+  app-icon/
+    result.json           # ready/fallback status, timing, model, source, asset paths
+    background.svg
+    foreground.svg
+    icon.svg
   agent-trace.jsonl
   agent-repair-trace*.jsonl
   trace-scope-audit*.json

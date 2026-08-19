@@ -3,6 +3,5 @@
   "model": "k3-256k",
   "effort": "low",
   "repairModel": "k3-256k",
-  "repairEffort": "medium",
-  "repairLimit": 100
+  "repairEffort": "medium"
 }

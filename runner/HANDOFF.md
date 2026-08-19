@@ -17,7 +17,7 @@
 - 独立的 `scripts/catalog.mjs` 已删除；`npm run catalog -- <project>` 直接调用 `fast-harmony.mjs catalog`。
 - `direct`、`brief`、`repair` 三套 candidate 已合并为一套执行策略，`config/candidates.json` 已由 `config/execution.json` 取代。
 - 启动入口不再接受 `--candidate` 或根据请求复杂度自动分流。主回合与 repair 回合的 model/effort 均可由外部参数传入，配置文件只提供默认值。
-- 确定性门禁失败后在同一 session 继续 repair，单次运行最多 100 轮；达到上限、模型/进程失败、每轮 `--repair-timeout`、用户停止或系统限制均会终止。
+- 确定性门禁失败后始终在同一 session 继续 repair，Runner 内不设 repair 次数上限；模型/进程失败、每轮 `--repair-timeout`、用户停止或系统限制仍可终止。
 - 当前模型 prompt 保持不变，仍由 `scripts/run-livetest.mjs` 和复制到生成工程的 `AGENTS.md` 共同构成。
 - 首轮完成后可用 `--follow-up-file` 续跑原 Claude session；`follow-up-control.sh` 为 Remote UI 提供持久化 FIFO、编辑、删除和中断。worker 在 Agent 与最终 gate 后立即结束，不等待设备租约；Remote UI 再发布最新 Bundle。
 - follow-up/repair Agent 可调用固定工程范围的 `check`、`build`，具体实现与外层最终门禁共用 `scripts/verification.mjs`；不存在任意 shell 工具。

@@ -78,7 +78,7 @@ follow-up-control.sh
 2. 固定 Harmony Go runtime 核心依赖，并从兼容缓存或 npm 安装基线依赖。
 3. 运行主模型回合，只允许在目标工程边界内读写产品文件。
 4. 解析并同步模型选择的精确能力依赖，执行 typecheck、trace-scope 和 source audit。
-5. 若确定性诊断失败，使用同一会话执行聚合 repair，再完整复验；单次运行最多执行 100 轮 repair，达到上限后保留最后诊断并终止。
+5. 若确定性诊断失败，使用同一会话执行聚合 repair，再完整复验；只要仍然失败就继续下一轮，不设置编排内 repair 次数上限。
 6. 通过 SDK Harmony CLI 导出 Bundle/catalog，执行 artifact audit。
 7. 将 Bundle 发布到共享 Gateway，由设备池分配预装 Harmony Go 壳并验证当前应用身份与交互证据。
 8. 只有显式传入 `--hap true` 时，才在固定 pool 中额外构建每任务 unsigned HAP。
@@ -132,7 +132,7 @@ Runner 只有一套执行策略，不再接受 `--candidate`，也不会根据�
       trace-scope-audit*.json
 ```
 
-`manifest.json` 单独存在不代表端到端成功；应以 `result.json`、各项 gate 和运行时交互证据共同判断。`result.json.execution` 记录本次实际使用的主/repair 模型、effort 和 `repairLimit: 100`。`result.json.revisions` 记录首轮和每次 follow-up，初始 `generationMs`/`totalMs` 不会被后续操作覆盖；后续耗时写入 revision、`operations`/`resumes` 与 `lastOperationMs`。
+`manifest.json` 单独存在不代表端到端成功；应以 `result.json`、各项 gate 和运行时交互证据共同判断。`result.json.execution` 记录本次实际使用的主/repair 模型和 effort，其中 `repairLimit: null` 表示 Runner 不设置 repair 次数上限。`result.json.revisions` 记录首轮和每次 follow-up，初始 `generationMs`/`totalMs` 不会被后续操作覆盖；后续耗时写入 revision、`operations`/`resumes` 与 `lastOperationMs`。
 
 ## 开发与验证
 

@@ -686,8 +686,8 @@ async function main() {
   const isFollowUp = action === 'follow-up';
   const followUpPath = isFollowUp ? resolve(o.followUp || '') : '';
   if (isFollowUp && (!followUpPath || !existsSync(followUpPath))) throw new Error(`follow-up request does not exist: ${followUpPath || '<missing>'}`);
-  const { model, effort, repairModel, repairEffort, repairLimit } = resolveExecution(o);
-  const execution = { model, effort, repairModel, repairEffort, repairLimit };
+  const { model, effort, repairModel, repairEffort } = resolveExecution(o);
+  const execution = { model, effort, repairModel, repairEffort, repairLimit: null };
   const stateContext = { ...execution, action, resume: !isInitial };
   progress(`start · action=${action} · model=${model} · effort=${effort} · repair=${repairModel}/${repairEffort} · project=${project}`);
   if (o.baseProject || o['base-project']) throw new Error('Cold-start experiment integrity forbids --baseProject/--base-project. Use a new empty project directory.');
@@ -774,11 +774,8 @@ async function main() {
     } catch (error) {
       writeFileSync(join(project, '.expo-fast/verification-errors.txt'), `${error.stack || error}\n`);
       if (!isInitial && !isFollowUp) throw error;
-      if (repairAttempt >= repairLimit) {
-        throw new Error(`deterministic verification still failed after ${repairLimit} repair attempts`, { cause: error });
-      }
       repairAttempt += 1;
-      setRunState('repairing', 'model_repair', { repairAttempt, repairLimit, action, revision: currentRevision?.number });
+      setRunState('repairing', 'model_repair', { repairAttempt, repairLimit: null, action, revision: currentRevision?.number });
       progress(`deterministic gates failed; starting same-session repair ${repairAttempt} · model=${repairModel} · effort=${repairEffort}`);
       const traceName = repairArtifactName('agent-repair-trace', repairAttempt, '.jsonl');
       const auditName = repairArtifactName('repair-trace-scope-audit', repairAttempt, '.json');

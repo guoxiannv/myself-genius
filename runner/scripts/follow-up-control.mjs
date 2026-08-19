@@ -273,10 +273,6 @@ async function main() {
   if (options.command === 'work') { await runWorker(project, runName); return; }
 
   if (options.command === 'status') {
-    if (!resultSession(project)) {
-      output(response(defaultState(project, runName)));
-      return;
-    }
     const state = withLock(project, () => {
       const current = loadState(project, runName);
       if (current.status !== 'idle' && current.status !== 'unavailable' && !processAlive(current.worker_pid)) {

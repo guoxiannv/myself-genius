@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
@@ -122,7 +122,6 @@ export function runHapPoolBuild({
   waitSeconds = 3600,
   buildMode = 'release',
   deviceType = 'phone',
-  reuseExisting = true,
   commandRunner = spawnSync,
 }) {
   const startedAt = Date.now();
@@ -133,14 +132,8 @@ export function runHapPoolBuild({
   const resultPath = join(outputRoot, HAP_RESULT_FILE);
   mkdirSync(outputRoot, { recursive: true });
 
-  if (reuseExisting) {
-    const existing = readExistingHapResult(project);
-    if (existing?.status === 'ready') return { ...existing, reused: true };
-  } else {
-    // A forced rebuild must publish fresh metadata. Otherwise a pool command that
-    // exits without writing output could make the previous HAP look current.
-    rmSync(resultPath, { force: true });
-  }
+  const existing = readExistingHapResult(project);
+  if (existing?.status === 'ready') return { ...existing, reused: true };
 
   const safeRunId = String(runId || basename(project)).replace(/[^A-Za-z0-9._-]+/g, '-');
   const jobId = `hap-${safeRunId}`;

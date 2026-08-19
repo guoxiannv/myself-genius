@@ -824,15 +824,7 @@ async function main() {
     setRunState(activeRunState.state, 'hap_building', { hap: { status: 'building', pool, startedAt: new Date().toISOString() } });
     progress(`build unsigned HAP through SDK pool · pool=${pool}`);
     const startedAt = Date.now();
-    hap = runHapPoolBuild({
-      project,
-      sdk,
-      pool,
-      node: node22,
-      runId: activeRunState.runId,
-      waitSeconds,
-      reuseExisting: action !== 'rebuild',
-    });
+    hap = runHapPoolBuild({ project, sdk, pool, node: node22, runId: activeRunState.runId, waitSeconds });
     metrics.stages.hapBuildMs = Date.now() - startedAt;
     progress(hap.status === 'ready'
       ? `unsigned HAP ready · slot=${hap.slotId || 'unknown'} · ${hap.hapPath}`

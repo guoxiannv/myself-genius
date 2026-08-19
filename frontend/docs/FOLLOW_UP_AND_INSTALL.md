@@ -258,7 +258,7 @@ Expo 状态保存在生成工程内：
 3. 后续调整不会自动调用 HPack，也不重复执行首版本 QA。ArkPilot 可维护 unsigned HAP 与预览；Expo 默认只重建并验证 Bundle，完成后由详情页轮询发布，不用设备等待阻塞 follow-up FIFO。
 4. 最新预览就绪、主运行状态为 `completed` 且 follow-up 明确空闲后，顶部才显示可用的“更新安装包”按钮。
 5. Expo 的 follow-up enqueue、HAP rebuild 与 HPack 启动共享 per-run 操作锁；任一构建/签名操作启动后，新的调整请求返回 `control_busy`，反向也不会在 active follow-up 期间启动 rebuild 或签名。
-6. 用户点击 `POST /api/runs/{id}/package` 后，按钮在整个编译、签名和二维码生成期间不可重复点击；Expo 若尚无当前 revision 的 HAP，会先执行无模型的 `--rebuild --hap true --launch false`，强制 SDK pool 生成新 HAP，并拒绝把旧 ready 结果标记为当前版本。
+6. 用户点击 `POST /api/runs/{id}/package` 后，按钮在整个编译、签名和二维码生成期间不可重复点击；Expo 若尚无当前 revision 的 HAP，会先执行无模型的 `--rebuild --hap true --launch false`。
 7. 生成成功后进度从 80% 变为 100%，右下角自动展开最新二维码；再次开始调整后进度退回 80%。
 8. `GET /api/runs/{id}/install-qr?version=first` 专门返回首版本二维码。
 

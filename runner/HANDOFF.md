@@ -21,7 +21,7 @@
 - 当前模型 prompt 保持不变，仍由 `scripts/run-livetest.mjs` 和复制到生成工程的 `AGENTS.md` 共同构成。
 - 首轮完成后可用 `--follow-up-file` 续跑原 Claude session；`follow-up-control.sh` 为 Remote UI 提供持久化 FIFO、编辑、删除和中断。worker 在 Agent 与最终 gate 后立即结束，不等待设备租约；Remote UI 再发布最新 Bundle。
 - follow-up/repair Agent 可调用固定工程范围的 `check`、`build`，具体实现与外层最终门禁共用 `scripts/verification.mjs`；不存在任意 shell 工具。
-- `--rebuild`、`--preview-only` 已从用户增量回合中拆开。follow-up 默认不自动重建 HAP，避免拖慢日常修改；请求最新手机安装包时再走 HAP/签名。`--rebuild --hap true` 强制 SDK pool 发布新 HAP 和新结果元数据，不复用旧 ready HAP。
+- `--rebuild`、`--preview-only` 已从用户增量回合中拆开。follow-up 默认不自动重建 HAP，避免拖慢日常修改；请求最新手机安装包时再走 HAP/签名。
 - 增量 trace 位于 `.expo-fast/revisions/NNN-follow-up/`；`result.json.revisions` 保留每轮耗时/usage/repair 证据，首轮时间指标不被覆盖。
 
 ## 1. 历史交接结论

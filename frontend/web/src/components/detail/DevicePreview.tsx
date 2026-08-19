@@ -37,7 +37,7 @@ export function DevicePreview({
     ? {
         default_kind: "desktop",
         previews: {
-          desktop: { enabled: true, transport: "bundle_shell", start_mode: "automatic" },
+          desktop: { enabled: true, transport: "hap_install", start_mode: "automatic" },
           phone: { enabled: true, transport: "hap_install", start_mode: "on_demand" },
         },
       }
@@ -507,7 +507,7 @@ export function DevicePreview({
     <WaitingState
       message={
         retryingPreview || previewStarting
-          ? previewStatusMessage(sessionStatus)
+          ? previewStatusMessage(sessionStatus, activePreview)
           : previewFailed
             ? activeSession?.error || ("error" in activeArtifacts ? activeArtifacts.error : "") || "设备预览失败，生成产物仍然可用。"
             : phoneNeedsRequest || previewInactive
@@ -653,14 +653,14 @@ function RetryIcon() {
   )
 }
 
-function previewStatusMessage(status: string) {
+function previewStatusMessage(status: string, kind: PreviewKind) {
   switch (status) {
     case "allocating":
       return "正在申请空闲模拟器…"
     case "installing":
-      return "正在安装 HAP 到手机模拟器…"
+      return `正在安装 HAP 到${kind === "phone" ? "手机" : "PC"}模拟器…`
     case "loading_bundle":
-      return "正在让 PC 壳加载 bundle…"
+      return "正在恢复 PC 模拟器预览…"
     case "launching":
       return "应用已安装，正在等待首帧…"
     default:

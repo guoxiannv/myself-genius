@@ -38,7 +38,7 @@ class EffectiveCaptureStatusTests(unittest.TestCase):
         self.assertEqual(set(pro_policy["previews"]), {"phone"})
         self.assertEqual(pro_policy["previews"]["phone"]["start_mode"], "automatic")
         self.assertEqual(expo_policy["default_kind"], "desktop")
-        self.assertEqual(expo_policy["previews"]["desktop"]["transport"], "bundle_shell")
+        self.assertEqual(expo_policy["previews"]["desktop"]["transport"], "hap_install")
 
     def test_phone_target_discovery_skips_a_timed_out_desktop_probe(self) -> None:
         def run_probe(command, **kwargs):
@@ -151,7 +151,7 @@ class EffectiveCaptureStatusTests(unittest.TestCase):
 
             self.assertEqual(selected, signed_hap.resolve())
 
-    def test_start_desktop_preview_is_idempotent_while_loading(self) -> None:
+    def test_start_desktop_preview_is_idempotent_while_installing(self) -> None:
         record = remote_ui_app.RunRecord(
             run_id="d" * 32,
             session_name="desktop-preview-idempotent",
@@ -161,11 +161,11 @@ class EffectiveCaptureStatusTests(unittest.TestCase):
             created_at=remote_ui_app.to_iso(),
             updated_at=remote_ui_app.to_iso(),
             runtime="expo",
-            preview_sessions={"desktop": {"status": "loading_bundle", "transport": "bundle_shell"}},
+            preview_sessions={"desktop": {"status": "installing", "transport": "hap_install"}},
         )
         remote_ui_app.DESKTOP_PREVIEW_IN_FLIGHT.add(record.run_id)
         try:
-            with patch.object(remote_ui_app, "desktop_preview_artifacts") as resolver:
+            with patch.object(remote_ui_app, "preview_hap_artifact") as resolver:
                 latest, accepted = remote_ui_app.start_desktop_preview(record)
         finally:
             remote_ui_app.DESKTOP_PREVIEW_IN_FLIGHT.discard(record.run_id)
@@ -183,9 +183,11 @@ class EffectiveCaptureStatusTests(unittest.TestCase):
             created_at=remote_ui_app.to_iso(),
             updated_at=remote_ui_app.to_iso(),
             runtime="expo",
-            preview_sessions={"desktop": {"status": "queued", "transport": "bundle_shell"}},
+            preview_sessions={"desktop": {"status": "queued", "transport": "hap_install"}},
         )
-        with patch.object(remote_ui_app, "desktop_preview_artifacts", return_value=(Path("/tmp/manifest"), Path("/tmp/export"), "digest")), patch.object(
+        with tempfile.NamedTemporaryFile(suffix=".hap") as hap, patch.object(
+            remote_ui_app, "preview_hap_artifact", return_value=Path(hap.name)
+        ), patch.object(
             remote_ui_app, "save_run", side_effect=lambda value: value
         ), patch.object(remote_ui_app, "update_preview_session", side_effect=lambda value, _kind, **changes: value), patch.object(
             remote_ui_app.threading, "Thread"
@@ -290,7 +292,7 @@ class EffectiveCaptureStatusTests(unittest.TestCase):
             preview_sessions={
                 "desktop": {
                     "status": "ready",
-                    "transport": "bundle_shell",
+                    "transport": "hap_install",
                     "target": "desktop-1",
                     "lease_id": "expired",
                     "live_available": True,
@@ -303,6 +305,23 @@ class EffectiveCaptureStatusTests(unittest.TestCase):
 
         self.assertEqual(session["status"], "released")
         self.assertFalse(session["live_available"])
+
+    def test_existing_desktop_session_adopts_hap_transport(self) -> None:
+        record = remote_ui_app.RunRecord(
+            run_id="m" * 32,
+            session_name="desktop-preview-migration",
+            prompt="test",
+            workspace="/tmp",
+            variant="expo-fast",
+            created_at=remote_ui_app.to_iso(),
+            updated_at=remote_ui_app.to_iso(),
+            runtime="expo",
+            preview_sessions={"desktop": {"status": "idle", "transport": "bundle_shell"}},
+        )
+
+        session = remote_ui_app.preview_sessions_payload(record)["desktop"]
+
+        self.assertEqual(session["transport"], "hap_install")
 
     def test_stale_allocating_session_without_worker_or_lease_is_released(self) -> None:
         record = remote_ui_app.RunRecord(
@@ -317,7 +336,7 @@ class EffectiveCaptureStatusTests(unittest.TestCase):
             preview_sessions={
                 "desktop": {
                     "status": "allocating",
-                    "transport": "bundle_shell",
+                    "transport": "hap_install",
                     "target": "",
                     "lease_id": "",
                 }
@@ -327,70 +346,6 @@ class EffectiveCaptureStatusTests(unittest.TestCase):
         session = remote_ui_app.preview_sessions_payload(record)["desktop"]
 
         self.assertEqual(session["status"], "released")
-
-    def test_desktop_preview_command_can_reuse_installed_bundle(self) -> None:
-        record = remote_ui_app.RunRecord(
-            run_id="c" * 32,
-            session_name="desktop-preview-command",
-            prompt="test",
-            workspace="/tmp/project",
-            variant="expo-fast",
-            created_at=remote_ui_app.to_iso(),
-            updated_at=remote_ui_app.to_iso(),
-            runtime="expo",
-        )
-        script = Path("/tmp/scripts/open-desktop-preview.mjs")
-        with patch.object(remote_ui_app, "EXPO_FAST_ROOT", Path("/tmp")), patch.object(
-            Path, "is_file", return_value=True
-        ), patch.dict(remote_ui_app.os.environ, {"EXPO_FAST_NODE": "/tmp/node"}):
-            command = remote_ui_app.desktop_preview_command(
-                record,
-                "desktop-1",
-                reuse_installed=True,
-            )
-
-        self.assertIn(str(script), command)
-        self.assertEqual(command[command.index("--reuseInstalled") + 1], "true")
-
-    def test_desktop_preview_digest_tracks_exported_bundle_manifest(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            manifest_id = "remote-ui-" + "d" * 32
-            source_dir = workspace / ".expo-fast"
-            export_root = workspace / "dist" / "harmony-go"
-            export_dir = export_root / "miniapps" / manifest_id
-            source_dir.mkdir()
-            export_dir.mkdir(parents=True)
-            (source_dir / "manifest.json").write_text(
-                json.dumps({"id": manifest_id}),
-                encoding="utf-8",
-            )
-            (export_root / ".expo-harmony-go-export").write_text("", encoding="utf-8")
-            export_manifest = export_dir / "manifest.json"
-            export_manifest.write_text(
-                json.dumps({"id": manifest_id, "bundle": {"sha256": "first"}}),
-                encoding="utf-8",
-            )
-            record = remote_ui_app.RunRecord(
-                run_id="d" * 32,
-                session_name="desktop-preview-digest",
-                prompt="test",
-                workspace=str(workspace),
-                variant="expo-fast",
-                created_at=remote_ui_app.to_iso(),
-                updated_at=remote_ui_app.to_iso(),
-                runtime="expo",
-            )
-
-            manifest_path, _, first_digest = remote_ui_app.desktop_preview_artifacts(record)
-            export_manifest.write_text(
-                json.dumps({"id": manifest_id, "bundle": {"sha256": "second"}}),
-                encoding="utf-8",
-            )
-            _, _, second_digest = remote_ui_app.desktop_preview_artifacts(record)
-
-            self.assertEqual(manifest_path, export_manifest)
-            self.assertNotEqual(first_digest, second_digest)
 
     def test_expo_payload_exposes_desktop_and_phone_previews_from_one_build(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

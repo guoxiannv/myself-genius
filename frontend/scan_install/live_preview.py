@@ -289,7 +289,7 @@ class LocalLivePreview:
         if not hap_path.is_file():
             raise LivePreviewError(f"预览 HAP 不存在：{hap_path}")
         if not bundle_name.strip():
-            raise LivePreviewError("无法启动手机预览：HAP 缺少 bundleName。")
+            raise LivePreviewError("无法启动设备预览：HAP 缺少 bundleName。")
         session = self._session(run_id)
         with session.lock:
             target = self._resolve_target(session)

@@ -773,10 +773,6 @@ DESKTOP_PREVIEW_LOCK = threading.Lock()
 DESKTOP_PREVIEW_CANCELLED: set[str] = set()
 PREVIEW_VIEWERS: dict[str, dict[str, float]] = {}
 PREVIEW_VIEWERS_LOCK = threading.Lock()
-DESKTOP_PREVIEW_LAUNCH_TIMEOUT_SEC = max(
-    30,
-    int(os.environ.get("HP_DESKTOP_PREVIEW_LAUNCH_TIMEOUT_SEC", "120")),
-)
 PREVIEW_DEVICE_PROBE_TIMEOUT_SEC = 3
 
 
@@ -785,7 +781,10 @@ def preview_policy(record: RunRecord) -> dict[str, Any]:
         return {
             "default_kind": "desktop",
             "previews": {
-                "desktop": {"enabled": True, "transport": "bundle_shell", "start_mode": "automatic"},
+                # PC and phone previews both install the generated HAP.  The
+                # install links in the distribution panel are independent of
+                # this policy and remain unchanged.
+                "desktop": {"enabled": True, "transport": "hap_install", "start_mode": "automatic"},
                 "phone": {"enabled": True, "transport": "hap_install", "start_mode": "on_demand"},
             },
         }
@@ -822,6 +821,9 @@ def preview_sessions_payload(record: RunRecord) -> dict[str, dict[str, Any]]:
     stored_sessions = getattr(record, "preview_sessions", None) or {}
     for kind in preview_policy(record)["previews"]:
         result[kind] = {**preview_session_defaults(record, kind), **stored_sessions.get(kind, {})}
+        # Stored sessions from the previous PC shell implementation must adopt
+        # the current policy when an existing task is reopened.
+        result[kind]["transport"] = preview_session_defaults(record, kind)["transport"]
         lease = read_json(preview_lease_path(str(result[kind].get("target") or ""))) if result[kind].get("target") else None
         lease_current = bool(
             result[kind].get("lease_id")
@@ -1373,136 +1375,34 @@ def start_phone_preview(record: RunRecord, *, automatic: bool = False) -> tuple[
     return record, True
 
 
-def desktop_preview_artifacts(record: RunRecord) -> tuple[Path, Path, str]:
-    if record.runtime != "expo":
-        raise LivePreviewError("只有 Expo Runtime 任务支持 PC bundle 预览。")
-    workspace = Path(record.workspace)
-    source_manifest_path = workspace / ".expo-fast" / "manifest.json"
-    export_root = workspace / "dist" / "harmony-go"
-    if not source_manifest_path.is_file() or not (export_root / ".expo-harmony-go-export").is_file():
-        raise LivePreviewError("当前任务还没有可加载的 Harmony Go 导出产物。")
-    try:
-        source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise LivePreviewError(f"Harmony Go manifest 无效：{exc}") from exc
-    manifest_id = str(source_manifest.get("id") or "").strip()
-    if not manifest_id:
-        raise LivePreviewError("Harmony Go manifest 缺少应用 id。")
-    export_manifest_path = export_root / "miniapps" / manifest_id / "manifest.json"
-    try:
-        export_manifest = json.loads(export_manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise LivePreviewError(f"Harmony Go 导出 manifest 无效：{exc}") from exc
-    if str(export_manifest.get("id") or "").strip() != manifest_id:
-        raise LivePreviewError("Harmony Go 导出 manifest 与当前应用 id 不一致。")
-    return (
-        export_manifest_path,
-        export_root,
-        hashlib.sha256(export_manifest_path.read_bytes()).hexdigest(),
-    )
-
-
-def desktop_preview_command(record: RunRecord, target: str, *, reuse_installed: bool = False) -> list[str]:
-    script_path = (EXPO_FAST_ROOT / "scripts" / "open-desktop-preview.mjs") if EXPO_FAST_ROOT else None
-    if script_path is None or not script_path.is_file():
-        raise LivePreviewError("PC 实时预览启动脚本不存在。")
-    node_bin = os.environ.get("EXPO_FAST_NODE", "").strip() or shutil.which("node") or "node"
-    gateway_origin = EXPO_PUBLIC_GATEWAY.local_origin()
-    return [
-        node_bin,
-        str(script_path),
-        "--project",
-        record.workspace,
-        "--target",
-        target,
-        "--gatewayOrigin",
-        gateway_origin,
-        "--devicePort",
-        "3333",
-        "--reuseInstalled",
-        "true" if reuse_installed else "false",
-    ]
-
-
-def launch_desktop_bundle(record: RunRecord, target: str, *, reuse_installed: bool = False) -> None:
-    command = desktop_preview_command(record, target, reuse_installed=reuse_installed)
-    try:
-        process = subprocess.Popen(
-            command,
-            cwd=str(EXPO_FAST_ROOT or APP_ROOT),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            env=os.environ.copy(),
-        )
-    except OSError as exc:
-        raise LivePreviewError(f"无法启动 PC 实时预览：{exc}") from exc
-
-    deadline = time.monotonic() + DESKTOP_PREVIEW_LAUNCH_TIMEOUT_SEC
-    output = ""
-    while True:
-        if record.run_id in DESKTOP_PREVIEW_CANCELLED:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-            raise LivePreviewError("PC 实时预览已取消。")
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            process.kill()
-            output, _ = process.communicate()
-            raise LivePreviewError(
-                f"PC 模拟器加载 bundle 超过 {DESKTOP_PREVIEW_LAUNCH_TIMEOUT_SEC} 秒。"
-            )
-        try:
-            output, _ = process.communicate(timeout=min(1.0, remaining))
-            break
-        except subprocess.TimeoutExpired:
-            continue
-
-    log_path = LOG_DIR / f"{record.run_id}.desktop-preview.log"
-    try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text(output or "", encoding="utf-8")
-    except OSError:
-        pass
-    if process.returncode != 0:
-        detail = (output or "").strip()[-2000:]
-        raise LivePreviewError(f"PC 模拟器加载 bundle 失败：{detail or f'退出码 {process.returncode}'}")
-
-
 def run_desktop_preview(record_id: str) -> None:
     lease: dict[str, Any] | None = None
     try:
         record = load_run(record_id)
         if not record:
             return
-        _manifest_path, export_root, digest = desktop_preview_artifacts(record)
-        previous_session = (record.preview_sessions or {}).get("desktop", {})
+        hap_path = preview_hap_artifact(record)
+        if not hap_path:
+            raise LivePreviewError("当前任务还没有可安装的 HAP。")
+        digest = hashlib.sha256(hap_path.read_bytes()).hexdigest()
+        bundle_name, ability_name = preview_hap_metadata(record, hap_path)
         record = update_preview_session(
             record,
             "desktop",
             requested=True,
             status="allocating",
-            artifact_path=str(export_root),
+            artifact_path=str(hap_path),
             artifact_digest=digest,
+            bundle_name=bundle_name,
+            ability_name=ability_name,
             error="",
         )
-        if not EXPO_PUBLIC_GATEWAY.running:
-            raise LivePreviewError("Harmony Go 本地 bundle 网关未启动。")
-        try:
-            EXPO_PUBLIC_GATEWAY.registry.register_local(record.run_id, export_root)
-        except (ExpoExportValidationError, ExpoGatewayError) as exc:
-            raise LivePreviewError(f"无法发布 PC 预览 bundle：{exc}") from exc
-
         lease = acquire_preview_lease(record.run_id, "desktop")
         record = load_run(record_id) or record
         record = update_preview_session(
             record,
             "desktop",
-            status="loading_bundle",
+            status="installing",
             target=lease["target"],
             lease_id=lease["lease_id"],
         )
@@ -1512,23 +1412,16 @@ def run_desktop_preview(record_id: str) -> None:
         start_preview_lease_heartbeat(record.run_id, "desktop", lease["lease_id"], lease["target"])
         session_id = live_preview_session_id(record, "desktop")
         LIVE_PREVIEW.bind_target(session_id, lease["target"], preview_kind="desktop")
-        launch_state = read_json(Path(record.workspace) / ".expo-fast" / "launch-previews.json") or {}
-        launch_desktop = (launch_state.get("previews") or {}).get("desktop", {})
-        reuse_installed = bool(
-            previous_session.get("artifact_digest") == digest
-            and previous_session.get("screenshot_path")
-        ) or bool(
-            launch_desktop.get("status") == "complete"
-            and launch_desktop.get("target") == lease["target"]
-            and expo_preview_media_path(Path(record.workspace), "desktop")
+        frame = LIVE_PREVIEW.install_and_launch(
+            session_id,
+            hap_path=hap_path,
+            bundle_name=bundle_name,
+            ability_name=ability_name,
         )
-        launch_desktop_bundle(record, lease["target"], reuse_installed=reuse_installed)
         if record_id in DESKTOP_PREVIEW_CANCELLED:
             record = load_run(record_id) or record
             release_preview_lease(record, "desktop")
             return
-
-        frame = LIVE_PREVIEW.capture_frame(session_id)
         screenshot_path = MEDIA_DIR / record.run_id / "preview-desktop.jpeg"
         screenshot_path.parent.mkdir(parents=True, exist_ok=True)
         screenshot_path.write_bytes(frame.data)
@@ -1565,7 +1458,7 @@ def run_desktop_preview(record_id: str) -> None:
 def start_desktop_preview(record: RunRecord, *, automatic: bool = False) -> tuple[RunRecord, bool]:
     current = preview_sessions_payload(record)["desktop"]
     current_status = str(current.get("status") or "").strip().lower()
-    if current_status in {"queued", "allocating", "loading_bundle", "launching"}:
+    if current_status in {"queued", "allocating", "installing", "loading_bundle", "launching"}:
         # A daemon preview worker can disappear during a backend restart or an
         # unexpected exception. Recover only sessions that never acquired a
         # target/lease; an active leased worker remains authoritative.
@@ -1591,7 +1484,10 @@ def start_desktop_preview(record: RunRecord, *, automatic: bool = False) -> tupl
             else:
                 return record, False
     try:
-        _manifest_path, _export_root, digest = desktop_preview_artifacts(record)
+        hap_path = preview_hap_artifact(record)
+        if not hap_path:
+            raise LivePreviewError("当前任务还没有可安装的 HAP。")
+        digest = hashlib.sha256(hap_path.read_bytes()).hexdigest()
     except LivePreviewError:
         if automatic:
             return record, False
@@ -4437,7 +4333,7 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             mark_preview_viewer(record.run_id, kind, visible=True)
             if kind == "phone" and config.get("transport") == "hap_install":
                 record, accepted = start_phone_preview(record)
-            elif kind == "desktop" and config.get("transport") == "bundle_shell":
+            elif kind == "desktop" and config.get("transport") == "hap_install":
                 record, accepted = start_desktop_preview(record)
             else:
                 raise LivePreviewError("当前预览类型的启动方式无效。")

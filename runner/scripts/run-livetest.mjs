@@ -4,7 +4,6 @@ import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { validateSmoke } from './validate-smoke.mjs';
 import { assertCurrentMiniApp, inspectCurrentMiniApp, visibleBundleNames } from './layout-identity.mjs';
 import { discoverHdcPreviewPools, hdcOutputFailed, parseHdcForwardRules, parseHdcTargets, prioritizeHdcPreviewTargets, reversePortCandidates } from './hdc-target.mjs';
 import { acquirePreviewDevice, configuredPreviewPools } from './preview-device-pool.mjs';
@@ -257,7 +256,7 @@ function ensureReverseWithFallback(target, preferredDevicePort, hostPort) {
     { cause: lastError },
   );
 }
-const harmonyGoBundleName = 'host.exp.exponent.harmony';
+const harmonyGoBundleName = 'com.example.myapplication1.ide';
 function harmonyGoShellHapPath() {
   const configured = String(process.env.EXPO_HARMONY_GO_HAP || '').trim();
   const candidate = configured
@@ -301,7 +300,7 @@ function ensureHarmonyGoInstalled(target) {
   hdcRun(['-t', target, 'shell', 'aa', 'force-stop', harmonyGoBundleName]);
 }
 function configureHarmonyGoOrigin(target, devicePort) {
-  const bundleName = 'host.exp.exponent.harmony';
+  const bundleName = 'com.example.myapplication1.ide';
   const userId = harmonyGoUserId(target);
   const configPath = `/data/app/el2/${userId}/base/${bundleName}/haps/entry/files/miniapp-server.txt`;
   const origin = `http://127.0.0.1:${devicePort}`;
@@ -314,17 +313,6 @@ function frontendRunId(project) {
   const match = basename(project).match(/([a-f0-9]{32})$/i);
   if (!match) throw new Error(`project name does not contain a frontend run id: ${basename(project)}`);
   return match[1].toLowerCase();
-}
-async function publishToPreviewGateway(project, catalogRoot, origin) {
-  const response = await fetch(`${origin.replace(/\/$/, '')}/internal/publications`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ run_id: frontendRunId(project), artifact_root: catalogRoot }),
-    signal: AbortSignal.timeout(10_000),
-  });
-  const body = await response.text();
-  if (!response.ok) throw new Error(`preview gateway rejected export (${response.status}): ${body.slice(0, 1000)}`);
-  return JSON.parse(body);
 }
 function previewTargetError(kind, target, error) {
   const wrapped = new Error(
@@ -344,7 +332,7 @@ function wakeAndUnlockHarmonyTarget(target) {
   ]);
 }
 function startHarmonyGo(target) {
-  const args = ['-t', target, 'shell', 'aa', 'start', '-a', 'EntryAbility', '-b', 'host.exp.exponent.harmony'];
+  const args = ['-t', target, 'shell', 'aa', 'start', '-a', 'EntryAbility', '-b', 'com.example.myapplication1.ide'];
   try {
     hdcRun(args);
   } catch (error) {
@@ -360,7 +348,7 @@ export function prepareHarmonyGoTarget(kind, target, devicePort, gatewayPort) {
     configureHarmonyGoOrigin(target, activeDevicePort);
     wakeAndUnlockHarmonyTarget(target);
     hdcRun(['-t', target, 'shell', 'uitest', 'uiInput', 'keyEvent', 'Home']);
-    hdcRun(['-t', target, 'shell', 'aa', 'force-stop', 'host.exp.exponent.harmony']);
+    hdcRun(['-t', target, 'shell', 'aa', 'force-stop', 'com.example.myapplication1.ide']);
     startHarmonyGo(target);
     return activeDevicePort;
   } catch (error) {
@@ -374,7 +362,7 @@ export async function verifyHarmonyGoForeground(project, kind, target) {
     try {
       const layout = dumpLayout(project, target, `launch-shell-${kind}`);
       visible = visibleBundleNames(layout);
-      if (visible.includes('host.exp.exponent.harmony')) return;
+      if (visible.includes('com.example.myapplication1.ide')) return;
     } catch (error) {
       if (attempt === 5) throw previewTargetError(kind, target, error);
     }
@@ -385,44 +373,78 @@ export async function verifyHarmonyGoForeground(project, kind, target) {
     new Error(`Harmony Go did not reach the foreground; visible bundle(s): ${visible.join(', ') || 'none'}`),
   );
 }
-async function launch(project, pools, gatewayOrigin, onWait = () => {}) {
-  const gateway = new URL(gatewayOrigin);
-  if (gateway.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(gateway.hostname)) {
-    throw new Error(`preview gateway must be a loopback HTTP origin for HDC reverse mapping: ${gatewayOrigin}`);
-  }
-  const gatewayPort = Number(gateway.port || 80);
+export async function launchHapPreview(project, pools, hap, onWait = () => {}, dependencies = {}) {
+  const acquireDevice = dependencies.acquireDevice || acquirePreviewDevice;
+  const installPreview = dependencies.installPreview || installHapAndOpen;
+  const discoverTargets = dependencies.discoverTargets || (async () => {
+    const connected = parseHdcTargets(hdcRun(['list', 'targets']));
+    const discovered = discoverHdcPreviewPools(hdc, connected).desktop;
+    return prioritizeHdcPreviewTargets(discovered, pools.desktop);
+  });
   const excluded = new Set();
   let lastFailure = null;
   for (;;) {
-    const lease = await acquirePreviewDevice({
+    const availableTargets = async () => (await discoverTargets()).filter((target) => !excluded.has(target));
+    if (lastFailure && (await availableTargets()).length === 0) {
+      throw new Error(
+        `all desktop preview targets failed HAP installation; last failure: ${String(lastFailure?.message || lastFailure)}`,
+        { cause: lastFailure },
+      );
+    }
+    const lease = await acquireDevice({
       runId: frontendRunId(project),
       kind: 'desktop',
-      availableTargets: async () => {
-        const connected = parseHdcTargets(hdcRun(['list', 'targets']));
-        const discovered = discoverHdcPreviewPools(hdc, connected).desktop;
-        return prioritizeHdcPreviewTargets(discovered, pools.desktop)
-          .filter((target) => !excluded.has(target));
-      },
+      availableTargets,
       onWait: (event) => onWait({ ...event, kind: 'desktop' }),
     });
     const target = lease.target;
     try {
-      const devicePort = prepareHarmonyGoTarget('desktop', target, 3333, gatewayPort);
-      await verifyHarmonyGoForeground(project, 'desktop', target);
-      return { target, previews: { desktop: target }, devicePorts: { [target]: devicePort }, lease };
+      const result = await installPreview(project, target, hap, 'desktop');
+      return { target, previews: { desktop: target }, lease, result };
     } catch (error) {
-      lastFailure = error;
-      if (error?.previewKind && error?.previewTarget) {
-        excluded.add(error.previewTarget);
-        await lease.quarantine(error.previewTarget, error.stack || error);
-        onWait({ status: 'retrying', kind: 'desktop', target: error.previewTarget, queuedAt: new Date().toISOString() });
+      lastFailure = previewTargetError('desktop', target, error);
+      excluded.add(target);
+      try {
+        await lease.quarantine(target, lastFailure.stack || lastFailure);
+        onWait({ status: 'retrying', kind: 'desktop', target, queuedAt: new Date().toISOString() });
+      } finally {
         await lease.release();
-        continue;
       }
-      await lease.release();
-      throw error;
     }
   }
+}
+async function installHapAndOpen(project, target, hap, previewKind = 'desktop') {
+  const hapPath = String(hap?.hapPath || '').trim();
+  const bundleName = String(hap?.bundleName || '').trim();
+  if (!hapPath || !existsSync(hapPath)) throw new Error('desktop preview HAP is missing');
+  if (!bundleName) throw new Error('desktop preview HAP has no bundleName');
+  hdcRun(['-t', target, 'shell', 'aa', 'force-stop', bundleName]);
+  try { hdcRun(['-t', target, 'shell', 'bm', 'uninstall', '-n', bundleName]); } catch {}
+  hdcRun(['-t', target, 'install', '-r', hapPath]);
+  wakeAndUnlockHarmonyTarget(target);
+  const startArgs = ['-t', target, 'shell', 'aa', 'start', '-a', 'EntryAbility', '-b', bundleName];
+  try {
+    hdcRun(startArgs);
+  } catch (error) {
+    if (!/10106102|device screen is locked/i.test(String(error?.message || error))) throw error;
+    wakeAndUnlockHarmonyTarget(target);
+    hdcRun(startArgs);
+  }
+  let layout = null;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 750));
+    layout = dumpLayout(project, target, `launch-product-${previewKind}`);
+    if (visibleBundleNames(layout).includes(bundleName)) break;
+  }
+  const visible = visibleBundleNames(layout || {});
+  if (!visible.includes(bundleName)) {
+    throw new Error(`installed HAP did not reach foreground; expected ${bundleName}, visible=${visible.join(', ') || 'none'}`);
+  }
+  const shotDevice = `/data/local/tmp/expo-fast-${process.pid}-launch-${previewKind}.jpeg`;
+  const shotLocal = join(project, `.expo-fast/launch-screenshot-${previewKind}.jpeg`);
+  hdcRun(['-t', target, 'shell', 'uitest', 'screenCap', '-p', shotDevice]);
+  hdcRun(['-t', target, 'file', 'recv', shotDevice, shotLocal]);
+  return { result: 'PASS', target, previewKind, screenshot: shotLocal, bundleName, hapPath };
 }
 function nodeText(node) { const a = node?.attributes || {}; return a.text || a.originalText || a.description || ''; }
 function children(node) { return node.children || []; }
@@ -532,7 +554,7 @@ async function revealCatalogProject(project, target, manifestId, layout, actions
 async function prepareCatalog(project, target, manifestId, actions, evidenceName, expectedOrigin) {
   let layout = dumpLayout(project, target, evidenceName('launch-catalog'));
   const foregroundBundles = visibleBundleNames(layout);
-  if (!foregroundBundles.includes('host.exp.exponent.harmony')) {
+  if (!foregroundBundles.includes('com.example.myapplication1.ide')) {
     throw new Error(`Harmony Go did not reach the foreground on target ${target}; visible bundle(s): ${foregroundBundles.join(', ') || 'none'}`);
   }
   const projectsTab = collect(layout, (node) => node.attributes?.type === 'Button' && nodeText(node) === '项目')[0];
@@ -635,15 +657,8 @@ export async function installAndOpen(project, target, manifestId, previewKind = 
   }
   const identity = assertCurrentMiniApp(layout, manifestId, productMarkers, 'launch-product');
   const shotDevice = `/data/local/tmp/expo-fast-${process.pid}-launch-${previewKind || 'default'}.jpeg`; const shotLocal = join(project, `.expo-fast/launch-screenshot${previewKind ? `-${previewKind}` : ''}.jpeg`); hdcRun(['-t', target, 'shell', 'uitest', 'screenCap', '-p', shotDevice]); hdcRun(['-t', target, 'file', 'recv', shotDevice, shotLocal]);
-  return { result: 'PASS', target, previewKind, screenshot: shotLocal, bundleName: 'host.exp.exponent.harmony', manifestId, currentProjectTitle: identity.currentProjectTitle, currentProjectBounds: identity.currentProjectBounds, appNode: identity.productMarker, appNodeBounds: identity.productMarkerBounds, actions };
+  return { result: 'PASS', target, previewKind, screenshot: shotLocal, bundleName: 'com.example.myapplication1.ide', manifestId, currentProjectTitle: identity.currentProjectTitle, currentProjectBounds: identity.currentProjectBounds, appNode: identity.productMarker, appNodeBounds: identity.productMarkerBounds, actions };
 }
-function promptSmoke(project) { const manifest = JSON.parse(readFileSync(join(project, '.expo-fast/manifest.json'), 'utf8')); return `The current run's exact Harmony Go mini app identity is id=${manifest.id}, name=${manifest.name}. The app has exported and the Harmony Go shell is foreground. Use HDC only. First inspect layout and locate the catalog card whose visible id/name equals that exact identity; install it if needed and open that exact card. Do not open any other cached mini app. Dump layout again and require root bundleName=host.exp.exponent.harmony, the Host header current-project title exactly equal to this mini-app id, and a run-specific literal testID from current source inside product content before treating the product as open. A project-list button containing the id is not identity proof.
-
-Exercise one CORE product flow that mutates product data or time. Navigation by itself is forbidden. Valid categories are form-submit, timer-progress, list-mutation, toggle, or value-edit. For a form, capture the summary before, navigate to the form, enter a value, save, and capture the updated summary after. For a timer, capture the clock before, start it, wait, and capture the changed clock/button after. Use accessibility layout bounds for every action. Before and after the complete flow, re-assert bundleName and the visible current mini-app id. Never press Back and never open another app.
-
-After the mutation, force-stop Harmony Go, reopen this exact installed mini app, and dump the restarted layout. Require the same current-project title, the same product testID, and the exact post-mutation value after restart.
-
-Save only final valid evidence under .expo-fast/smoke: layout-before.json, layout-after.json, layout-restarted.json, action.json, and screenshot.jpeg. action.json must use this exact shape: {"result":"PASS|FAIL","manifestId":"${manifest.id}","identityNode":{"before":"${manifest.id}","after":"${manifest.id}","restarted":"${manifest.id}"},"action":{"category":"form-submit|timer-progress|list-mutation|toggle|value-edit","steps":["..."]},"assertion":{"target":"stable literal testID","before":"exact value present in layout-before","after":"different exact value present in layout-after","restarted":"same exact value as after"}}. A tab/screen change is FAIL. Do not edit source unless this exact mini app shows a visible app error.`; }
 async function main() {
   const o = parse(process.argv.slice(2)); const project = resolve(o.project); const request = resolve(o.request || join(project, '.expo-fast/request.md')); const requestText = readFileSync(request, 'utf8'); const requestedMode = o.candidate || 'auto'; const mode = requestedMode === 'auto' ? (complexityScore(requestText) >= 4000 ? 'repair' : 'brief') : requestedMode; if (!candidates[mode]) throw new Error(`unknown candidate ${mode}`); const invocationStartedAt = new Date();
   const model = o.model || candidates[mode].model;
@@ -653,6 +668,9 @@ async function main() {
   activeRunState = { project, runId: randomUUID(), startedAt: invocationStartedAt.toISOString(), state: 'generating_code' };
   const stateContext = { requestedMode, candidate: mode, model, effort, repairModel, repairEffort, resume: o.resume === 'true' };
   if (!['low', 'medium', 'high', 'max'].includes(effort) || !['low', 'medium', 'high', 'max'].includes(repairEffort)) throw new Error(`unknown effort main=${effort} repair=${repairEffort}`);
+  if (o.launch !== 'false' && (o.smokeAgent === 'true' || o['smoke-agent'] === 'true' || o.validateSmoke === 'true' || o['validate-smoke'] === 'true')) {
+    throw new Error('Harmony Go smoke validation is not supported for direct-HAP preview; rerun without --smoke-agent/--validate-smoke');
+  }
   progress(`start · candidate=${mode} · model=${model} · effort=${effort} · repair=${repairModel}/${repairEffort} · project=${project}`);
   if (o.baseProject || o['base-project']) throw new Error('Cold-start experiment integrity forbids --baseProject/--base-project. Use a new empty project directory.');
   const resume = o.resume === 'true';
@@ -754,7 +772,6 @@ async function main() {
     hap = { status: 'skipped' };
   }
   metrics.hap = hap;
-  const gatewayOrigin = String(o.gatewayOrigin || process.env.EXPO_FAST_PREVIEW_GATEWAY_ORIGIN || 'http://127.0.0.1:3456').replace(/\/$/, '');
   let previewFailure = null;
   let launchPreviewState = {};
   if (o.launch !== 'false') {
@@ -766,7 +783,7 @@ async function main() {
       : configuredPools.desktop;
     const previewPools = { desktop: desktopPreferences };
     try {
-      metrics.previewGateway = await publishToPreviewGateway(project, catalogRoot, gatewayOrigin);
+      if (hap?.status !== 'ready') throw new Error('PC 模拟器预览需要先生成可安装的 HAP。');
       launchPreviewState = {
         desktop: { status: 'queued', target: '' },
       };
@@ -781,14 +798,14 @@ async function main() {
         preview: { status: 'queued', pools: previewPools },
       });
       progress(`wait for desktop preview device · preferred=[${previewPools.desktop.join(',')}]`);
-      const live = await launch(project, previewPools, gatewayOrigin, ({ queuedAt }) => {
+      const live = await launchHapPreview(project, previewPools, hap, ({ queuedAt }) => {
         setRunState(activeRunState.state, 'preview_queued', {
           preview: { status: 'queued', pools: previewPools, queuedAt },
         });
       });
       try {
         setRunState(activeRunState.state, 'launching', {
-          preview: { status: 'running', leaseId: live.lease.leaseId, targets: live.previews, devicePorts: live.devicePorts },
+          preview: { status: 'running', leaseId: live.lease.leaseId, targets: live.previews },
         });
         launchPreviewState = Object.fromEntries(
           Object.entries(live.previews).map(([kind, target]) => [kind, { status: 'running', target }]),
@@ -798,62 +815,23 @@ async function main() {
           status: 'running',
           leaseId: live.lease.leaseId,
           pools: previewPools,
-          devicePorts: live.devicePorts,
           previews: launchPreviewState,
         });
         progress(`desktop preview lease acquired · target=${live.previews.desktop}`);
-        await new Promise((r) => setTimeout(r, 5000));
-        const previewResults = { ...launchPreviewState };
-        const previewEntries = Object.entries(live.previews).sort(([, left], [, right]) => Number(right === live.target) - Number(left === live.target));
-        let primaryResult = null;
-        for (const [previewKind, target] of previewEntries) {
-          try {
-            const result = await installAndOpen(project, target, manifest.id, previewKind, live.devicePorts[target]);
-            previewResults[previewKind] = { status: 'complete', ...result };
-            if (target === live.target) {
-              primaryResult = result;
-              writeFileSync(join(project, '.expo-fast/launch-screenshot.jpeg'), readFileSync(result.screenshot));
-            }
-            progress(`Harmony Go ${previewKind} preview passed · target=${target}`);
-          } catch (error) {
-            previewResults[previewKind] = { status: 'failed', target, error: String(error.stack || error) };
-            console.warn(`[expo-fast] ${previewKind} preview failed on ${target}; build artifacts remain valid\n${error.stack || error}`);
-          }
-          writeJson(join(project, '.expo-fast/launch-previews.json'), {
-            manifestId: manifest.id,
-            status: Object.values(previewResults).some((entry) => entry.status === 'failed') ? 'partial' : 'running',
-            leaseId: live.lease.leaseId,
-            pools: previewPools,
-            devicePorts: live.devicePorts,
-            previews: previewResults,
-          });
-          launchPreviewState = { ...previewResults };
-        }
-        if (!primaryResult) {
-          const desktopFailure = previewResults.desktop?.error;
-          throw new Error(
-            desktopFailure
-              ? `primary desktop preview failed on ${live.target}: ${desktopFailure}`
-              : `primary desktop preview failed on ${live.target}`,
-          );
-        }
-        const failedKinds = Object.entries(previewResults).filter(([, result]) => result.status === 'failed').map(([kind]) => kind);
-        metrics.launch = { ...primaryResult, gatewayOrigin, previews: previewResults };
-        metrics.preview = { status: failedKinds.length ? 'partial' : 'complete', failedKinds, targets: live.previews, devicePorts: live.devicePorts };
+        const primaryResult = live.result;
+        const previewResults = { desktop: { status: 'complete', ...primaryResult } };
+        writeFileSync(join(project, '.expo-fast/launch-screenshot.jpeg'), readFileSync(primaryResult.screenshot));
+        progress(`direct HAP desktop preview passed · target=${live.target}`);
+        metrics.launch = { ...primaryResult, previews: previewResults };
+        metrics.preview = { status: 'complete', failedKinds: [], targets: live.previews };
         writeJson(join(project, '.expo-fast/launch-previews.json'), {
           manifestId: manifest.id,
           status: metrics.preview.status,
           pools: previewPools,
-          devicePorts: live.devicePorts,
           previews: previewResults,
         });
         launchPreviewState = { ...previewResults };
-        progress(`Harmony Go preview finished · manifest=${manifest.id} · status=${metrics.preview.status}`);
-        if (o.smokeAgent === 'true') {
-          const smokeTurn = await claudeTurn(project, mode, join(project, `.expo-fast/smoke-agent-trace${resume ? '-resume' : ''}.jsonl`), promptSmoke(project), randomUUID());
-          metrics.stages.smokeClaudeMs = smokeTurn.ms;
-          metrics.smoke = validateSmoke(project);
-        }
+        progress(`direct HAP preview finished · manifest=${manifest.id} · status=${metrics.preview.status}`);
       } finally {
         await live.lease.release();
       }
@@ -882,7 +860,6 @@ async function main() {
   } else {
     metrics.preview = { status: 'skipped' };
   }
-  if (o.validateSmoke === 'true' && metrics.preview?.status === 'complete') metrics.smoke = validateSmoke(project);
   const completedAt = new Date().toISOString();
   if (resume) (metrics.resumes ||= []).push({ startedAt: invocationStartedAt.toISOString(), completedAt, ms: Date.now() - invocationStartedAt.getTime(), purpose: o.launch === 'false' ? 'reverify' : 'core-smoke' });
   metrics.completedAt = completedAt;

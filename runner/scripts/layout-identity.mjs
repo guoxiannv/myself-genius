@@ -17,7 +17,7 @@ export function visibleBundleNames(layout) {
   return [...new Set(collect(layout, (node) => Boolean(node.attributes?.bundleName)).map((node) => node.attributes.bundleName))];
 }
 function hasHarmonyGoBundle(layout) {
-  return visibleBundleNames(layout).includes('host.exp.exponent.harmony');
+  return visibleBundleNames(layout).includes('com.example.myapplication1.ide');
 }
 function currentProjectTitle(layout, manifestId) {
   const candidates = collect(layout, (node) => {
@@ -55,7 +55,7 @@ export function inspectCurrentMiniApp(layout, manifestId, markerIds = []) {
   const marker = productMarker(layout, markerIds);
   const crash = runtimeError(layout);
   const errors = [];
-  if (!hasHarmonyGoBundle(layout)) errors.push('root bundleName is not host.exp.exponent.harmony');
+  if (!hasHarmonyGoBundle(layout)) errors.push('root bundleName is not com.example.myapplication1.ide');
   if (!title) errors.push(`Host current-project title is not exactly ${manifestId}`);
   if (!marker) errors.push(`product subtree lacks a run-specific marker (${markerIds.join(', ') || 'none supplied'})`);
   if (crash) errors.push(`visible runtime error overlay: ${nodeText(crash).slice(0, 180)}`);

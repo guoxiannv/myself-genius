@@ -74,16 +74,16 @@ Run:
   --phone-target ID      Phone preview target; also reads HP_HDC_PHONE_TARGET.
   --desktop-targets LIST Comma-separated desktop preview device pool.
   --phone-targets LIST   Comma-separated phone preview device pool.
-  --gateway-origin URL   Shared loopback Preview Gateway origin.
+  --gateway-origin URL   Legacy Harmony Go diagnostic; ignored by direct-HAP preview.
   --resume               Reverify and rerun package/preview for an existing project.
-  --launch BOOL          Launch Harmony Go; true by default.
-  --hap BOOL             Build a per-run unsigned HAP; false in shell-preview mode.
-  --no-hap               Keep the default shell-preview behavior.
+  --launch BOOL          Install the generated HAP on a PC emulator; true by default.
+  --hap BOOL             Build a per-run unsigned HAP; implied by enabled preview.
+  --no-hap               Skip HAP only when preview is also disabled.
   --pool PATH            SDK fixed-slot pool; defaults to ../harmony-pool.
   --hap-wait-seconds N   FIFO slot wait timeout; defaults to 3600.
   --foreground           Run in this terminal instead of tmux.
   --attach               Attach to tmux immediately after starting.
-  --smoke-agent          Run the optional model-driven core-flow smoke.
+  --smoke-agent          Legacy Harmony Go smoke only; unsupported by direct-HAP preview.
   --dry-run              Print the resolved run without creating files or tmux.
   -h, --help             Show this help.
 
@@ -288,7 +288,7 @@ function printPlan(plan, tmuxId = '') {
   console.log(`  mode    : ${plan.candidate}`);
   console.log(`  model   : ${plan.model}/${plan.effort}`);
   console.log(`  repair  : ${plan.repairModel}/${plan.repairEffort}`);
-  console.log(`  launch  : ${plan.launch ? `Harmony Go via ${plan.previewGatewayOrigin}` : 'disabled'}`);
+  console.log(`  launch  : ${plan.launch ? 'direct HAP on desktop emulator' : 'disabled'}`);
   console.log(`  HAP     : ${plan.hap ? `SDK pool ${plan.pool}` : 'disabled'}`);
   if (plan.launch) console.log(`  target  : ${plan.hdcTarget || 'allocated from preview pool'}`);
   if (plan.launch) console.log(`  preview : desktop=[${plan.hdcPreviewPools.desktop.join(', ')}], phone=[${plan.hdcPreviewPools.phone.join(', ')}]`);
@@ -356,7 +356,7 @@ async function main() {
     root, configFile: existsSync(localEnvFile) ? localEnvFile : '', project, requestPath, promptKind: prompt.kind, promptSource: prompt.path || '',
     session, sessionLog, candidate, ...models, timeout, repairTimeout, port, hapWaitSeconds, pool,
     launch: raw.launch,
-    hap: raw.hap && enabledByEnvironment(process.env.EXPO_HARMONY_HAP_ENABLED),
+    hap: raw.launch || (raw.hap && enabledByEnvironment(process.env.EXPO_HARMONY_HAP_ENABLED)),
     resume: Boolean(raw.resume),
     foreground: Boolean(raw.foreground), attach: Boolean(raw.attach),
     smokeAgent: Boolean(raw.smokeAgent), node, sdk, deveco, claude, moduleCache, hdcTarget, hdcPreviewTargets, hdcPreviewPools, previewGatewayOrigin,

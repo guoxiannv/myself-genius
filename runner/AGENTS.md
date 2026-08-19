@@ -20,6 +20,6 @@
   and one column; tablet layouts use top horizontal navigation; desktop layouts put a
   fixed-width left sidebar and flexible multi-column main content inside the same
   horizontal root container. Never derive breakpoints from physical device pixels.
-- For runtime QA, verify `bundleName=host.exp.exponent.harmony` before and after the
+- For runtime QA, verify `bundleName=com.example.myapplication1.ide` before and after the
   action; assert an app-specific accessibility value change and save a screenshot.
 - Run `npm test` and the bundled skill-creator validator after workflow changes.

@@ -13,7 +13,8 @@ import { auditProductSource, verifyHarmonyGoArtifacts } from '../scripts/verify-
 import { writeRunState } from '../scripts/run-state.mjs';
 import { canRunRepair, repairArtifactName } from '../scripts/repair-policy.mjs';
 import { assertDependencyRuntime, pinRuntimeDependencies, stageHarmonyCli } from '../scripts/dependencies.mjs';
-import { runHapPoolBuild } from '../scripts/hap-build.mjs';
+import { HAP_DEVICE_TYPES, runHapPoolBuild } from '../scripts/hap-build.mjs';
+import { launchHapPreview } from '../scripts/run-livetest.mjs';
 import { acquirePreviewDevice, acquirePreviewDevices, configuredPreviewPools } from '../scripts/preview-device-pool.mjs';
 
 const root = resolve(new URL('..', import.meta.url).pathname);
@@ -220,6 +221,27 @@ test('one-click launcher defaults to the tested learning-goals scenario and K3 r
   assert.equal(plan.foreground, false);
 });
 
+test('enabled direct-HAP preview always builds the required HAP', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-required-hap-'));
+  const launcher = join(root, 'scripts/start-livetest.mjs');
+  const result = spawnSync(process.execPath, [launcher,
+    '--dry-run',
+    '--project', join(workspace, 'preview-app'),
+    '--prompt', 'Build a small offline task app.',
+  ], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      EXPO_FAST_ENV_FILE: join(workspace, 'missing.env'),
+      EXPO_HARMONY_HAP_ENABLED: 'false',
+    },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const plan = JSON.parse(result.stdout);
+  assert.equal(plan.launch, true);
+  assert.equal(plan.hap, true);
+});
+
 test('one-click launcher accepts a user-selected output directory under expo-app root', () => {
   const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-output-dir-'));
   const launcher = join(root, 'scripts/start-livetest.mjs');
@@ -410,7 +432,6 @@ test('Harmony Go reverse mapping retries an orphaned device listener on the next
   const opener = readFileSync(join(root, 'scripts/open-desktop-preview.mjs'), 'utf8');
   assert.match(runner, /function ensureReverseWithFallback\(/);
   assert.match(runner, /TCP Port listen failed/);
-  assert.match(runner, /devicePorts: \{ \[target\]: devicePort \}/);
   assert.match(opener, /const activeDevicePort = prepareHarmonyGoTarget\(/);
   assert.match(opener, /activeDevicePort,/);
 });
@@ -584,14 +605,14 @@ test('preview pool configuration accepts comma-separated device lists', () => {
 
 test('foreground bundle inspection distinguishes Harmony Go from the system launcher', () => {
   const launcher = { children: [{ attributes: { bundleName: 'com.ohos.sceneboard' } }] };
-  const harmonyGo = { children: [{ attributes: { bundleName: 'host.exp.exponent.harmony' } }] };
+  const harmonyGo = { children: [{ attributes: { bundleName: 'com.example.myapplication1.ide' } }] };
   assert.deepEqual(visibleBundleNames(launcher), ['com.ohos.sceneboard']);
-  assert.deepEqual(visibleBundleNames(harmonyGo), ['host.exp.exponent.harmony']);
+  assert.deepEqual(visibleBundleNames(harmonyGo), ['com.example.myapplication1.ide']);
 });
 
 test('exact-app identity accepts the universal shell title below a phone status bar', () => {
   const manifestId = 'remote-ui-ea02ff4f9333452b9f6c3ea3185d49b8';
-  const layout = { children: [{ attributes: { bundleName: 'host.exp.exponent.harmony', type: 'root' }, children: [
+  const layout = { children: [{ attributes: { bundleName: 'com.example.myapplication1.ide', type: 'root' }, children: [
     { attributes: { type: 'Text', text: manifestId, bounds: '[70,241][1231,511]', visible: 'true' } },
     { attributes: { id: 'timer-ring', type: 'Custom', bounds: '[40,756][1280,1800]', visible: 'true' } },
   ] }] };
@@ -602,7 +623,7 @@ test('exact-app identity accepts the universal shell title below a phone status 
 
 test('exact-app identity does not confuse a catalog card with the current shell title', () => {
   const manifestId = 'remote-ui-wanted';
-  const layout = { children: [{ attributes: { bundleName: 'host.exp.exponent.harmony', type: 'root' }, children: [
+  const layout = { children: [{ attributes: { bundleName: 'com.example.myapplication1.ide', type: 'root' }, children: [
     { attributes: { type: 'Text', text: 'remote-ui-other', visible: 'true' } },
     { attributes: { type: 'Button', text: '项目', visible: 'true' } },
     { attributes: { type: 'Text', text: manifestId, visible: 'true' } },
@@ -616,7 +637,7 @@ test('exact-app identity does not confuse a catalog card with the current shell 
 test('HDC textual start failures are rejected even when the process exits zero', () => {
   assert.equal(hdcOutputFailed('start ability successfully.\n'), false);
   assert.equal(hdcOutputFailed('error: failed to start ability.\nError Code:10106102'), true);
-  assert.equal(hdcOutputFailed('[Fail][E003001] Invalid bundle name: host.exp.exponent.harmony'), true);
+  assert.equal(hdcOutputFailed('[Fail][E003001] Invalid bundle name: com.example.myapplication1.ide'), true);
 });
 
 test('Harmony Go preview wakes and unlocks a reused target and retries a locked launch once', () => {
@@ -628,9 +649,9 @@ test('Harmony Go preview wakes and unlocks a reused target and retries a locked 
   assert.match(runner, /wakeAndUnlockHarmonyTarget\(target\);\s*hdcRun\(args\);/);
 });
 
-test('Expo initial preview requests only a dynamically discovered desktop shell', () => {
+test('Expo initial preview requests only a dynamically discovered desktop HAP target', () => {
   const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
-  assert.match(runner, /acquirePreviewDevice\(\{/);
+  assert.match(runner, /dependencies\.acquireDevice \|\| acquirePreviewDevice/);
   assert.match(runner, /kind: 'desktop'/);
   assert.match(runner, /discoverHdcPreviewPools\(hdc, connected\)\.desktop/);
   assert.match(runner, /prioritizeHdcPreviewTargets\(discovered, pools\.desktop\)/);
@@ -661,7 +682,6 @@ test('runner scrolls a long Harmony Go catalog before declaring the app missing'
   assert.match(runner, /'uiInput', 'swipe'/);
   assert.match(runner, /catalogViewport\(/);
   assert.match(runner, /layout = await revealCatalogProject\(/);
-  assert.match(runner, /primary desktop preview failed on \$\{live\.target\}: \$\{desktopFailure\}/);
 });
 
 test('runner waits for the exact catalog card to install and the exact product to render', () => {
@@ -672,7 +692,99 @@ test('runner waits for the exact catalog card to install and the exact product t
   assert.match(runner, /timed out waiting for mini app \$\{manifestId\} to install/);
   assert.match(runner, /\(candidate\) => inspectCurrentMiniApp\(candidate, manifestId, productMarkers\)\.ok/);
   assert.doesNotMatch(runner, /const identityButton = collect\(/);
-  assert.ok(runner.indexOf("assertCurrentMiniApp(layout, manifestId, productMarkers, 'launch-product')") < runner.indexOf("'screenCap'"));
+  assert.ok(runner.indexOf("assertCurrentMiniApp(layout, manifestId, productMarkers, 'launch-product')") < runner.lastIndexOf("'screenCap'"));
+});
+
+test('desktop preview installs the same generated HAP used by phone preview', () => {
+  const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
+  const hapBuilder = readFileSync(join(root, 'scripts/hap-build.mjs'), 'utf8');
+  assert.match(runner, /function installHapAndOpen\(/);
+  assert.match(runner, /'install', '-r', hapPath/);
+  assert.match(runner, /installPreview\(project, target, hap, 'desktop'\)/);
+  assert.match(hapBuilder, /HAP_DEVICE_TYPES\.join\(','\)/);
+});
+
+test('desktop HAP preview quarantines a failed emulator and installs on the fallback', async () => {
+  const project = join(tmpdir(), 'remote-ui-00000000000000000000000000000001');
+  const targets = ['desktop-broken', 'desktop-ready'];
+  const events = [];
+  const leases = [];
+  const installed = [];
+  const result = await launchHapPreview(
+    project,
+    { desktop: targets },
+    { hapPath: '/tmp/product.hap', bundleName: 'com.example.product' },
+    (event) => events.push(event),
+    {
+      discoverTargets: async () => targets,
+      acquireDevice: async ({ availableTargets }) => {
+        const target = (await availableTargets())[0];
+        const lease = {
+          target,
+          leaseId: `lease-${target}`,
+          quarantined: [],
+          released: 0,
+          async quarantine(failedTarget) { this.quarantined.push(failedTarget); },
+          async release() { this.released += 1; },
+        };
+        leases.push(lease);
+        return lease;
+      },
+      installPreview: async (_project, target) => {
+        installed.push(target);
+        if (target === 'desktop-broken') throw new Error('install rejected');
+        return { result: 'PASS', target, screenshot: '/tmp/preview.jpeg' };
+      },
+    },
+  );
+  assert.deepEqual(installed, targets);
+  assert.deepEqual(leases[0].quarantined, ['desktop-broken']);
+  assert.equal(leases[0].released, 1);
+  assert.equal(leases[1].released, 0);
+  assert.equal(events.some((event) => event.status === 'retrying' && event.target === 'desktop-broken'), true);
+  assert.equal(result.target, 'desktop-ready');
+  await result.lease.release();
+  assert.equal(leases[1].released, 1);
+});
+
+test('desktop HAP preview stops after every discovered emulator fails', async () => {
+  const project = join(tmpdir(), 'remote-ui-00000000000000000000000000000002');
+  const target = 'desktop-broken';
+  let releases = 0;
+  await assert.rejects(
+    launchHapPreview(
+      project,
+      { desktop: [target] },
+      { hapPath: '/tmp/product.hap', bundleName: 'com.example.product' },
+      () => {},
+      {
+        discoverTargets: async () => [target],
+        acquireDevice: async ({ availableTargets }) => ({
+          target: (await availableTargets())[0],
+          async quarantine() {},
+          async release() { releases += 1; },
+        }),
+        installPreview: async () => { throw new Error('install rejected'); },
+      },
+    ),
+    /all desktop preview targets failed HAP installation/,
+  );
+  assert.equal(releases, 1);
+});
+
+test('direct-HAP preview rejects the legacy Harmony Go smoke agent before generation', () => {
+  const project = mkdtempSync(join(tmpdir(), 'expo-fast-direct-hap-smoke-'));
+  const request = join(project, 'request.md');
+  writeFileSync(request, 'Build a small offline task app.');
+  const result = spawnSync(process.execPath, [join(root, 'scripts/run-livetest.mjs'),
+    '--project', project,
+    '--request', request,
+    '--candidate', 'direct',
+    '--smoke-agent', 'true',
+  ], { encoding: 'utf8' });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Harmony Go smoke validation is not supported for direct-HAP preview/);
+  assert.equal(existsSync(join(project, 'App.tsx')), false);
 });
 
 test('external controller atomically records live generation, repair, and completion state', () => {
@@ -737,6 +849,7 @@ test('runner publishes a validated SDK pool HAP into the run-owned output', () =
     sdk,
     pool,
     runId: 'run-123',
+    deviceType: 'phone',
     commandRunner(command, args) {
       invocation = { command, args };
       const output = args[args.indexOf('--output') + 1];
@@ -755,6 +868,7 @@ test('runner publishes a validated SDK pool HAP into the run-owned output', () =
         hapPath,
         hapSha256,
         bundleName: 'com.example.product',
+        deviceTypes: ['phone', '2in1'],
         buildMode: 'release',
       }));
       return { status: 0, stdout: 'ok', stderr: '' };
@@ -764,7 +878,8 @@ test('runner publishes a validated SDK pool HAP into the run-owned output', () =
   assert.equal(invocation.args[1], 'build');
   assert.equal(invocation.args[invocation.args.indexOf('--pool') + 1], pool);
   assert.equal(invocation.args[invocation.args.indexOf('--build-mode') + 1], 'release');
-  assert.equal(invocation.args[invocation.args.indexOf('--device-type') + 1], 'phone');
+  assert.equal(invocation.args[invocation.args.indexOf('--device-type') + 1], 'phone,2in1');
+  assert.deepEqual(HAP_DEVICE_TYPES, ['phone', '2in1']);
   assert.equal(result.status, 'ready');
   assert.equal(result.slotId, 'slot-02');
   assert.equal(result.bundleName, 'com.example.product');
@@ -794,6 +909,41 @@ test('runner records a bounded HAP failure when the SDK pool command cannot publ
   const persisted = JSON.parse(readFileSync(result.resultPath, 'utf8'));
   assert.equal(persisted.status, 'failed');
   assert.equal(persisted.productRoot, realpathSync(project));
+});
+
+test('runner rejects a successful pool result that lacks the universal HAP device contract', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-hap-device-contract-'));
+  const project = join(workspace, 'product');
+  const sdk = join(workspace, 'sdk');
+  mkdirSync(project);
+  mkdirSync(sdk);
+  const result = runHapPoolBuild({
+    project,
+    sdk,
+    pool: join(workspace, 'pool'),
+    runId: 'run-phone-only',
+    commandRunner(_command, args) {
+      const output = args[args.indexOf('--output') + 1];
+      const jobId = args[args.indexOf('--job-id') + 1];
+      const hapPath = join(output, 'phone-only.hap');
+      mkdirSync(output, { recursive: true });
+      writeFileSync(hapPath, 'phone-only-hap');
+      writeFileSync(join(output, 'build-result.json'), JSON.stringify({
+        schemaVersion: 1,
+        status: 'success',
+        jobId,
+        productRoot: realpathSync(project),
+        hapPath,
+        bundleName: 'com.example.product',
+        deviceTypes: ['phone'],
+        buildMode: 'release',
+      }));
+      return { status: 0, stdout: 'ok', stderr: '' };
+    },
+  });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.hapPath, null);
+  assert.match(result.error, /does not support required device types phone,2in1/);
 });
 
 test('catalog captures emulator-validated support exports', () => {
@@ -1154,7 +1304,7 @@ function writeEvidence(project, category = 'form-submit') {
   const smoke = join(project, '.expo-fast/smoke');
   mkdirSync(smoke, { recursive: true });
   writeFileSync(join(project, '.expo-fast/manifest.json'), JSON.stringify({ id: 'test-ledger' }));
-  const root = (text) => ({ children: [{ attributes: { bundleName: 'host.exp.exponent.harmony', type: 'root' }, children: [{ attributes: { type: 'Text', text: 'test-ledger', bounds: '[38,130][260,179]', visible: 'true' } }, { attributes: { id: 'home-month-expense', type: 'Custom', bounds: '[40,400][900,500]', visible: 'true' }, children: [{ attributes: { text } }] }] }] });
+  const root = (text) => ({ children: [{ attributes: { bundleName: 'com.example.myapplication1.ide', type: 'root' }, children: [{ attributes: { type: 'Text', text: 'test-ledger', bounds: '[38,130][260,179]', visible: 'true' } }, { attributes: { id: 'home-month-expense', type: 'Custom', bounds: '[40,400][900,500]', visible: 'true' }, children: [{ attributes: { text } }] }] }] });
   writeFileSync(join(smoke, 'layout-before.json'), JSON.stringify(root('本月支出 100 元')));
   writeFileSync(join(smoke, 'layout-after.json'), JSON.stringify(root('本月支出 188.8 元')));
   writeFileSync(join(smoke, 'layout-restarted.json'), JSON.stringify(root('本月支出 188.8 元')));
@@ -1178,7 +1328,7 @@ test('exact-app identity rejects a listed app when another app is current', () =
   const project = mkdtempSync(join(tmpdir(), 'expo-fast-smoke-wrong-app-'));
   writeEvidence(project);
   const smoke = join(project, '.expo-fast/smoke');
-  const wrong = { children: [{ attributes: { bundleName: 'host.exp.exponent.harmony', type: 'root' }, children: [
+  const wrong = { children: [{ attributes: { bundleName: 'com.example.myapplication1.ide', type: 'root' }, children: [
     { attributes: { type: 'Text', text: 'other-current-app', bounds: '[38,130][300,179]', visible: 'true' } },
     { attributes: { type: 'Button', text: 'test-ledger', bounds: '[900,220][1200,292]', visible: 'true', backgroundColor: '#FFEAECF0' } },
     { attributes: { id: 'home-month-expense', type: 'Custom', bounds: '[40,400][900,500]', visible: 'true' }, children: [{ attributes: { text: '本月支出 100 元' } }] },
@@ -1189,7 +1339,7 @@ test('exact-app identity rejects a listed app when another app is current', () =
 
 test('exact-app identity locates the Host title relative to navigation on high-density layouts', async () => {
   const { inspectCurrentMiniApp } = await import('../scripts/layout-identity.mjs');
-  const layout = { children: [{ attributes: { bundleName: 'host.exp.exponent.harmony' }, children: [
+  const layout = { children: [{ attributes: { bundleName: 'com.example.myapplication1.ide' }, children: [
     { attributes: { type: 'Text', text: 'EXPO HARMONY GO', bounds: '[67,175][550,222]', visible: 'true' } },
     { attributes: { type: 'Text', text: 'test-ledger', bounds: '[67,232][1184,493]', visible: 'true' } },
     { attributes: { type: 'Button', text: '项目', bounds: '[67,566][263,694]', visible: 'true' } },

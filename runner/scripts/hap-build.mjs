@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 
 export const HAP_OUTPUT_RELATIVE_PATH = '.expo-fast/hap';
 export const HAP_RESULT_FILE = 'build-result.json';
+export const HAP_DEVICE_TYPES = Object.freeze(['phone', '2in1']);
 
 function within(candidate, parent) {
   return candidate === parent || candidate.startsWith(`${parent}${sep}`);
@@ -31,6 +32,12 @@ function validateReadyResult(project, outputRoot, resultPath, metadata) {
   if (metadata.status !== 'success') return null;
   if (metadata.buildMode !== 'release') {
     throw new Error(`Harmony pool result is not a release HAP: ${metadata.buildMode || '<missing>'}`);
+  }
+  if (!Array.isArray(metadata.deviceTypes) || HAP_DEVICE_TYPES.some((value) => !metadata.deviceTypes.includes(value))) {
+    throw new Error(
+      `Harmony pool result does not support required device types ${HAP_DEVICE_TYPES.join(',')}: ` +
+      `${JSON.stringify(metadata.deviceTypes ?? null)}`,
+    );
   }
   if (typeof metadata.hapPath !== 'string' || !metadata.hapPath) {
     throw new Error(`Successful Harmony pool result has no HAP path: ${resultPath}`);
@@ -70,6 +77,7 @@ function publicResult(metadata, resultPath, ready = null) {
     hapPath: ready?.hapPath || null,
     hapSha256: ready?.hapSha256 || null,
     bundleName: metadata.bundleName ?? null,
+    deviceTypes: Array.isArray(metadata.deviceTypes) ? metadata.deviceTypes : [],
     buildMode: metadata.buildMode ?? null,
     resultPath,
     logPath: typeof metadata.logPath === 'string' ? metadata.logPath : null,
@@ -121,7 +129,6 @@ export function runHapPoolBuild({
   runId,
   waitSeconds = 3600,
   buildMode = 'release',
-  deviceType = 'phone',
   commandRunner = spawnSync,
 }) {
   const startedAt = Date.now();
@@ -136,7 +143,8 @@ export function runHapPoolBuild({
   if (existing?.status === 'ready') return { ...existing, reused: true };
 
   const safeRunId = String(runId || basename(project)).replace(/[^A-Za-z0-9._-]+/g, '-');
-  const jobId = `hap-${safeRunId}`;
+  const deviceType = HAP_DEVICE_TYPES.join(',');
+  const jobId = `hap-${safeRunId}-${HAP_DEVICE_TYPES.join('-')}`;
   if (!['debug', 'release'].includes(buildMode)) {
     throw new Error(`Unsupported Harmony HAP build mode: ${buildMode}`);
   }

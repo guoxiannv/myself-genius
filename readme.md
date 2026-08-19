@@ -49,8 +49,9 @@ git push
 
 ## 初始化 Expo HAP 构建池
 
-Expo Runner 在 bundle 导出和 Harmony Go 验收之后，会通过 SDK 的固定 slot 池构建 unsigned
-HAP。机器首次部署或 SDK full-profile 变化后，在仓库根目录执行：
+Expo Runner 在 bundle 导出和确定性校验之后，会通过 SDK 的固定 slot 池构建同时支持
+`phone` 和 `2in1` 的 unsigned HAP，并将同一产物用于手机安装和 PC 模拟器预览。机器首次部署
+或 SDK full-profile 变化后，在仓库根目录执行：
 
 ```bash
 cp runner/.env.example runner/.env
@@ -89,9 +90,9 @@ runner/setup-harmony-pool.sh --force
 
 ## 本地验证 Expo 到 HAP
 
-以下流程只启动本地 Frontend、Python API 和 Harmony Go Gateway，不需要 Cloudflare、Profile、
-HPack 签名材料或 `frontend/deploy/server.env`。开始前请确保 `runner/.env` 已配置 Node.js 22.13+、
-DevEco Studio 和 Claude CLI，DevEco 模拟器已经启动，并且 `tmux` 可用。
+以下流程只启动本地 Frontend 和 Python API，不需要 Cloudflare、Profile、HPack 签名材料或
+`frontend/deploy/server.env`。开始前请确保 `runner/.env` 已配置 Node.js 22.13+、DevEco Studio
+和 Claude CLI，DevEco PC 模拟器已经启动，并且 `tmux` 可用。
 
 在仓库根目录安装 Frontend 依赖：
 
@@ -108,7 +109,8 @@ frontend/scripts/restart_local.sh --tmux
 ```
 
 浏览器打开 `http://127.0.0.1:8180`，选择 `Expo`，输入“生成一个简单番茄闹钟APP”并提交。
-任务完成后，详情页应同时显示可用的 bundle 预览和 unsigned HAP 下载入口。对应本地产物位于：
+任务完成后，Runner 会把生成的 HAP 直接安装到 PC 模拟器进行预览；只要 HAP 可用，即使模拟器
+预览失败，详情页仍应显示原有的安装入口。对应本地产物位于：
 
 ```text
 expo-app/remote-ui-<run_id>/dist/harmony-go/bundle.js

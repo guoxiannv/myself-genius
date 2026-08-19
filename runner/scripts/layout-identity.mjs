@@ -1,5 +1,3 @@
-import { harmonyGoBundleName } from './harmony-go-runtime.mjs';
-
 function children(node) { return node?.children || []; }
 function collect(node, predicate, output = []) {
   if (!node || typeof node !== 'object') return output;
@@ -18,8 +16,8 @@ function bounds(node) {
 export function visibleBundleNames(layout) {
   return [...new Set(collect(layout, (node) => Boolean(node.attributes?.bundleName)).map((node) => node.attributes.bundleName))];
 }
-function hasHarmonyGoBundle(layout, expectedBundleName = harmonyGoBundleName) {
-  return visibleBundleNames(layout).includes(expectedBundleName);
+function hasHarmonyGoBundle(layout) {
+  return visibleBundleNames(layout).includes('host.exp.exponent.harmony');
 }
 function currentProjectTitle(layout, manifestId) {
   const candidates = collect(layout, (node) => {
@@ -52,12 +50,12 @@ function runtimeError(layout) {
   })[0] || null;
 }
 
-export function inspectCurrentMiniApp(layout, manifestId, markerIds = [], expectedBundleName = harmonyGoBundleName) {
+export function inspectCurrentMiniApp(layout, manifestId, markerIds = []) {
   const title = currentProjectTitle(layout, manifestId);
   const marker = productMarker(layout, markerIds);
   const crash = runtimeError(layout);
   const errors = [];
-  if (!hasHarmonyGoBundle(layout, expectedBundleName)) errors.push(`root bundleName is not ${expectedBundleName}`);
+  if (!hasHarmonyGoBundle(layout)) errors.push('root bundleName is not host.exp.exponent.harmony');
   if (!title) errors.push(`Host current-project title is not exactly ${manifestId}`);
   if (!marker) errors.push(`product subtree lacks a run-specific marker (${markerIds.join(', ') || 'none supplied'})`);
   if (crash) errors.push(`visible runtime error overlay: ${nodeText(crash).slice(0, 180)}`);
@@ -73,8 +71,8 @@ export function inspectCurrentMiniApp(layout, manifestId, markerIds = [], expect
   };
 }
 
-export function assertCurrentMiniApp(layout, manifestId, markerIds = [], label = 'layout', expectedBundleName = harmonyGoBundleName) {
-  const result = inspectCurrentMiniApp(layout, manifestId, markerIds, expectedBundleName);
+export function assertCurrentMiniApp(layout, manifestId, markerIds = [], label = 'layout') {
+  const result = inspectCurrentMiniApp(layout, manifestId, markerIds);
   if (!result.ok) throw new Error(`${label} does not prove the current mini app: ${result.errors.join('; ')}`);
   return result;
 }

@@ -185,7 +185,7 @@ export type FollowUpCommandStatus =
   | "cancelled"
   | "failed"
 
-/** Runtime follow-up-control CLI 返回的公开命令摘要（队列与活跃项不含用户消息正文）。 */
+/** ArkPilot follow-up-control CLI 返回的公开命令摘要（不含用户消息正文）。 */
 export interface FollowUpCommand {
   id: string
   client_request_id: string
@@ -206,7 +206,7 @@ export interface FollowUpCommand {
   interrupted_before_assistant_activity?: boolean
 }
 
-/** 当前 Runtime follow-up-control 的会话状态镜像。 */
+/** ArkPilot follow-up-control 的会话状态镜像。 */
 export interface FollowUpState {
   run_name?: string
   session_id?: string

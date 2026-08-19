@@ -11,27 +11,14 @@ import { assignHdcPreviewPorts, configuredHdcPreviewTargets, configuredHdcTarget
 import { auditImplementationTrace } from '../scripts/trace-scope.mjs';
 import { auditProductSource, verifyHarmonyGoArtifacts } from '../scripts/verify-product.mjs';
 import { writeRunState } from '../scripts/run-state.mjs';
-import { resolveExecution } from '../scripts/execution-policy.mjs';
-import { repairArtifactName } from '../scripts/repair-artifact.mjs';
+import { canRunRepair, repairArtifactName } from '../scripts/repair-policy.mjs';
 import { assertDependencyRuntime, pinRuntimeDependencies, stageHarmonyCli } from '../scripts/dependencies.mjs';
 import { runHapPoolBuild } from '../scripts/hap-build.mjs';
 import { acquirePreviewDevice, acquirePreviewDevices, configuredPreviewPools } from '../scripts/preview-device-pool.mjs';
-import { bundleNameFromModuleJson, DEFAULT_HARMONY_GO_BUNDLE_NAME, resolveHarmonyGoBundleName } from '../scripts/harmony-go-runtime.mjs';
 
 const root = resolve(new URL('..', import.meta.url).pathname);
 const script = join(root, 'scripts/fast-harmony.mjs');
 const dependencyController = join(root, 'scripts/dependencies.mjs');
-
-test('Harmony Go bundle identity prefers explicit configuration, then HAP metadata, then the SDK default', () => {
-  const moduleJson = JSON.stringify({ app: { bundleName: 'com.example.from.hap' } });
-  assert.equal(bundleNameFromModuleJson(moduleJson), 'com.example.from.hap');
-  assert.equal(resolveHarmonyGoBundleName({
-    env: { EXPO_HARMONY_GO_BUNDLE_NAME: 'com.example.explicit' },
-    hapPath: '',
-  }), 'com.example.explicit');
-  assert.equal(resolveHarmonyGoBundleName({ env: {}, hapPath: '' }), DEFAULT_HARMONY_GO_BUNDLE_NAME);
-  assert.throws(() => bundleNameFromModuleJson('{}'), /has no app\.bundleName/);
-});
 
 test('runtime resources are standalone orchestrator assets without a retired skill package', () => {
   assert.equal(existsSync(join(root, 'skills/expo-harmony-fast')), false);
@@ -88,7 +75,7 @@ test('one-click launcher resolves isolated projects, prompt input, models, and t
   const plan = JSON.parse(result.stdout);
   assert.equal(plan.project, project);
   assert.equal(plan.promptKind, 'inline');
-  assert.equal(Object.hasOwn(plan, 'candidate'), false);
+  assert.equal(plan.candidate, 'repair');
   assert.equal(plan.model, 'deepseek-v4-flash');
   assert.equal(plan.repairModel, 'deepseek-v4-flash');
   assert.equal(plan.effort, 'low');
@@ -216,14 +203,14 @@ exit 0
   assert.match(unsignedLog, /bundle=\[\]/);
 });
 
-test('one-click launcher defaults to the tested learning-goals scenario and single K3 execution policy', () => {
+test('one-click launcher defaults to the tested learning-goals scenario and K3 repair lane', () => {
   const launcher = join(root, 'scripts/start-livetest.mjs');
   const result = spawnSync(process.execPath, [launcher, '--dry-run', '--launch', 'false'], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
   const plan = JSON.parse(result.stdout);
   assert.equal(plan.promptKind, 'default');
   assert.equal(plan.promptSource, join(root, 'prompts/learning-goals.md'));
-  assert.equal(Object.hasOwn(plan, 'candidate'), false);
+  assert.equal(plan.candidate, 'repair');
   assert.equal(plan.model, 'k3-256k');
   assert.equal(plan.effort, 'low');
   assert.equal(plan.repairModel, 'k3-256k');
@@ -249,89 +236,6 @@ test('one-click launcher accepts a user-selected output directory under expo-app
   assert.equal(plan.session, 'expo-fast-my-selected-app');
   assert.equal(plan.repairTimeout, 0);
   assert.equal(existsSync(plan.project), false);
-});
-
-test('launcher separates follow-up, rebuild, and preview lifecycle actions', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-actions-'));
-  const project = join(workspace, 'existing-app');
-  const followUp = join(workspace, 'follow-up.md');
-  mkdirSync(project, { recursive: true });
-  writeFileSync(followUp, '把主按钮改成绿色。\n');
-  const launcher = join(root, 'scripts/start-livetest.mjs');
-  const common = ['--dry-run', '--project', project, '--prompt', '原始需求', '--launch', 'false'];
-  const invoke = (...actionArgs) => {
-    const result = spawnSync(process.execPath, [launcher, ...common, ...actionArgs], {
-      encoding: 'utf8',
-      env: { ...process.env, EXPO_FAST_ENV_FILE: join(workspace, 'missing.env') },
-    });
-    assert.equal(result.status, 0, result.stderr);
-    return JSON.parse(result.stdout);
-  };
-  const followUpPlan = invoke('--follow-up-file', followUp);
-  assert.equal(followUpPlan.action, 'follow-up');
-  assert.equal(followUpPlan.followUpPath, followUp);
-  assert.equal(followUpPlan.resume, true);
-  assert.equal(invoke('--rebuild').action, 'rebuild');
-  assert.equal(invoke('--preview-only').action, 'preview');
-  rmSync(workspace, { recursive: true, force: true });
-});
-
-test('controlled Agent MCP exposes check and build without a shell tool', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-agent-tools-'));
-  const server = join(root, 'scripts/agent-tools-server.mjs');
-  const input = [
-    { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } },
-    { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
-  ].map((message) => JSON.stringify(message)).join('\n') + '\n';
-  const result = spawnSync(process.execPath, [server, '--project', workspace], { input, encoding: 'utf8' });
-  assert.equal(result.status, 0, result.stderr);
-  const rows = result.stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
-  assert.deepEqual(rows[1].result.tools.map((tool) => tool.name), ['check', 'build']);
-  assert.doesNotMatch(JSON.stringify(rows[1]), /shell|command argument/i);
-  rmSync(workspace, { recursive: true, force: true });
-});
-
-test('Expo follow-up controller persists FIFO queue updates without argv message text', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-follow-up-'));
-  const stateDir = join(workspace, '.expo-fast');
-  mkdirSync(stateDir, { recursive: true });
-  writeFileSync(join(stateDir, 'result.json'), JSON.stringify({ sessionId: 'session-1' }));
-  writeFileSync(join(stateDir, 'follow-up.json'), JSON.stringify({
-    schemaVersion: 1,
-    runtime: 'expo',
-    run_name: 'test-run',
-    session_id: 'session-1',
-    status: 'running',
-    sequence: 0,
-    queue: [],
-    history: [],
-    active_command: { id: 'active', type: 'message', status: 'running', text: 'existing' },
-    worker_pid: process.pid,
-    active_pid: process.pid,
-  }));
-  const controller = join(root, 'scripts/follow-up-control.mjs');
-  const controllerSource = readFileSync(controller, 'utf8');
-  assert.match(controllerSource, /'--follow-up-file', command\.request_path,[\s\S]*?'--launch', 'false', '--hap', 'false'/);
-  const call = (action, body = null) => {
-    const args = [controller, action, '--cwd', workspace, '--run', 'test-run'];
-    if (body) args.push('--json-stdin');
-    const result = spawnSync(process.execPath, args, {
-      input: body ? JSON.stringify(body) : '',
-      encoding: 'utf8',
-    });
-    assert.equal(result.status, 0, result.stderr || result.stdout);
-    return JSON.parse(result.stdout);
-  };
-  const queued = call('enqueue', { text: '增加重置按钮', clientMessageId: 'client-1' });
-  assert.equal(queued.follow_up.queue_length, 1);
-  assert.equal(queued.follow_up.queue[0].text, undefined);
-  const commandId = queued.command.id;
-  const updated = call('update', { commandId, text: '增加重置按钮并二次确认' });
-  assert.equal(updated.follow_up.queue_length, 1);
-  const removed = call('remove', { commandId });
-  assert.equal(removed.follow_up.queue_length, 0);
-  assert.equal(removed.follow_up.history.at(-1).status, 'cancelled');
-  rmSync(workspace, { recursive: true, force: true });
 });
 
 test('one machine-local env file configures every portable launcher path', () => {
@@ -680,14 +584,14 @@ test('preview pool configuration accepts comma-separated device lists', () => {
 
 test('foreground bundle inspection distinguishes Harmony Go from the system launcher', () => {
   const launcher = { children: [{ attributes: { bundleName: 'com.ohos.sceneboard' } }] };
-  const harmonyGo = { children: [{ attributes: { bundleName: 'com.example.myapplication1.ide' } }] };
+  const harmonyGo = { children: [{ attributes: { bundleName: 'host.exp.exponent.harmony' } }] };
   assert.deepEqual(visibleBundleNames(launcher), ['com.ohos.sceneboard']);
-  assert.deepEqual(visibleBundleNames(harmonyGo), ['com.example.myapplication1.ide']);
+  assert.deepEqual(visibleBundleNames(harmonyGo), ['host.exp.exponent.harmony']);
 });
 
 test('exact-app identity accepts the universal shell title below a phone status bar', () => {
   const manifestId = 'remote-ui-ea02ff4f9333452b9f6c3ea3185d49b8';
-  const layout = { children: [{ attributes: { bundleName: 'com.example.myapplication1.ide', type: 'root' }, children: [
+  const layout = { children: [{ attributes: { bundleName: 'host.exp.exponent.harmony', type: 'root' }, children: [
     { attributes: { type: 'Text', text: manifestId, bounds: '[70,241][1231,511]', visible: 'true' } },
     { attributes: { id: 'timer-ring', type: 'Custom', bounds: '[40,756][1280,1800]', visible: 'true' } },
   ] }] };
@@ -698,7 +602,7 @@ test('exact-app identity accepts the universal shell title below a phone status 
 
 test('exact-app identity does not confuse a catalog card with the current shell title', () => {
   const manifestId = 'remote-ui-wanted';
-  const layout = { children: [{ attributes: { bundleName: 'com.example.myapplication1.ide', type: 'root' }, children: [
+  const layout = { children: [{ attributes: { bundleName: 'host.exp.exponent.harmony', type: 'root' }, children: [
     { attributes: { type: 'Text', text: 'remote-ui-other', visible: 'true' } },
     { attributes: { type: 'Button', text: '项目', visible: 'true' } },
     { attributes: { type: 'Text', text: manifestId, visible: 'true' } },
@@ -712,19 +616,11 @@ test('exact-app identity does not confuse a catalog card with the current shell 
 test('HDC textual start failures are rejected even when the process exits zero', () => {
   assert.equal(hdcOutputFailed('start ability successfully.\n'), false);
   assert.equal(hdcOutputFailed('error: failed to start ability.\nError Code:10106102'), true);
-  assert.equal(hdcOutputFailed('[Fail][E003001] Invalid bundle name: com.example.myapplication1.ide'), true);
+  assert.equal(hdcOutputFailed('[Fail][E003001] Invalid bundle name: host.exp.exponent.harmony'), true);
 });
 
 test('Harmony Go preview wakes and unlocks a reused target and retries a locked launch once', () => {
   const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
-  const runtime = readFileSync(join(root, 'scripts/harmony-go-runtime.mjs'), 'utf8');
-  assert.match(runner, /function ensureHarmonyGoInstalled\(target\)/);
-  assert.match(runtime, /EXPO_HARMONY_GO_HAP/);
-  assert.match(runtime, /EXPO_HARMONY_GO_BUNDLE_NAME/);
-  assert.match(runtime, /bundleNameFromHap/);
-  assert.doesNotMatch(runner, /harmonyGoUserId\(target\);\s*return;/);
-  assert.match(runner, /A shell installed outside Runner may not have launched yet either/);
-  assert.match(runner, /ensureHarmonyGoInstalled\(target\);\s*const activeDevicePort/);
   assert.match(runner, /function wakeAndUnlockHarmonyTarget\(target\)/);
   assert.match(runner, /'power-shell', 'wakeup'/);
   assert.match(runner, /'uiInput', 'swipe'/);
@@ -777,8 +673,6 @@ test('runner waits for the exact catalog card to install and the exact product t
   assert.match(runner, /\(candidate\) => inspectCurrentMiniApp\(candidate, manifestId, productMarkers\)\.ok/);
   assert.doesNotMatch(runner, /const identityButton = collect\(/);
   assert.ok(runner.indexOf("assertCurrentMiniApp(layout, manifestId, productMarkers, 'launch-product')") < runner.indexOf("'screenCap'"));
-  assert.match(runner, /const artifactDigest = createHash\('sha256'\)/);
-  assert.match(runner, /manifestId, artifactDigest, currentProjectTitle/);
 });
 
 test('external controller atomically records live generation, repair, and completion state', () => {
@@ -816,6 +710,7 @@ test('external controller records a terminal failed state without invoking the p
   const result = spawnSync(process.execPath, [runner,
     '--project', project,
     '--request', request,
+    '--candidate', 'direct',
     '--effort', 'invalid',
     '--launch', 'false',
   ], { encoding: 'utf8' });
@@ -825,7 +720,7 @@ test('external controller records a terminal failed state without invoking the p
   assert.equal(state.status, 'failed');
   assert.equal(state.history[0].state, 'failed');
   assert.equal(state.history.at(-1).state, 'failed');
-  assert.match(state.error, /effort must be low, medium, high, or max/);
+  assert.match(state.error, /unknown effort/);
 });
 
 test('runner publishes a validated SDK pool HAP into the run-owned output', () => {
@@ -1144,30 +1039,30 @@ test('external dependency controller CLI synchronizes an already installed exact
   assert.equal(evidence.actualVersions['react-native-svg'], '15.15.4');
 });
 
-test('single execution policy uses external model controls and unbounded deterministic repair', () => {
-  const config = JSON.parse(readFileSync(join(root, 'config/execution.json'), 'utf8'));
-  assert.deepEqual(config, {
-    schemaVersion: 1,
-    model: 'k3-256k',
-    effort: 'low',
-    repairModel: 'k3-256k',
-    repairEffort: 'medium',
-  });
-  assert.equal(existsSync(join(root, 'config/candidates.json')), false);
+test('three candidates stay linear and default repair retries up to 100 times', () => {
+  const config = JSON.parse(readFileSync(join(root, 'config/candidates.json'), 'utf8'));
+  assert.deepEqual(Object.keys(config.candidates), ['direct', 'brief', 'repair']);
+  assert.equal(config.candidates.direct.writeBrief, true);
+  assert.equal(config.candidates.direct.repairTurns, 0);
+  assert.equal(config.candidates.brief.repairTurns, 1);
+  assert.equal(config.candidates.repair.repairTurns, 100);
+  assert.equal(config.candidates.repair.model, 'k3-256k');
+  assert.equal(config.candidates.repair.effort, 'low');
+  assert.equal(config.candidates.repair.repairModel, 'k3-256k');
+  assert.equal(config.candidates.repair.repairEffort, 'medium');
+  assert.equal(config.default, 'auto');
   const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
   assert.match(runner, /Cold-start experiment integrity forbids/);
   assert.doesNotMatch(runner, /cpSync\(join\(baseProject, 'src'/);
   assert.doesNotMatch(runner, /product-invariants\.md/);
   assert.match(runner, /'--permission-mode', 'dontAsk'/);
   assert.match(runner, /--strict-mcp-config/);
-  assert.match(runner, /selfVerify \? 'Read,Write,Edit,mcp__expo_fast__check,mcp__expo_fast__build' : 'Read,Write,Edit'/);
-  assert.match(runner, /mcpServers: selfVerify \?/);
+  assert.match(runner, /'--tools', 'Read,Write,Edit'/);
   assert.match(runner, /Read\(\.\/App\.tsx\)/);
   assert.match(runner, /Read\(\.\/\.expo-fast\/model-capability-index\.txt\)/);
   assert.doesNotMatch(runner, /Read\(\.\/\.expo-fast\/capability-catalog\.json\)/);
   assert.match(runner, /Write\(\.\/src\/\*\*\)/);
-  const verification = readFileSync(join(root, 'scripts/verification.mjs'), 'utf8');
-  assert.match(verification, /Deterministic product diagnostics failed/);
+  assert.match(runner, /Deterministic product diagnostics failed/);
   assert.match(runner, /requestSha256/);
   assert.match(runner, /templateAssetSha256/);
   assert.match(runner, /REQUIRED rows are request-matched AVAILABLE capabilities/);
@@ -1175,15 +1070,11 @@ test('single execution policy uses external model controls and unbounded determi
   assert.match(runner, /EXPO_FAST_LIVE_CLAUDE/);
   assert.match(runner, /summarizeClaudeEvent/);
   assert.match(runner, /for \(;;\)/);
-  assert.doesNotMatch(runner, /complexityScore|candidates\[mode\]|repairTurns|canRunRepair|repairPolicy/);
-  assert.match(runner, /const lines = 10/);
-  assert.match(runner, /const execution = \{ model, effort, repairModel, repairEffort, repairLimit: null \}/);
-  assert.match(runner, /deterministic gates failed; starting same-session repair \$\{repairAttempt\}/);
-  assert.match(runner, /status: metrics\.status/);
+  assert.match(runner, /canRunRepair\(repairPolicy, repairAttempt\)/);
   assert.match(runner, /repairArtifactName\('agent-repair-trace'/);
   assert.match(runner, /\[dependencies, 'seed', project\]/);
-  assert.match(verification, /\[dependencies, 'sync', project\]/);
-  assert.match(verification, /\[dependencies, 'export', project, catalogRoot\]/);
+  assert.match(runner, /\[dependencies, 'sync', project\]/);
+  assert.match(runner, /\[dependencies, 'export', project, catalogRoot\]/);
   assert.doesNotMatch(runner, /\[helper, 'seed-modules', project\]/);
   assert.match(runner, /enforcement: 'advisory', blocking: false/);
   assert.match(runner, /trace-scope warning/);
@@ -1192,41 +1083,22 @@ test('single execution policy uses external model controls and unbounded determi
   assert.doesNotMatch(runner, /repairTimeoutMinutes \|\| 8/);
   assert.match(runner, /timeoutMinutes > 0 \? setTimeout/);
   assert.doesNotMatch(runner, /claudeTimeoutMinutes \|\| 20/);
-  assert.match(runner, /resolveExecution\(o\)/);
+  assert.match(runner, /const model = o\.model \|\| candidates\[mode\]\.model/);
+  assert.match(runner, /const effort = o\.effort \|\| candidates\[mode\]\.effort/);
+  assert.match(runner, /const repairModel = o\.repairModel \|\| o\.model/);
+  assert.match(runner, /const repairEffort = o\.repairEffort \|\| o\.effort/);
   assert.doesNotMatch(runner, /--dangerously-skip-permissions/);
 });
 
-test('initial 0-to-1 product prompt remains byte-stable while follow-up tools evolve', () => {
-  const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
-  const source = runner.match(/function buildPrompt\(project\) \{[\s\S]*?\n\}\n\nasync function claudeTurn/)?.[0]
-    .replace(/\n\nasync function claudeTurn$/, '');
-  assert.ok(source, 'buildPrompt source');
-  const buildPrompt = Function('readFileSync', 'join', `${source}; return buildPrompt;`)(readFileSync, join);
-  const project = mkdtempSync(join(tmpdir(), 'expo-fast-prompt-contract-'));
-  mkdirSync(join(project, '.expo-fast'), { recursive: true });
-  writeFileSync(join(project, '.expo-fast/request.md'), readFileSync(join(root, 'prompts/learning-goals.md')));
-  const digest = createHash('sha256').update(buildPrompt(project)).digest('hex');
-  assert.equal(digest, '54309185afceaf7ccfb38fbe52e2f5f1c8a3510d71442cce359626545fa3ef86');
-  rmSync(project, { recursive: true, force: true });
-});
-
-test('execution policy resolves explicit overrides and main-turn inheritance centrally', () => {
-  assert.deepEqual(resolveExecution({}), {
-    model: 'k3-256k', effort: 'low', repairModel: 'k3-256k', repairEffort: 'medium',
-  });
-  assert.deepEqual(resolveExecution({ model: 'main-model', effort: 'high' }), {
-    model: 'main-model', effort: 'high', repairModel: 'main-model', repairEffort: 'high',
-  });
-  assert.deepEqual(resolveExecution({ model: 'main-model', effort: 'low', repairModel: 'repair-model', repairEffort: 'max' }), {
-    model: 'main-model', effort: 'low', repairModel: 'repair-model', repairEffort: 'max',
-  });
-  assert.throws(() => resolveExecution({ effort: 'automatic' }), /effort must be low, medium, high, or max/);
-});
-
-test('repair artifacts give every retry separate evidence', () => {
+test('repair policy enforces numeric bounds and gives every retry separate evidence', () => {
+  assert.equal(canRunRepair(0, 0), false);
+  assert.equal(canRunRepair(1, 0), true);
+  assert.equal(canRunRepair(1, 1), false);
+  assert.equal(canRunRepair(100, 99), true);
+  assert.equal(canRunRepair(100, 100), false);
   assert.equal(repairArtifactName('agent-repair-trace', 1, '.jsonl'), 'agent-repair-trace.jsonl');
   assert.equal(repairArtifactName('agent-repair-trace', 2, '.jsonl'), 'agent-repair-trace-2.jsonl');
-  assert.throws(() => repairArtifactName('agent-repair-trace', 0, '.jsonl'), /invalid repair attempt/);
+  assert.throws(() => canRunRepair(-1, 0), /invalid repairTurns policy/);
 });
 
 test('trace analyzer includes every numbered repair trace in attempt order', () => {
@@ -1271,18 +1143,18 @@ test('starter and model contract use Harmony-safe Path-only icon geometry', () =
   assert.match(runner, /Production icons must be Path-only/);
 });
 
-test('candidate CLI is removed instead of silently selecting an execution path', () => {
-  const launcher = join(root, 'scripts/start-livetest.mjs');
-  const result = spawnSync(process.execPath, [launcher, '--dry-run', '--candidate', 'repair', '--launch', 'false'], { encoding: 'utf8' });
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /unknown option: --candidate/);
+test('automatic selection routes complex multi-surface requests to repair', () => {
+  const scoreText = '四个 Tab 导出导入 周报 环比 连续 休息日 补记 逾期 SVG 图表 删除 二次确认';
+  let score = scoreText.length;
+  for (const pattern of [/四个 Tab|四个页面|four tabs/i, /导出|导入|迁移/, /周报|环比|历史周/, /连续|休息日|补记|逾期/, /SVG|图表|堆叠/, /删除|二次确认|确认/]) if (pattern.test(scoreText)) score += 1200;
+  assert.ok(score >= 4000);
 });
 
 function writeEvidence(project, category = 'form-submit') {
   const smoke = join(project, '.expo-fast/smoke');
   mkdirSync(smoke, { recursive: true });
   writeFileSync(join(project, '.expo-fast/manifest.json'), JSON.stringify({ id: 'test-ledger' }));
-  const root = (text) => ({ children: [{ attributes: { bundleName: 'com.example.myapplication1.ide', type: 'root' }, children: [{ attributes: { type: 'Text', text: 'test-ledger', bounds: '[38,130][260,179]', visible: 'true' } }, { attributes: { id: 'home-month-expense', type: 'Custom', bounds: '[40,400][900,500]', visible: 'true' }, children: [{ attributes: { text } }] }] }] });
+  const root = (text) => ({ children: [{ attributes: { bundleName: 'host.exp.exponent.harmony', type: 'root' }, children: [{ attributes: { type: 'Text', text: 'test-ledger', bounds: '[38,130][260,179]', visible: 'true' } }, { attributes: { id: 'home-month-expense', type: 'Custom', bounds: '[40,400][900,500]', visible: 'true' }, children: [{ attributes: { text } }] }] }] });
   writeFileSync(join(smoke, 'layout-before.json'), JSON.stringify(root('本月支出 100 元')));
   writeFileSync(join(smoke, 'layout-after.json'), JSON.stringify(root('本月支出 188.8 元')));
   writeFileSync(join(smoke, 'layout-restarted.json'), JSON.stringify(root('本月支出 188.8 元')));
@@ -1306,7 +1178,7 @@ test('exact-app identity rejects a listed app when another app is current', () =
   const project = mkdtempSync(join(tmpdir(), 'expo-fast-smoke-wrong-app-'));
   writeEvidence(project);
   const smoke = join(project, '.expo-fast/smoke');
-  const wrong = { children: [{ attributes: { bundleName: 'com.example.myapplication1.ide', type: 'root' }, children: [
+  const wrong = { children: [{ attributes: { bundleName: 'host.exp.exponent.harmony', type: 'root' }, children: [
     { attributes: { type: 'Text', text: 'other-current-app', bounds: '[38,130][300,179]', visible: 'true' } },
     { attributes: { type: 'Button', text: 'test-ledger', bounds: '[900,220][1200,292]', visible: 'true', backgroundColor: '#FFEAECF0' } },
     { attributes: { id: 'home-month-expense', type: 'Custom', bounds: '[40,400][900,500]', visible: 'true' }, children: [{ attributes: { text: '本月支出 100 元' } }] },
@@ -1317,7 +1189,7 @@ test('exact-app identity rejects a listed app when another app is current', () =
 
 test('exact-app identity locates the Host title relative to navigation on high-density layouts', async () => {
   const { inspectCurrentMiniApp } = await import('../scripts/layout-identity.mjs');
-  const layout = { children: [{ attributes: { bundleName: 'com.example.myapplication1.ide' }, children: [
+  const layout = { children: [{ attributes: { bundleName: 'host.exp.exponent.harmony' }, children: [
     { attributes: { type: 'Text', text: 'EXPO HARMONY GO', bounds: '[67,175][550,222]', visible: 'true' } },
     { attributes: { type: 'Text', text: 'test-ledger', bounds: '[67,232][1184,493]', visible: 'true' } },
     { attributes: { type: 'Button', text: '项目', bounds: '[67,566][263,694]', visible: 'true' } },
@@ -1370,8 +1242,6 @@ test('cold-start trace scope accepts whitelisted native file tools and rejects e
     row('Write', { file_path: 'App.tsx', content: 'export default null' }),
     row('Write', { file_path: 'src/store.ts', content: 'export {}' }),
     row('Edit', { file_path: 'package.json', old_string: '{}', new_string: '{"dependencies":{}}' }),
-    row('mcp__expo_fast__check', {}),
-    row('mcp__expo_fast__build', {}),
   ].join('\n'));
   assert.equal(auditImplementationTrace(project, trace).status, 'pass');
 

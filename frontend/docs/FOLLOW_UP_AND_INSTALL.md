@@ -1,13 +1,13 @@
 # 续跑与安装包最终实现说明
 
-更新时间：2026-08-18
+更新时间：2026-07-29
 
 ## 1. 目标与范围
 
 本次实现包含两个相互独立、但在任务详情页协同展示的能力：
 
 1. **首版本自动、后续按需生成安装包**：0→1 首版本在 QA、unsigned HAP 和预览就绪后自动签名并到 100%；后续调整不重复 QA，代码和预览就绪后停在 80%，只有用户点击后才重新编译、签名并生成最新二维码。
-2. **生成后续跑（follow-up）**：Harmony Pilot 或 Expo Runner 的 0→1 工作流完成后，用户可以继续对同一工作区提出增量修改。Remote UI 只负责鉴权、展示与调用各 Runtime 自己的受控控制器。
+2. **生成后续跑（follow-up）**：Harmony Pilot 的 0→1 工作流完成后，用户可以继续对同一工作区提出增量修改。续跑由 Harmony Pilot 的独立 Agent/tmux 会话执行，Remote UI 只负责鉴权、展示与受控调用。
 
 本文描述当前已实现的前后端交互设计。Harmony Pilot 的控制契约来源于：
 后端仓库的 `docs/follow-up-control-remote-ui-handoff.md`。
@@ -16,14 +16,11 @@
 
 | 层级 | 负责内容 | 不负责内容 |
 | --- | --- | --- |
-| 浏览器前端（React） | 展示任务/安装/续跑状态；提交调整；轮询更新；展示 FIFO 队列与中断状态 | 直接写 Runtime 状态文件；直接向 tmux/Agent 发按键；自行决定下一条消息何时派发 |
+| 浏览器前端（React） | 展示任务/安装/续跑状态；提交调整；轮询更新；展示 FIFO 队列与中断状态 | 直接写 ArkPilot 文件；直接向 tmux 发按键；自行决定下一条消息何时派发 |
 | Remote UI 服务端（`app.py`） | run 鉴权；将 HTTP 映射为 CLI 调用；向前端返回状态镜像；错误映射 | 保存或调度 follow-up 队列；解析/修改用户消息；管理 tmux 会话 |
 | Harmony Pilot（`harmony-pilot`） | 创建 follow-up 会话；持久化命令；FIFO 调度；向 Claude 投递 prompt；中断确认；状态恢复 | Remote UI 的 HTTP 鉴权和页面渲染 |
-| Expo Runner（`runner/`） | 复用首轮 Claude session；持久化 FIFO；执行增量修改、受控 check/build、外层复验和预览刷新 | Remote UI 的 HTTP 鉴权和页面渲染；向 Agent 暴露任意 shell |
 
 **禁止事项**：Remote UI 不直接写 `.arkpilot/state`，不调用 `tmux send-keys`，不把用户输入拼入 shell 参数。
-
-Runtime 分发由 `RunRecord.runtime` 决定：ArkPilot 调用 `follow-up-control.cjs`；Expo 调用 `runner/follow-up-control.sh`。两者复用同一组 HTTP API 与前端状态结构。
 
 ## 3. 整体交互流程
 
@@ -57,7 +54,7 @@ sequenceDiagram
 
 - **Harmony Pilot 工作流完成**：是创建真实 follow-up Agent/tmux 会话的前提。父 run 此后保持 `complete`，续跑不会把它改回 `active`。
 - **统一 Agent 构建会话**：从任务创建开始展示；初始 Prompt 在右侧，首版本 Agent 输出在左侧。首版本二维码就绪前只禁用输入，不隐藏会话。
-- **hpack 发布/签名成功**：不是创建 follow-up 会话的必要条件。ArkPilot 仍在首版本二维码就绪后开放输入；Expo 在首轮 Bundle 完成后即可开放，不让 HAP/签名拖慢修改反馈。
+- **hpack 发布/签名成功**：不是创建 follow-up 会话的必要条件，但当前产品交互要求首版本二维码就绪后才开放续跑输入。
 - **详情页进度 80%**：后续调整的方案、实现、unsigned HAP 和预览均已完成，等待用户继续调整或点击“更新安装包”。
 - **详情页进度 100%**：签名包与二维码已生成，并且仍对应当前最新代码；开始新一轮调整后立即回到 80%。
 
@@ -78,7 +75,7 @@ sequenceDiagram
 详情页使用 `useRunStream(runId)` 获取 `GET /api/runs/{id}` 的进度负载。
 
 1. 详情页始终渲染统一会话窗口，并把 `run.prompt` 作为第一条右侧消息、`events` 作为左侧 Agent 消息。
-2. ArkPilot 在首版本签名成功并持久化 `first_install_*` 后开放输入；Expo 在主 Bundle 完成后开放。两者都读取 `progress.follow_up` 与 `progress.follow_up_trace`。
+2. 首版本签名成功并持久化 `first_install_*` 后开放输入，同时读取 `progress.follow_up` 与 `progress.follow_up_trace`。
 3. 即使父 run 已是 `succeeded/failed`，只要已出现 unsigned HAP 或存在 `follow_up.run_name`，前端继续轮询，不会按父任务终态停止。
 4. 轮询频率按状态调整：安装包生成中约 1 秒、follow-up `running` 约 1.5 秒、`interrupting` 750ms、`idle` 5 秒，其他情况使用普通轮询间隔。
 
@@ -133,19 +130,14 @@ sequenceDiagram
 
 主要实现位于 `app.py`：
 
-- `follow_up_cli_path(record)`：ArkPilot 从 `TMUX_RUNNER_PATH` 同级目录定位 `follow-up-control.cjs`；Expo 从 `HP_EXPO_FAST_ROOT` 定位 `follow-up-control.sh`。
-- `call_follow_up_control(record, action, body)`：按 Runtime 直接执行控制器，不经 shell。
+- `follow_up_cli_path()`：从 `TMUX_RUNNER_PATH` 的同级目录定位部署受控的 `follow-up-control.cjs`。
+- `call_follow_up_control(record, action, body)`：直接执行 Node，不经 shell。
 - `load_follow_up_status(...)`：为主进度接口加载状态镜像。
 
 实际进程形式为：
 
 ```text
 node <harmony-pilot>/scripts/follow-up-control.cjs <status|enqueue|interrupt|update|remove>
-  --cwd <record.workspace>
-  --run <record.session_name>
-  [--json-stdin]
-
-<runner>/follow-up-control.sh <status|enqueue|interrupt|update|remove>
   --cwd <record.workspace>
   --run <record.session_name>
   [--json-stdin]
@@ -167,13 +159,13 @@ node <harmony-pilot>/scripts/follow-up-control.cjs <status|enqueue|interrupt|upd
 | `POST /api/runs/{id}/follow-up/interrupt` | `interrupt` | `{ clientActionId }` | `{ ok, accepted, duplicate, command, follow_up }` |
 | `PATCH /api/runs/{id}/follow-up/messages/{commandId}` | `update` | `{ text }` | 更新 queued command 与状态镜像 |
 | `DELETE /api/runs/{id}/follow-up/messages/{commandId}` | `remove` | 无 | 删除 queued command 与状态镜像 |
-| `GET /api/runs/{id}` | `status`（ArkPilot 在镜像存在时；Expo 始终可恢复） | 无 | 返回 `progress.follow_up` 状态及 `progress.follow_up_trace` 过程摘要 |
+| `GET /api/runs/{id}` | `status`（仅状态镜像存在时） | 无 | 返回 `progress.follow_up` 状态及 `progress.follow_up_trace` 过程摘要 |
 
 `GET /api/runs/{id}` 中的 `status` 不只是读操作：Harmony Pilot 会借此对账 prompt 收据/idle 标记，必要时派发 FIFO 队首。因此前端同一 run 只保留一个轮询链路，避免无意义的并发 `status` 调用。
 
 ### 5.3 错误映射
 
-控制器稳定错误由 CLI 以非零退出码和 JSON 返回。Remote UI 映射如下：
+控制器稳定错误由 CLI 以退出码 `2` 和 JSON 返回。Remote UI 映射如下：
 
 | 控制器 code | HTTP 状态 |
 | --- | --- |
@@ -237,40 +229,28 @@ queued → interrupting → completed
 
 控制器在 session `idle` 时只派发 FIFO 队首。中断会向 Claude 发送一次非破坏性 Escape；确认后把当前消息标记为 `interrupted`，并立即派发下一条。若确认超时，状态保持 `interrupting`，后续 `status` 轮询继续恢复。
 
-### 6.2 Expo Runner 控制器
-
-Expo 状态保存在生成工程内：
-
-```text
-<workspace>/.expo-fast/follow-up.json
-<workspace>/.expo-fast/follow-ups/<command-id>.md
-<workspace>/.expo-fast/revisions/NNN-follow-up/agent-trace.jsonl
-```
-
-控制器使用目录锁和原子 rename 保存状态，FIFO worker 每次只执行一个请求。用户正文写入独立 Markdown 文件，不进入 argv。每轮通过 `start-livetest.sh --follow-up-file` 恢复首轮 Claude session；Agent 仅额外获得绑定当前工程的 `check`/`build`，外层随后仍执行完整验证。Expo worker 在最终 gate 后立即释放队列，不等待设备租约；详情页轮询完成状态并发布最新 Bundle。中断向当前独立进程组发送 `SIGINT`，保留上一版已验证 Bundle，并把该轮 revision 标记为 `interrupted`。
-
 ## 7. 首版本与安装包设计
 
 这部分与 follow-up 的状态机独立：
 
 1. 0→1 首版本在 QA、unsigned HAP 和预览稳定后自动执行一次 hpack；成功后把安装 URL、商店 URL、manifest URL 与时间写回 `RunRecord.first_*` 字段。
 2. 提交 follow-up 消息后，服务端持久化最近调整时间，并结合 active、queue、history 与 manifest 时间立即把当前安装包标记为过期；签名任务同时快照其对应的调整版本，防止签名期间新提交的调整被误判为已打包。
-3. 后续调整不会自动调用 HPack，也不重复执行首版本 QA。ArkPilot 可维护 unsigned HAP 与预览；Expo 默认只重建并验证 Bundle，完成后由详情页轮询发布，不用设备等待阻塞 follow-up FIFO。
+3. 后续调整不会因为发现新 HAP 自动调用 HPack，也不重复执行首版本 QA；代码修改阶段只维护 unsigned HAP 与右侧预览。
 4. 最新预览就绪且 follow-up 空闲后，顶部显示可用的“更新安装包”按钮。
-5. 用户点击 `POST /api/runs/{id}/package` 后，按钮在整个编译、签名和二维码生成期间不可重复点击；Expo 若尚无当前 revision 的 HAP，会先执行无模型的 `--rebuild --hap true --launch false`。
+5. 用户点击 `POST /api/runs/{id}/package` 后，按钮在整个编译、签名和二维码生成期间不可重复点击。
 6. 生成成功后进度从 80% 变为 100%，右下角自动展开最新二维码；再次开始调整后进度退回 80%。
 7. `GET /api/runs/{id}/install-qr?version=first` 专门返回首版本二维码。
 
 ### 7.1 续跑后的预览刷新
 
-ArkPilot 续跑 Agent 重新构建并覆盖 unsigned HAP 后，Remote UI 会比较 HAP 修改时间与 `RunRecord.capture_hap_mtime`。Expo 的 follow-up 由 Runner 自己完成 Bundle 发布与桌面预览刷新，不经过这一 HAP 采集路径：
+续跑 Agent 重新构建并覆盖 unsigned HAP 后，Remote UI 会比较 HAP 修改时间与 `RunRecord.capture_hap_mtime`：
 
 1. 发现更晚的 HAP 后，重置预览采集为等待状态并启动新的采集 monitor。
 2. 采集命令优先使用配置 Python；配置路径不存在时回退到当前运行 Python。
 3. 只有媒体文件修改时间不早于当前 HAP 时，才视为最新预览；旧截图/视频不会继续显示。
 4. `DevicePreview` 在每次进度更新时使用带缓存破坏参数的媒体 URL，因此会加载新截图/视频。
 
-首版本安装页可用与否不影响 follow-up 控制器的创建。页面输入门槛按 Runtime 区分：ArkPilot 等待首版本二维码，Expo 只等待首轮 Bundle 完成。
+首版本安装页可用与否不影响 follow-up 控制器的创建；页面输入门槛要求首版本二维码就绪，是 Remote UI 的产品交互约束。
 
 ### 7.2 进度条规则
 

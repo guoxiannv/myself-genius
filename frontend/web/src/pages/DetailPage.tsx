@@ -60,14 +60,14 @@ export function DetailPage() {
   const followUpEstablished = Boolean(data?.follow_up?.run_name || data?.follow_up?.session_id)
   const mainBuildComplete = finished || COMPLETE_RUN_STATUSES.has(runStatus) || followUpEstablished
   const running = !mainBuildComplete && !["failed", "error", "cancelled", "canceled"].includes(runStatus)
-  // ArkPilot 在首个签名包就绪后开放续跑；Expo 的 bundle 首轮完成即可继续调整，
-  // 不把较慢的 HAP/签名链路放在日常修改反馈的关键路径上。
+  // 真实任务必须完成首版本自动签名并展示首个二维码，才开放续跑输入。
+  // first_install_* 会持久化，因此后续调整使最新安装包过期时不会重新锁住面板。
   const firstInstallReady = Boolean(
     data?.artifacts.first_install_ready &&
       data.artifacts.first_install_url &&
       data.artifacts.first_install_qr_path,
   )
-  const initialBuildReady = (isExpo ? mainBuildComplete : firstInstallReady) || isFollowUpDemo || isFollowUpHapDemo
+  const initialBuildReady = firstInstallReady || isFollowUpDemo || isFollowUpHapDemo
   const pendingQuestions = data?.questions?.pending?.length
     ? data.questions.pending
     : isDemo
@@ -140,8 +140,9 @@ export function DetailPage() {
               <BuildProgress data={data} finished={finished} />
             </Card>
 
-            {isExpo && data ? <ExpoRunPanel data={data} /> : null}
-            {!isExpo || data ? (
+            {isExpo && data ? (
+              <ExpoRunPanel data={data} />
+            ) : (
               <FollowUpPanel
                 runId={runId}
                 initialPrompt={data?.run.prompt || ""}
@@ -153,7 +154,7 @@ export function DetailPage() {
                 trace={data?.follow_up_trace}
                 mock={isFollowUpDemo || isFollowUpHapDemo}
               />
-            ) : null}
+            )}
           </div>
 
           {/* 右：真机预览 */}

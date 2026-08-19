@@ -3,7 +3,7 @@ import { api, withCacheBust } from "@/lib/api"
 import type { ExpoServeState, RunArtifacts } from "@/lib/types"
 
 // 占位地址：接入正式 HarmonyOS PC 版 ExpoGo 安装包后只需替换这一项。
-const EXPO_GO_PC_DOWNLOAD_URL = "https://appgallery.huawei.com/link/invite-test-wap?taskId=3a0d705d98e70928c2d9b587e80178d6"
+const EXPO_GO_PC_DOWNLOAD_URL = "https://appgallery.huawei.com/link/invite-test-wap?taskId=6bf8b471bc2dded43952e4f1cb58f1eb"
 
 type InstallTarget = "phone" | "desktop"
 

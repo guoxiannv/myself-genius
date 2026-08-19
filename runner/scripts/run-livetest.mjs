@@ -4,7 +4,17 @@ import { basename, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { assertCurrentMiniApp, inspectCurrentMiniApp, visibleBundleNames } from './layout-identity.mjs';
+import {
+  assertCurrentMiniApp,
+  catalogFingerprint,
+  catalogHasProject,
+  catalogProjectCard,
+  catalogVisibleProjectIds,
+  harmonyGoActiveMiniAppNodeId,
+  harmonyGoCatalogMiniAppNodeId,
+  inspectCurrentMiniApp,
+  visibleBundleNames,
+} from './layout-identity.mjs';
 import { discoverHdcPreviewPools, hdcOutputFailed, parseHdcForwardRules, parseHdcTargets, prioritizeHdcPreviewTargets, reversePortCandidates } from './hdc-target.mjs';
 import { acquirePreviewDevice, configuredPreviewPools } from './preview-device-pool.mjs';
 import { auditImplementationTrace } from './trace-scope.mjs';
@@ -480,17 +490,6 @@ function children(node) { return node.children || []; }
 function subtreeHas(node, text) { return nodeText(node) === text || children(node).some((child) => subtreeHas(child, text)); }
 function collect(node, predicate, out = []) { if (predicate(node)) out.push(node); for (const child of children(node)) collect(child, predicate, out); return out; }
 function boundsCenter(node) { const value = node.attributes?.bounds || ''; const match = value.match(/\[(\d+),(\d+)\]\[(\d+),(\d+)\]/); if (!match) throw new Error(`node has invalid bounds: ${value}`); return [Math.round((Number(match[1]) + Number(match[3])) / 2), Math.round((Number(match[2]) + Number(match[4])) / 2)]; }
-function catalogProjectCard(layout, identity) {
-  const projectId = /^remote-ui-[a-f0-9]{32}$/;
-  const actionLabels = new Set(['安装', '打开', '移除']);
-  const candidates = collect(layout, (node) => {
-    const ids = new Set(collect(node, (child) => projectId.test(nodeText(child))).map(nodeText));
-    const hasAction = collect(node, (child) => child.attributes?.type === 'Button' && actionLabels.has(nodeText(child))).length > 0;
-    return ids.size === 1 && ids.has(identity) && hasAction;
-  });
-  candidates.sort((a, b) => JSON.stringify(a).length - JSON.stringify(b).length);
-  return candidates[0] || null;
-}
 function relatedButton(layout, identity, labels) {
   const card = catalogProjectCard(layout, identity);
   return card ? collect(card, (node) => node.attributes?.type === 'Button' && labels.includes(nodeText(node)))[0] || null : null;
@@ -517,14 +516,6 @@ async function waitForLayout(project, target, name, predicate, timeoutMs = 10_00
   } while (Date.now() < deadline);
   return layout;
 }
-function catalogHasProject(layout, manifestId) {
-  return collect(layout, (node) => nodeText(node) === manifestId).length > 0;
-}
-function catalogVisibleProjectIds(layout) {
-  return [...new Set(
-    collect(layout, (node) => /^remote-ui-[a-f0-9]{32}$/.test(nodeText(node))).map(nodeText),
-  )];
-}
 function catalogViewport(layout) {
   const candidates = collect(layout, (node) => {
     const match = String(node.attributes?.bounds || '').match(/\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]/);
@@ -538,11 +529,6 @@ function catalogViewport(layout) {
     return { node, left, top, right, bottom, area: Math.max(0, right - left) * Math.max(0, bottom - top) };
   }).sort((left, right) => right.area - left.area);
   return candidates[0] || null;
-}
-function catalogFingerprint(layout) {
-  return collect(layout, (node) => /^remote-ui-[a-f0-9]{32}$/.test(nodeText(node)))
-    .map((node) => `${nodeText(node)}@${node.attributes?.bounds || ''}`)
-    .join('|');
 }
 async function revealCatalogProject(project, target, manifestId, layout, actions, evidenceName) {
   let current = layout;
@@ -686,7 +672,10 @@ export async function installAndOpen(project, target, manifestId, previewKind = 
   }
   const identity = assertCurrentMiniApp(layout, manifestId, productMarkers, 'launch-product');
   const shotDevice = `/data/local/tmp/expo-fast-${process.pid}-launch-${previewKind || 'default'}.jpeg`; const shotLocal = join(project, `.expo-fast/launch-screenshot${previewKind ? `-${previewKind}` : ''}.jpeg`); hdcRun(['-t', target, 'shell', 'uitest', 'screenCap', '-p', shotDevice]); hdcRun(['-t', target, 'file', 'recv', shotDevice, shotLocal]);
-  return { result: 'PASS', target, previewKind, screenshot: shotLocal, bundleName: harmonyGoBundleName, manifestId, currentProjectTitle: identity.currentProjectTitle, currentProjectBounds: identity.currentProjectBounds, appNode: identity.productMarker, appNodeBounds: identity.productMarkerBounds, actions };
+  const artifactDigest = createHash('sha256')
+    .update(readFileSync(join(project, 'dist/harmony-go/miniapps', manifestId, 'manifest.json')))
+    .digest('hex');
+  return { result: 'PASS', target, previewKind, screenshot: shotLocal, bundleName: harmonyGoBundleName, manifestId, artifactDigest, currentProjectId: identity.currentProjectId, currentProjectTitle: identity.currentProjectTitle, currentProjectBounds: identity.currentProjectBounds, appNode: identity.productMarker, appNodeBounds: identity.productMarkerBounds, actions };
 }
 async function main() {
   const o = parse(process.argv.slice(2)); const project = resolve(o.project); const request = resolve(o.request || join(project, '.expo-fast/request.md')); const requestText = readFileSync(request, 'utf8'); const invocationStartedAt = new Date();

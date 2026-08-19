@@ -1,5 +1,16 @@
 import { harmonyGoBundleName } from './harmony-go-runtime.mjs';
 
+const HARMONY_GO_ACTIVE_MINI_APP_ID_PREFIX = 'harmony-go-active-mini-app-';
+const HARMONY_GO_CATALOG_MINI_APP_ID_PREFIX = 'harmony-go-catalog-mini-app-';
+
+export function harmonyGoActiveMiniAppNodeId(manifestId) {
+  return `${HARMONY_GO_ACTIVE_MINI_APP_ID_PREFIX}${manifestId}`;
+}
+
+export function harmonyGoCatalogMiniAppNodeId(manifestId) {
+  return `${HARMONY_GO_CATALOG_MINI_APP_ID_PREFIX}${manifestId}`;
+}
+
 function children(node) { return node?.children || []; }
 function collect(node, predicate, output = []) {
   if (!node || typeof node !== 'object') return output;
@@ -11,10 +22,6 @@ function nodeText(node) {
   const attributes = node?.attributes || {};
   return attributes.text || attributes.originalText || attributes.description || '';
 }
-function bounds(node) {
-  const match = String(node?.attributes?.bounds || '').match(/\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]/);
-  return match ? { left: Number(match[1]), top: Number(match[2]), right: Number(match[3]), bottom: Number(match[4]) } : null;
-}
 export function visibleBundleNames(layout) {
   return [...new Set(collect(layout, (node) => Boolean(node.attributes?.bundleName)).map((node) => node.attributes.bundleName))];
 }
@@ -22,19 +29,11 @@ function hasHarmonyGoBundle(layout, expectedBundleName = harmonyGoBundleName) {
   return visibleBundleNames(layout).includes(expectedBundleName);
 }
 function currentProjectTitle(layout, manifestId) {
-  const candidates = collect(layout, (node) => {
-    const box = bounds(node);
+  const identity = harmonyGoActiveMiniAppNodeId(manifestId);
+  return collect(layout, (node) => {
     const attributes = node.attributes || {};
-    return attributes.type === 'Text' && attributes.visible !== 'false' && nodeText(node) === manifestId && box;
-  });
-  const projectsTab = collect(layout, (node) => node.attributes?.type === 'Button' && nodeText(node) === '项目')[0];
-  const projectsBounds = bounds(projectsTab);
-  if (projectsBounds) {
-    return candidates.filter((node) => bounds(node).bottom <= projectsBounds.top).sort((a, b) => bounds(a).top - bounds(b).top)[0] || null;
-  }
-  const nodes = collect(layout, () => true);
-  const navigationIndex = nodes.indexOf(projectsTab);
-  return candidates.find((node) => navigationIndex === -1 || nodes.indexOf(node) < navigationIndex) || null;
+    return attributes.type === 'Text' && attributes.visible !== 'false' && attributes.id === identity;
+  })[0] || null;
 }
 function productMarker(layout, markerIds) {
   const wanted = new Set(markerIds.filter(Boolean));
@@ -58,12 +57,13 @@ export function inspectCurrentMiniApp(layout, manifestId, markerIds = [], expect
   const crash = runtimeError(layout);
   const errors = [];
   if (!hasHarmonyGoBundle(layout, expectedBundleName)) errors.push(`root bundleName is not ${expectedBundleName}`);
-  if (!title) errors.push(`Host current-project title is not exactly ${manifestId}`);
+  if (!title) errors.push(`Host active mini-app id is not exactly ${manifestId}`);
   if (!marker) errors.push(`product subtree lacks a run-specific marker (${markerIds.join(', ') || 'none supplied'})`);
   if (crash) errors.push(`visible runtime error overlay: ${nodeText(crash).slice(0, 180)}`);
   return {
     ok: errors.length === 0,
     manifestId,
+    currentProjectId: title ? manifestId : '',
     currentProjectTitle: title ? nodeText(title) : '',
     currentProjectBounds: title?.attributes?.bounds || '',
     productMarker: marker?.attributes?.id || marker?.attributes?.key || marker?.attributes?.description || '',
@@ -71,6 +71,32 @@ export function inspectCurrentMiniApp(layout, manifestId, markerIds = [], expect
     runtimeError: crash ? nodeText(crash) : '',
     errors,
   };
+}
+
+export function catalogProjectCard(layout, manifestId) {
+  const identity = harmonyGoCatalogMiniAppNodeId(manifestId);
+  return collect(layout, (node) => {
+    const attributes = node.attributes || {};
+    return attributes.visible !== 'false' && attributes.id === identity;
+  })[0] || null;
+}
+
+export function catalogHasProject(layout, manifestId) {
+  return catalogProjectCard(layout, manifestId) !== null;
+}
+
+export function catalogVisibleProjectIds(layout) {
+  return [...new Set(collect(layout, (node) => {
+    const id = node.attributes?.id;
+    return node.attributes?.visible !== 'false' && typeof id === 'string' && id.startsWith(HARMONY_GO_CATALOG_MINI_APP_ID_PREFIX);
+  }).map((node) => node.attributes.id.slice(HARMONY_GO_CATALOG_MINI_APP_ID_PREFIX.length)).filter(Boolean))];
+}
+
+export function catalogFingerprint(layout) {
+  return collect(layout, (node) => {
+    const id = node.attributes?.id;
+    return node.attributes?.visible !== 'false' && typeof id === 'string' && id.startsWith(HARMONY_GO_CATALOG_MINI_APP_ID_PREFIX);
+  }).map((node) => `${node.attributes.id}@${node.attributes?.bounds || ''}`).join('|');
 }
 
 export function assertCurrentMiniApp(layout, manifestId, markerIds = [], label = 'layout', expectedBundleName = harmonyGoBundleName) {

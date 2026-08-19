@@ -6,7 +6,16 @@ import { basename, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { validateSmoke } from '../scripts/validate-smoke.mjs';
-import { inspectCurrentMiniApp, visibleBundleNames } from '../scripts/layout-identity.mjs';
+import {
+  catalogFingerprint,
+  catalogHasProject,
+  catalogProjectCard,
+  catalogVisibleProjectIds,
+  harmonyGoActiveMiniAppNodeId,
+  harmonyGoCatalogMiniAppNodeId,
+  inspectCurrentMiniApp,
+  visibleBundleNames,
+} from '../scripts/layout-identity.mjs';
 import { assignHdcPreviewPorts, configuredHdcPreviewTargets, configuredHdcTarget, discoverHdcPreviewPools, hdcOutputFailed, parseHdcForwardRules, parseHdcTargets, prioritizeHdcPreviewTargets, reversePortCandidates, selectHdcPreviewTargets, selectHdcTarget } from '../scripts/hdc-target.mjs';
 import { auditImplementationTrace } from '../scripts/trace-scope.mjs';
 import { auditProductSource, verifyHarmonyGoArtifacts } from '../scripts/verify-product.mjs';
@@ -861,28 +870,61 @@ test('foreground bundle inspection distinguishes Harmony Go from the system laun
   assert.deepEqual(visibleBundleNames(harmonyGo), ['com.example.myapplication1.ide']);
 });
 
-test('exact-app identity accepts the universal shell title below a phone status bar', () => {
+test('exact-app identity uses the active manifest id while preserving a semantic display name', () => {
   const manifestId = 'remote-ui-ea02ff4f9333452b9f6c3ea3185d49b8';
   const layout = { children: [{ attributes: { bundleName: 'com.example.myapplication1.ide', type: 'root' }, children: [
-    { attributes: { type: 'Text', text: manifestId, bounds: '[70,241][1231,511]', visible: 'true' } },
+    { attributes: { id: harmonyGoActiveMiniAppNodeId(manifestId), type: 'Text', text: '专注时钟', bounds: '[70,241][1231,511]', visible: 'true' } },
     { attributes: { id: 'timer-ring', type: 'Custom', bounds: '[40,756][1280,1800]', visible: 'true' } },
   ] }] };
   const identity = inspectCurrentMiniApp(layout, manifestId, ['timer-ring']);
   assert.equal(identity.ok, true, identity.errors.join('; '));
+  assert.equal(identity.currentProjectId, manifestId);
+  assert.equal(identity.currentProjectTitle, '专注时钟');
   assert.equal(identity.currentProjectBounds, '[70,241][1231,511]');
 });
 
-test('exact-app identity does not confuse a catalog card with the current shell title', () => {
+test('exact-app identity does not confuse a catalog card with the active mini app', () => {
   const manifestId = 'remote-ui-wanted';
   const layout = { children: [{ attributes: { bundleName: 'com.example.myapplication1.ide', type: 'root' }, children: [
-    { attributes: { type: 'Text', text: 'remote-ui-other', visible: 'true' } },
+    { attributes: { id: harmonyGoActiveMiniAppNodeId('remote-ui-other'), type: 'Text', text: '同名应用', visible: 'true' } },
     { attributes: { type: 'Button', text: '项目', visible: 'true' } },
-    { attributes: { type: 'Text', text: manifestId, visible: 'true' } },
+    { attributes: { id: harmonyGoCatalogMiniAppNodeId(manifestId), type: 'Row', visible: 'true' }, children: [
+      { attributes: { type: 'Text', text: '同名应用', visible: 'true' } },
+      { attributes: { type: 'Button', text: '安装', visible: 'true' } },
+    ] },
     { attributes: { id: 'timer-ring', type: 'Custom', visible: 'true' } },
   ] }] };
   const identity = inspectCurrentMiniApp(layout, manifestId, ['timer-ring']);
   assert.equal(identity.ok, false);
-  assert.match(identity.errors.join('; '), /current-project title/);
+  assert.match(identity.errors.join('; '), /active mini-app id/);
+});
+
+test('manifest ids disambiguate catalog cards and the active app when display names match', () => {
+  const firstId = 'remote-ui-first';
+  const secondId = 'remote-ui-second';
+  const card = (manifestId, bounds) => ({
+    attributes: { id: harmonyGoCatalogMiniAppNodeId(manifestId), type: 'Row', bounds, visible: 'true' },
+    children: [
+      { attributes: { type: 'Text', text: '同名应用', visible: 'true' } },
+      { attributes: { type: 'Button', text: '安装', visible: 'true' } },
+    ],
+  });
+  const firstCard = card(firstId, '[20,200][600,320]');
+  const secondCard = card(secondId, '[20,340][600,460]');
+  const catalog = { children: [firstCard, secondCard] };
+
+  assert.strictEqual(catalogProjectCard(catalog, firstId), firstCard);
+  assert.strictEqual(catalogProjectCard(catalog, secondId), secondCard);
+  assert.equal(catalogHasProject(catalog, firstId), true);
+  assert.deepEqual(catalogVisibleProjectIds(catalog), [firstId, secondId]);
+  assert.match(catalogFingerprint(catalog), new RegExp(harmonyGoCatalogMiniAppNodeId(secondId)));
+
+  const running = { children: [{ attributes: { bundleName: 'com.example.myapplication1.ide', type: 'root' }, children: [
+    { attributes: { id: harmonyGoActiveMiniAppNodeId(secondId), type: 'Text', text: '同名应用', visible: 'true' } },
+    { attributes: { id: 'product-summary', type: 'Custom', visible: 'true' } },
+  ] }] };
+  assert.equal(inspectCurrentMiniApp(running, firstId, ['product-summary']).ok, false);
+  assert.equal(inspectCurrentMiniApp(running, secondId, ['product-summary']).ok, true);
 });
 
 test('HDC textual start failures are rejected even when the process exits zero', () => {
@@ -945,13 +987,18 @@ test('runner scrolls a long Harmony Go catalog before declaring the app missing'
 
 test('runner waits for the exact catalog card to install and the exact product to render', () => {
   const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
-  assert.match(runner, /function catalogProjectCard\(/);
-  assert.match(runner, /ids\.size === 1 && ids\.has\(identity\)/);
+  const identity = readFileSync(join(root, 'scripts/layout-identity.mjs'), 'utf8');
+  assert.match(runner, /catalogProjectCard\(layout, identity\)/);
+  assert.match(identity, /attributes\.id === identity/);
+  assert.match(identity, /HARMONY_GO_CATALOG_MINI_APP_ID_PREFIX/);
+  assert.doesNotMatch(runner, /\^remote-ui-\[a-f0-9\]/);
   assert.match(runner, /function waitForInstalledMiniApp\(/);
   assert.match(runner, /timed out waiting for mini app \$\{manifestId\} to install/);
   assert.match(runner, /\(candidate\) => inspectCurrentMiniApp\(candidate, manifestId, productMarkers\)\.ok/);
   assert.doesNotMatch(runner, /const identityButton = collect\(/);
   assert.ok(runner.indexOf("assertCurrentMiniApp(layout, manifestId, productMarkers, 'launch-product')") < runner.lastIndexOf("'screenCap'"));
+  assert.match(runner, /const artifactDigest = createHash\('sha256'\)/);
+  assert.match(runner, /manifestId, artifactDigest, currentProjectId: identity\.currentProjectId, currentProjectTitle: identity\.currentProjectTitle/);
 });
 
 test('desktop preview installs the same generated HAP used by phone preview', () => {
@@ -1709,7 +1756,7 @@ function writeEvidence(project, category = 'form-submit') {
   const smoke = join(project, '.expo-fast/smoke');
   mkdirSync(smoke, { recursive: true });
   writeFileSync(join(project, '.expo-fast/manifest.json'), JSON.stringify({ id: 'test-ledger' }));
-  const root = (text) => ({ children: [{ attributes: { bundleName: 'com.example.myapplication1.ide', type: 'root' }, children: [{ attributes: { type: 'Text', text: 'test-ledger', bounds: '[38,130][260,179]', visible: 'true' } }, { attributes: { id: 'home-month-expense', type: 'Custom', bounds: '[40,400][900,500]', visible: 'true' }, children: [{ attributes: { text } }] }] }] });
+  const root = (text) => ({ children: [{ attributes: { bundleName: 'com.example.myapplication1.ide', type: 'root' }, children: [{ attributes: { id: harmonyGoActiveMiniAppNodeId('test-ledger'), type: 'Text', text: '家庭账本', bounds: '[38,130][260,179]', visible: 'true' } }, { attributes: { id: 'home-month-expense', type: 'Custom', bounds: '[40,400][900,500]', visible: 'true' }, children: [{ attributes: { text } }] }] }] });
   writeFileSync(join(smoke, 'layout-before.json'), JSON.stringify(root('本月支出 100 元')));
   writeFileSync(join(smoke, 'layout-after.json'), JSON.stringify(root('本月支出 188.8 元')));
   writeFileSync(join(smoke, 'layout-restarted.json'), JSON.stringify(root('本月支出 188.8 元')));
@@ -1734,22 +1781,22 @@ test('exact-app identity rejects a listed app when another app is current', () =
   writeEvidence(project);
   const smoke = join(project, '.expo-fast/smoke');
   const wrong = { children: [{ attributes: { bundleName: 'com.example.myapplication1.ide', type: 'root' }, children: [
-    { attributes: { type: 'Text', text: 'other-current-app', bounds: '[38,130][300,179]', visible: 'true' } },
-    { attributes: { type: 'Button', text: 'test-ledger', bounds: '[900,220][1200,292]', visible: 'true', backgroundColor: '#FFEAECF0' } },
+    { attributes: { id: harmonyGoActiveMiniAppNodeId('other-current-app'), type: 'Text', text: '家庭账本', bounds: '[38,130][300,179]', visible: 'true' } },
+    { attributes: { id: harmonyGoCatalogMiniAppNodeId('test-ledger'), type: 'Button', text: '家庭账本', bounds: '[900,220][1200,292]', visible: 'true', backgroundColor: '#FFEAECF0' } },
     { attributes: { id: 'home-month-expense', type: 'Custom', bounds: '[40,400][900,500]', visible: 'true' }, children: [{ attributes: { text: '本月支出 100 元' } }] },
   ] }] };
   writeFileSync(join(smoke, 'layout-before.json'), JSON.stringify(wrong));
-  assert.throws(() => validateSmoke(project), /current-project title is not exactly test-ledger/);
+  assert.throws(() => validateSmoke(project), /active mini-app id is not exactly test-ledger/);
 });
 
-test('exact-app identity locates the Host title relative to navigation on high-density layouts', async () => {
+test('exact-app identity locates the Host identity on high-density layouts', async () => {
   const { inspectCurrentMiniApp } = await import('../scripts/layout-identity.mjs');
   const layout = { children: [{ attributes: { bundleName: 'com.example.myapplication1.ide' }, children: [
     { attributes: { type: 'Text', text: 'EXPO HARMONY GO', bounds: '[67,175][550,222]', visible: 'true' } },
-    { attributes: { type: 'Text', text: 'test-ledger', bounds: '[67,232][1184,493]', visible: 'true' } },
+    { attributes: { id: harmonyGoActiveMiniAppNodeId('test-ledger'), type: 'Text', text: '家庭账本', bounds: '[67,232][1184,493]', visible: 'true' } },
     { attributes: { type: 'Button', text: '项目', bounds: '[67,566][263,694]', visible: 'true' } },
     { attributes: { type: 'Custom', id: 'ledger-summary', bounds: '[40,900][900,1000]', visible: 'true' } },
-    { attributes: { type: 'Text', text: 'test-ledger', bounds: '[316,1991][951,2180]', visible: 'true' } },
+    { attributes: { type: 'Text', text: '家庭账本', bounds: '[316,1991][951,2180]', visible: 'true' } },
   ] }] };
   const identity = inspectCurrentMiniApp(layout, 'test-ledger', ['ledger-summary']);
   assert.equal(identity.ok, true);

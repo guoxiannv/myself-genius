@@ -2424,7 +2424,12 @@ INITIAL_PACKAGE_MONITORS_IN_FLIGHT: set[str] = set()
 
 
 def wait_for_initial_package(record: RunRecord) -> None:
-    """Wait for QA and preview to settle, then sign the first version once."""
+    """Wait for HAP and QA, then sign the first version once.
+
+    Device preview is deliberately not part of this gate. A disconnected or
+    failed emulator must not prevent a usable HAP from entering the install
+    flow.
+    """
     started_at = time.monotonic()
     while time.monotonic() - started_at < HPACK_WAIT_TIMEOUT_SEC:
         latest = load_run(record.run_id)
@@ -2433,14 +2438,7 @@ def wait_for_initial_package(record: RunRecord) -> None:
         workspace = Path(latest.workspace)
         hap_path = find_latest_hap(workspace, latest.created_at)
         qa_status = load_ui_qa_status(workspace, latest.session_name)
-        stored_sessions = getattr(latest, "preview_sessions", None) or {}
-        phone_status = str(preview_sessions_payload(latest)["phone"].get("status") or "idle")
-        preview_settled = phone_status in {"ready", "failed", "released"}
-        if not stored_sessions:
-            preview_settled = str(getattr(latest, "capture_status", "idle") or "idle") in {
-                "complete", "failed", "released"
-            }
-        if hap_path and qa_status in {"complete", "disabled"} and preview_settled:
+        if hap_path and qa_status in {"complete", "disabled"}:
             start_hpack_packaging(latest)
             return
         if qa_status in {"failed", "error", "cancelled", "canceled"}:
@@ -2854,6 +2852,8 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
         hpack_manifest and hpack_manifest.get("status") == "failed"
     ):
         distribution_status = "failed"
+    elif hap_path:
+        distribution_status = "ready_to_package"
     else:
         distribution_status = "waiting_hap"
 
@@ -3140,13 +3140,11 @@ def build_progress_payload(record: RunRecord) -> dict[str, Any]:
     qa_status = load_ui_qa_status(workspace, record.session_name)
     qa_gate_ready = package_qa_gate_ready(package_outdated, qa_status)
     follow_up_busy = str(follow_up.get("status") or "") in {"starting", "running", "interrupting"}
-    preview_ready = bool(media_path)
     latest_unsigned_ready = bool(hap_path and (not manifest_ready or newer_hap))
     package_can_start = bool(
         HPACK_ENABLED
         and latest_unsigned_ready
         and qa_gate_ready
-        and preview_ready
         and not follow_up_busy
         and not package_in_flight
         and not install_ready
@@ -3164,10 +3162,8 @@ def build_progress_payload(record: RunRecord) -> dict[str, Any]:
         distribution_status = "failed"
     elif package_outdated and not newer_hap:
         distribution_status = "waiting_update"
-    elif hap_path and qa_gate_ready and preview_ready:
-        distribution_status = "ready_to_package"
     elif hap_path and qa_gate_ready:
-        distribution_status = "waiting_preview"
+        distribution_status = "ready_to_package"
     else:
         distribution_status = "waiting_hap"
 

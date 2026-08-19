@@ -32,6 +32,7 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         self.original_expo_app_root = remote_ui_app.EXPO_FAST_APP_ROOT
         self.original_run_expo = remote_ui_app.run_expo_fast_in_background
         self.original_get_signing_pool = remote_ui_app.get_signing_pool
+        self.original_hpack_enabled = remote_ui_app.HPACK_ENABLED
         self.original_trace_cache = dict(remote_ui_app.EXPO_TRACE_CACHE)
 
         remote_ui_app.RUNS_DIR = root / "runs"
@@ -65,6 +66,7 @@ class ExpoFastRuntimeTests(unittest.TestCase):
 
         self.fake_signing_pool = FakePool()
         remote_ui_app.get_signing_pool = lambda: self.fake_signing_pool
+        remote_ui_app.HPACK_ENABLED = True
         remote_ui_app.EXPO_TRACE_CACHE.clear()
         self.started: list[str] = []
         self.resumed: list[str] = []
@@ -91,6 +93,7 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         remote_ui_app.EXPO_FAST_APP_ROOT = self.original_expo_app_root
         remote_ui_app.run_expo_fast_in_background = self.original_run_expo
         remote_ui_app.get_signing_pool = self.original_get_signing_pool
+        remote_ui_app.HPACK_ENABLED = self.original_hpack_enabled
         remote_ui_app.EXPO_TRACE_CACHE.clear()
         remote_ui_app.EXPO_TRACE_CACHE.update(self.original_trace_cache)
         self.temp_dir.cleanup()
@@ -304,7 +307,7 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["stage"], "done")
         self.assertEqual(payload["expo"]["package"]["status"], "ready")
         self.assertEqual(payload["expo"]["package"]["slot_id"], "slot-01")
-        self.assertEqual(payload["artifacts"]["distribution_status"], "waiting_hap")
+        self.assertEqual(payload["artifacts"]["distribution_status"], "ready_to_package")
         self.assertTrue(payload["artifacts"]["package_can_start"])
         self.assertTrue(payload["artifacts"]["hap_found"])
         self.assertEqual(payload["artifacts"]["hap_path"], str(hap_path.resolve()))
@@ -329,6 +332,41 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         assert saved is not None
         self.assertEqual(saved.expo_package_status, "ready")
         self.assertIn("unsigned HAP 已生成", saved.notes)
+
+    def test_hap_keeps_package_flow_available_when_preview_media_is_missing(self) -> None:
+        workspace = remote_ui_app.EXPO_FAST_APP_ROOT / "hap-without-preview"
+        state_dir = workspace / ".expo-fast"
+        state_dir.mkdir(parents=True)
+        (state_dir / "state.json").write_text(
+            json.dumps({"state": "completed", "status": "completed", "detail": "preview_failed"}),
+            encoding="utf-8",
+        )
+        hap_root = state_dir / "hap"
+        hap_root.mkdir()
+        hap_path = hap_root / "app.hap"
+        hap_path.write_bytes(b"unsigned-hap")
+        (hap_root / "build-result.json").write_text(
+            json.dumps({"status": "success", "hapPath": str(hap_path), "bundleName": "com.example.app"}),
+            encoding="utf-8",
+        )
+        record = remote_ui_app.RunRecord(
+            run_id="e6f6a000000000000000000000000007",
+            session_name="expo-fast-no-preview",
+            prompt="HAP without preview",
+            workspace=str(workspace),
+            variant="expo-fast",
+            created_at=remote_ui_app.to_iso(),
+            updated_at=remote_ui_app.to_iso(),
+            runtime="expo",
+            status="completed",
+        )
+        remote_ui_app.save_run(record)
+        with patch.object(remote_ui_app, "start_hpack_packaging"):
+            payload = remote_ui_app.build_progress_payload(record)
+
+        self.assertTrue(payload["artifacts"]["hap_found"])
+        self.assertTrue(payload["artifacts"]["package_can_start"])
+        self.assertEqual(payload["artifacts"]["distribution_status"], "ready_to_package")
 
     def test_expo_hap_download_rejects_artifacts_outside_the_run_output(self) -> None:
         workspace = remote_ui_app.EXPO_FAST_APP_ROOT / "escaped-hap-app"

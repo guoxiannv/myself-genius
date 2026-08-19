@@ -53,6 +53,8 @@ export function ExpoInstallMenu({
       .finally(() => setPhoneRequestPending(false))
   }
 
+  const installAvailable = Boolean(artifacts.hap_found)
+
   return (
     <>
       <div ref={menuRef} className="relative">
@@ -75,13 +77,13 @@ export function ExpoInstallMenu({
           >
             <InstallOption
               label="安装到手机"
-              description="后台生成，点击后展示二维码"
+              description={installAvailable ? "使用当前 HAP 生成手机安装包" : "后台生成，点击后展示二维码"}
               icon={<PhoneIcon />}
               onClick={() => openDialog("phone")}
             />
             <InstallOption
               label="安装到 PC"
-              description="获取 ExpoGo 与预览地址"
+              description={installAvailable ? "使用当前 HAP 安装到 PC 模拟器" : "获取 ExpoGo 与预览地址"}
               icon={<DesktopIcon />}
               onClick={() => openDialog("desktop")}
             />

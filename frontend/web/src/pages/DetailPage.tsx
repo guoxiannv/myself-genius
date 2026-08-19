@@ -84,7 +84,7 @@ export function DetailPage() {
         right={
           <div className="flex items-center gap-1.5 sm:gap-2">
             {!isExpo && <PackageButton compact runId={runId} artifacts={data?.artifacts} />}
-            {isExpo && mainBuildComplete && data && (
+            {isExpo && data && (mainBuildComplete || Boolean(data.artifacts.hap_found)) && (
               <ExpoInstallMenu runId={data.run.run_id} artifacts={data.artifacts} serve={data.expo?.serve} />
             )}
             <AuthControl compact />

@@ -298,6 +298,7 @@ export interface ExpoClaudeTraceGroup {
   id: string
   label: string
   kind: "generation" | "repair" | "runtime_repair" | "smoke" | string
+  revision?: number
   attempt?: number
   trace_file: string
   status: "waiting" | "running" | "completed" | "failed" | string

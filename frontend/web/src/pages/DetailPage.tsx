@@ -5,7 +5,6 @@ import { Card } from "@/components/ui/Card"
 import { DevicePreview } from "@/components/detail/DevicePreview"
 import { InstallDock } from "@/components/detail/InstallDock"
 import { BuildProgress } from "@/components/detail/BuildProgress"
-import { ExpoRunPanel } from "@/components/detail/ExpoRunPanel"
 import { ExpoInstallMenu } from "@/components/detail/ExpoInstallMenu"
 import { QuestionPanel } from "@/components/detail/QuestionPanel"
 import { FollowUpPanel } from "@/components/detail/FollowUpPanel"
@@ -140,7 +139,6 @@ export function DetailPage() {
               <BuildProgress data={data} finished={finished} />
             </Card>
 
-            {isExpo && data ? <ExpoRunPanel data={data} /> : null}
             {!isExpo || data ? (
               <FollowUpPanel
                 runId={runId}
@@ -151,6 +149,8 @@ export function DetailPage() {
                 buildRunning={Boolean(running)}
                 followUp={data?.follow_up}
                 trace={data?.follow_up_trace}
+                expo={isExpo ? data?.expo : undefined}
+                expoHapReady={Boolean(data?.artifacts.hap_download_path)}
                 mock={isFollowUpDemo || isFollowUpHapDemo}
               />
             ) : null}

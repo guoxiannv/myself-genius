@@ -1871,7 +1871,7 @@ def summarize_expo_claude_row(
         model = str(row.get("model") or "").strip()
         append(
             "session",
-            f"Claude 会话已启动{f' · {model}' if model else ''}",
+            f"Genius 会话已启动{f' · {model}' if model else ''}",
             model=model,
         )
         return events
@@ -1917,7 +1917,7 @@ def summarize_expo_claude_row(
         }
         append(
             "result",
-            f"Claude 会话{'失败' if failed else '完成'} · {turns} 轮 · {duration_seconds} 秒",
+            f"Genius 会话{'失败' if failed else '完成'} · {turns} 轮 · {duration_seconds} 秒",
             status="failed" if failed else "completed",
         )
     return events

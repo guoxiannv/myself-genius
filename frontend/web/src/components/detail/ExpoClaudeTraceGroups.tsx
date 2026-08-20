@@ -78,7 +78,13 @@ function lastActionBlockIndex(blocks: TraceBlock[]): number {
   return -1
 }
 
-export function ExpoClaudeTraceGroups({ groups }: { groups: ExpoClaudeTraceGroup[] }) {
+export function ExpoClaudeTraceGroups({
+  groups,
+  compact = false,
+}: {
+  groups: ExpoClaudeTraceGroup[]
+  compact?: boolean
+}) {
   const [expandedActions, setExpandedActions] = useState<Set<string>>(() => new Set())
 
   const groupedBlocks = useMemo(
@@ -98,19 +104,21 @@ export function ExpoClaudeTraceGroups({ groups }: { groups: ExpoClaudeTraceGroup
   }
 
   return (
-    <section className="mx-2 mb-5">
-      <div className="mb-4 flex items-center gap-2">
-        <span className="flex h-6 w-6 items-center justify-center rounded-full bg-surface-raised text-accent-soft">
-          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" aria-hidden="true">
-            <path d="M12 3.5l1.55 4.28L18 9.33l-4.45 1.56L12 15.17l-1.55-4.28L6 9.33l4.45-1.55L12 3.5z" fill="currentColor" />
-            <path d="M18.2 14.5l.78 2.14 2.12.78-2.12.78-.78 2.13-.77-2.13-2.13-.78 2.13-.78.77-2.14z" fill="currentColor" opacity=".7" />
-          </svg>
-        </span>
-        <p className="text-xs text-muted">Claude 执行过程</p>
-        <span className="text-[10px] text-subtle">{groups.length} 个会话</span>
-      </div>
+    <section className={cn(compact ? "mx-3 my-1" : "mx-2 mb-5")}>
+      {!compact && (
+        <div className="mb-4 flex items-center gap-2">
+          <span className="flex h-6 w-6 items-center justify-center rounded-full bg-surface-raised text-accent-soft">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" aria-hidden="true">
+              <path d="M12 3.5l1.55 4.28L18 9.33l-4.45 1.56L12 15.17l-1.55-4.28L6 9.33l4.45-1.55L12 3.5z" fill="currentColor" />
+              <path d="M18.2 14.5l.78 2.14 2.12.78-2.12.78-.78 2.13-.77-2.13-2.13-.78 2.13-.78.77-2.14z" fill="currentColor" opacity=".7" />
+            </svg>
+          </span>
+          <p className="text-xs text-muted">Agent 执行过程</p>
+          <span className="text-[10px] text-subtle">{groups.length} 个会话</span>
+        </div>
+      )}
 
-      <div className="space-y-6">
+      <div className={cn(compact ? "space-y-4" : "space-y-6")}>
         {groupedBlocks.map(({ group, blocks }) => {
           const status = groupStatus(group)
           const running = normalize(group.status) === "running"
@@ -283,7 +291,7 @@ function ThinkingState() {
   return (
     <div className="flex items-center gap-2 py-1.5 text-[11px] text-subtle">
       <ActionStateIcon active failed={false} />
-      <span>Claude 正在思考</span>
+      <span>Genius 正在思考</span>
       <span className="flex items-center gap-0.5" aria-hidden="true">
         <span className="generation-dot h-1 w-1 rounded-full bg-subtle" />
         <span className="generation-dot h-1 w-1 rounded-full bg-subtle" />

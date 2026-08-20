@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from "react"
+import { ExpoClaudeTraceGroups } from "@/components/detail/ExpoClaudeTraceGroups"
 import { api } from "@/lib/api"
-import { cn } from "@/lib/format"
+import { cn, formatDateTime } from "@/lib/format"
 import type {
+  ExpoClaudeTraceGroup,
   FollowUpCommand,
   FollowUpState,
   FollowUpTraceEvent,
+  RunProgress,
   TimelineEvent,
 } from "@/lib/types"
 
@@ -17,6 +20,8 @@ interface FollowUpPanelProps {
   buildRunning: boolean
   followUp: FollowUpState | undefined
   trace?: FollowUpTraceEvent[]
+  expo?: RunProgress["expo"]
+  expoHapReady?: boolean
   className?: string
   /** 演示模式：不实际请求后端 Agent。 */
   mock?: boolean
@@ -24,6 +29,7 @@ interface FollowUpPanelProps {
 
 interface ConversationRecord {
   id: string
+  sequence?: number
   prompt: string
   outcome: "completed" | "interrupted" | "failed"
   createdAt?: string
@@ -33,6 +39,67 @@ interface ConversationRecord {
 function conversationOutcome(status: string): ConversationRecord["outcome"] | null {
   if (status === "completed" || status === "interrupted" || status === "failed") return status
   return null
+}
+
+function normalize(value: unknown): string {
+  return String(value || "").trim().toLowerCase()
+}
+
+function isFollowUpTraceGroup(group: ExpoClaudeTraceGroup): boolean {
+  return normalize(group.kind).startsWith("follow_up")
+}
+
+function traceGroupsForRevision(
+  groups: ExpoClaudeTraceGroup[],
+  revision?: number,
+): ExpoClaudeTraceGroup[] {
+  if (!revision) return []
+  return groups.filter((group) => {
+    if (!isFollowUpTraceGroup(group)) return false
+    if (group.revision) return group.revision === revision
+    return group.id === `follow-up-${revision}` || group.id.startsWith(`follow-up-${revision}-repair-`)
+  })
+}
+
+type SessionStatusTone = "accent" | "success" | "warning" | "danger" | "muted"
+
+interface SessionStatusView {
+  label: string
+  tone: SessionStatusTone
+  live: boolean
+}
+
+function sessionStatusView(
+  status: string,
+  expo: RunProgress["expo"],
+  expoHapReady: boolean,
+): SessionStatusView {
+  const activeLabels: Record<string, string> = {
+    running: "调整中",
+    interrupting: "停止中",
+    starting: "连接中",
+  }
+  if (activeLabels[status]) return { label: activeLabels[status], tone: "accent", live: true }
+
+  const stateName = normalize(expo?.state?.state)
+  const stateStatus = normalize(expo?.state?.status)
+  const packageStatus = normalize(expo?.package?.status)
+  if (stateName === "failed" || stateStatus === "failed") {
+    return { label: "生成失败", tone: "danger", live: false }
+  }
+  if (packageStatus === "failed") return { label: "HAP 构建失败", tone: "danger", live: false }
+  if (packageStatus === "building") return { label: "HAP 构建中", tone: "warning", live: true }
+
+  if (status === "building" || status === "preparing") {
+    return {
+      label: expo?.state?.detailLabel || (status === "building" ? "首版本构建中" : "等待首版本"),
+      tone: "accent",
+      live: status === "building",
+    }
+  }
+  if (status === "unavailable") return { label: "会话不可用", tone: "muted", live: false }
+  if (expoHapReady || packageStatus === "ready") return { label: "可继续调整", tone: "success", live: false }
+  return { label: status === "idle" ? "可继续调整" : status, tone: "muted", live: false }
 }
 
 const mockFollowUp: FollowUpState = {
@@ -62,6 +129,8 @@ export function FollowUpPanel({
   buildRunning,
   followUp,
   trace = [],
+  expo,
+  expoHapReady = false,
   className,
   mock,
 }: FollowUpPanelProps) {
@@ -130,6 +199,7 @@ export function FollowUpPanel({
         if (!command.text) continue
         localById.set(command.id, {
           id: command.id,
+          sequence: command.sequence,
           prompt: command.text,
           outcome,
           createdAt: command.created_at,
@@ -184,6 +254,10 @@ export function FollowUpPanel({
   const canInterrupt = status === "running" && active?.type === "message"
   const showStopState = canInterrupt || status === "interrupting"
   const displayStatus = initialBuildReady ? status : buildRunning ? "building" : "preparing"
+  const expoTraceGroups = expo?.trace_groups || []
+  const initialTraceGroups = expoTraceGroups.filter((group) => !isFollowUpTraceGroup(group))
+  const followUpTraceGroups = expoTraceGroups.filter(isFollowUpTraceGroup)
+  const panelStatus = sessionStatusView(displayStatus, expo, expoHapReady)
   const latestEvent = events[events.length - 1]
   const latestTrace = trace[trace.length - 1]
   const conversationVersion = [
@@ -201,7 +275,12 @@ export function FollowUpPanel({
       if (prompt) {
         setHistory((items) => items.some((item) => item.id === previous.id) ? items : [
           ...items,
-          { id: previous.id, prompt, outcome: conversationOutcome(previous.status) || "completed" },
+          {
+            id: previous.id,
+            sequence: previous.sequence,
+            prompt,
+            outcome: conversationOutcome(previous.status) || "completed",
+          },
         ])
       }
     }
@@ -396,8 +475,13 @@ export function FollowUpPanel({
         </span>
         <div>
           <p className="text-sm font-semibold text-foreground">Agent 构建会话</p>
+          {(initialPromptAt || expo?.state?.startedAt) && (
+            <p className="mt-0.5 text-[10px] text-subtle">
+              始于 {formatDateTime(initialPromptAt || expo?.state?.startedAt)}
+            </p>
+          )}
         </div>
-        <StatusPill status={displayStatus} />
+        <StatusPill view={panelStatus} />
       </div>
 
       <div className="relative min-h-0 flex-1">
@@ -415,21 +499,34 @@ export function FollowUpPanel({
               />
             )}
 
-            {events.map((event, index) => (
-              <AgentEventBubble
-                key={`${event.kind}-${event.timestamp || "event"}-${index}`}
-                event={event}
-                running={buildRunning && index === events.length - 1}
-              />
-            ))}
+            {expo ? (
+              <>
+                <ExpoBuildSummary
+                  expo={expo}
+                  events={events}
+                  hapReady={expoHapReady}
+                  running={buildRunning}
+                />
+                <ExpoClaudeTraceGroups groups={initialTraceGroups} />
+              </>
+            ) : (
+              events.map((event, index) => (
+                <AgentEventBubble
+                  key={`${event.kind}-${event.timestamp || "event"}-${index}`}
+                  event={event}
+                  running={buildRunning && index === events.length - 1}
+                />
+              ))
+            )}
 
-            {buildRunning && !initialBuildReady && <GenerationPendingIndicator />}
+            {!expo && buildRunning && !initialBuildReady && <GenerationPendingIndicator />}
 
             {history.map((item) => (
               <ConversationHistory
                 key={item.id}
                 item={item}
                 trace={traceInWindow(trace, item.createdAt, item.completedAt)}
+                traceGroups={traceGroupsForRevision(followUpTraceGroups, item.sequence)}
               />
             ))}
 
@@ -441,8 +538,9 @@ export function FollowUpPanel({
                   active
                   stopping={status === "interrupting"}
                 />
-                <FollowUpTrace
+                <ConversationTrace
                   trace={traceInWindow(trace, active.created_at)}
+                  traceGroups={traceGroupsForRevision(followUpTraceGroups, active.sequence)}
                   running={status === "running"}
                   fallbackTimestamp={active.created_at}
                 />
@@ -755,21 +853,136 @@ function AgentNotice({
   )
 }
 
-function StatusPill({ status }: { status: string }) {
-  const labels: Record<string, string> = {
-    building: "首版本构建中",
-    preparing: "等待首版本",
-    starting: "连接中",
-    idle: "可继续",
-    running: "调整中",
-    interrupting: "停止中",
-    unavailable: "不可用",
+type BuildStageState = "done" | "running" | "failed" | "waiting"
+
+function BuildStagePill({ label, state }: { label: string; state: BuildStageState }) {
+  const styles: Record<BuildStageState, string> = {
+    done: "border-success/25 bg-success/[0.07] text-success",
+    running: "border-accent/25 bg-accent/[0.07] text-accent-soft",
+    failed: "border-danger/25 bg-danger/[0.07] text-danger",
+    waiting: "border-border bg-surface-raised text-subtle",
   }
-  const ready = ["building", "idle", "running"].includes(status)
+  const glyph = state === "done" ? "✓" : state === "failed" ? "!" : state === "running" ? "•" : "·"
   return (
-    <span className={cn("ml-auto inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium", ready ? "border-accent/30 bg-accent/10 text-accent-soft" : "border-border bg-surface-raised text-subtle")}>
-      {ready && <span className="live-dot h-1.5 w-1.5 rounded-full bg-accent" />}
-      {labels[status] || status}
+    <span className={cn(
+      "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium",
+      styles[state],
+    )}>
+      <span className={cn("text-[10px]", state === "running" && "live-dot")}>{glyph}</span>
+      {label}
+    </span>
+  )
+}
+
+function ExpoBuildSummary({
+  expo,
+  events,
+  hapReady,
+  running,
+}: {
+  expo: NonNullable<RunProgress["expo"]>
+  events: TimelineEvent[]
+  hapReady: boolean
+  running: boolean
+}) {
+  const stateName = normalize(expo.state?.state)
+  const stateStatus = normalize(expo.state?.status)
+  const packageStatus = normalize(expo.package?.status)
+  const generationFailed = stateName === "failed" || stateStatus === "failed"
+  const generationDone = stateName === "completed"
+  const packageFailed = packageStatus === "failed"
+  const packageDone = packageStatus === "ready" && hapReady
+  const packageRunning = packageStatus === "building"
+  const failed = generationFailed || packageFailed
+  const [expanded, setExpanded] = useState(failed || running)
+  const uniqueEvents = events
+    .filter((event) => normalize(event.kind) !== "run")
+    .filter((event, index, items) => items.findIndex((item) => item.summary === event.summary) === index)
+    .slice(-8)
+  const summary = failed
+    ? packageFailed ? "bundle 已生成，HAP 构建失败" : "首版本生成失败"
+    : packageDone
+      ? "bundle 与 HAP 已就绪"
+      : expo.package?.label || expo.state?.detailLabel || expo.state?.label || "正在准备"
+  const duration = Number(expo.package?.duration_ms || 0)
+
+  useEffect(() => {
+    if (failed) setExpanded(true)
+  }, [failed])
+
+  return (
+    <details
+      open={expanded}
+      onToggle={(event) => setExpanded(event.currentTarget.open)}
+      className={cn(
+        "group mx-3 overflow-hidden rounded-xl border bg-surface/35",
+        failed ? "border-danger/30" : "border-border/80",
+      )}
+    >
+      <summary className="flex cursor-pointer list-none items-center gap-3 px-3.5 py-3 [&::-webkit-details-marker]:hidden">
+        <span className={cn(
+          "flex h-7 w-7 shrink-0 items-center justify-center rounded-full",
+          failed ? "bg-danger/10 text-danger" : packageDone ? "bg-success/10 text-success" : "bg-accent/10 text-accent-soft",
+        )}>
+          {failed ? "!" : packageDone ? "✓" : <span className="live-dot">•</span>}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-xs font-semibold text-foreground">首轮构建</span>
+          <span className={cn("mt-0.5 block truncate text-[11px]", failed ? "text-danger" : "text-muted")}>{summary}</span>
+        </span>
+        {duration > 0 && <span className="shrink-0 text-[10px] tabular-nums text-subtle">{Math.round(duration / 1000)} 秒</span>}
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true" className="shrink-0 text-subtle transition-transform group-open:rotate-180">
+          <path d="M7 10l5 5 5-5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </summary>
+
+      <div className="border-t border-border/70 px-3.5 pb-3.5 pt-3">
+        <div className="flex flex-wrap gap-2">
+          <BuildStagePill label="代码生成" state={generationFailed ? "failed" : generationDone ? "done" : "running"} />
+          <BuildStagePill label="验证导出" state={generationFailed ? "failed" : generationDone ? "done" : running ? "running" : "waiting"} />
+          <BuildStagePill
+            label="HAP"
+            state={packageFailed ? "failed" : packageDone ? "done" : packageRunning ? "running" : "waiting"}
+          />
+        </div>
+
+        {uniqueEvents.length > 0 && (
+          <ol className="mt-3 space-y-2 border-l border-border/80 pl-3">
+            {uniqueEvents.map((event, index) => (
+              <li key={`${event.timestamp}-${event.kind}-${index}`} className="flex items-start gap-2 text-[11px] leading-5">
+                <span className="min-w-0 flex-1 text-muted">{event.summary}</span>
+                <MessageTime timestamp={event.timestamp} />
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+    </details>
+  )
+}
+
+function StatusPill({ view }: { view: SessionStatusView }) {
+  const toneClass: Record<SessionStatusTone, string> = {
+    accent: "border-accent/30 bg-accent/10 text-accent-soft",
+    success: "border-success/30 bg-success/10 text-success",
+    warning: "border-warning/30 bg-warning/10 text-warning",
+    danger: "border-danger/30 bg-danger/10 text-danger",
+    muted: "border-border bg-surface-raised text-subtle",
+  }
+  const dotClass: Record<SessionStatusTone, string> = {
+    accent: "bg-accent",
+    success: "bg-success",
+    warning: "bg-warning",
+    danger: "bg-danger",
+    muted: "bg-border-strong",
+  }
+  return (
+    <span className={cn(
+      "ml-auto inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium",
+      toneClass[view.tone],
+    )}>
+      <span className={cn("h-1.5 w-1.5 rounded-full", dotClass[view.tone], view.live && "live-dot")} />
+      {view.label}
     </span>
   )
 }
@@ -857,9 +1070,11 @@ function CommandCard({
 function ConversationHistory({
   item,
   trace,
+  traceGroups,
 }: {
   item: ConversationRecord
   trace: FollowUpTraceEvent[]
+  traceGroups: ExpoClaudeTraceGroup[]
 }) {
   const interrupted = item.outcome === "interrupted"
   const failed = item.outcome === "failed"
@@ -871,7 +1086,7 @@ function ConversationHistory({
   return (
     <div className="space-y-2.5">
       <UserBubble text={item.prompt} label="调整请求" timestamp={item.createdAt} />
-      <FollowUpTrace trace={trace} running={false} />
+      <ConversationTrace trace={trace} traceGroups={traceGroups} running={false} />
       <AgentNotice
         tone={failed ? "danger" : interrupted ? "warning" : "success"}
         timestamp={item.completedAt}
@@ -880,6 +1095,23 @@ function ConversationHistory({
       </AgentNotice>
     </div>
   )
+}
+
+function ConversationTrace({
+  trace,
+  traceGroups,
+  running,
+  fallbackTimestamp,
+}: {
+  trace: FollowUpTraceEvent[]
+  traceGroups: ExpoClaudeTraceGroup[]
+  running: boolean
+  fallbackTimestamp?: string
+}) {
+  if (traceGroups.length > 0) {
+    return <ExpoClaudeTraceGroups groups={traceGroups} compact />
+  }
+  return <FollowUpTrace trace={trace} running={running} fallbackTimestamp={fallbackTimestamp} />
 }
 
 function FollowUpTrace({

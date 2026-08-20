@@ -637,7 +637,7 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         completed = remote_ui_app.load_expo_claude_trace_groups(workspace, state)[0]
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(completed["event_count"], 4)
-        self.assertEqual(completed["events"][-1]["summary"], "Claude 会话完成 · 4 轮 · 12 秒")
+        self.assertEqual(completed["events"][-1]["summary"], "Genius 会话完成 · 4 轮 · 12 秒")
 
         repair_path = trace_dir / "agent-repair-trace.jsonl"
         repair_rows = [

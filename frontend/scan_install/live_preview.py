@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -40,6 +41,18 @@ PREVIEW_MAX_WIDTH = 660
 PREVIEW_JPEG_QUALITY = 75
 DESKTOP_PREVIEW_MAX_WIDTH = 3120
 DESKTOP_PREVIEW_JPEG_QUALITY = 90
+
+
+def parse_open_bundle_names(ability_dump: str) -> list[str]:
+    """Return app bundles represented by the current mission list."""
+    marker = "current mission lists:"
+    start = ability_dump.find(marker)
+    if start < 0:
+        return []
+    end = ability_dump.find("\n  ExtensionRecords:", start)
+    mission_dump = ability_dump[start:end if end >= 0 else len(ability_dump)]
+    bundles = re.findall(r"^\s*bundle name \[([^\]]+)]\s*$", mission_dump, re.MULTILINE)
+    return list(dict.fromkeys(bundle.strip() for bundle in bundles if bundle.strip()))
 
 
 class LivePreviewError(RuntimeError):
@@ -294,7 +307,7 @@ class LocalLivePreview:
         with session.lock:
             target = self._resolve_target(session)
         with self._target_access(target, input_priority=True), session.lock:
-            self._run(target, "shell", "aa", "force-stop", bundle_name, check=False)
+            self._close_open_apps(target, bundle_name)
             self._run(target, "shell", "bm", "uninstall", "-n", bundle_name, check=False)
             self._run(target, "install", "-r", str(hap_path))
             self._wake_and_unlock(target, session)
@@ -325,6 +338,15 @@ class LocalLivePreview:
                 )
             time.sleep(1.0)
             return self._capture_frame_locked(run_id, target, session)
+
+    def _close_open_apps(self, target: str, incoming_bundle_name: str) -> None:
+        """Close every app mission left by a previous preview user."""
+        ability_dump = self._run_output(target, "shell", "aa", "dump", "-a", check=False)
+        open_bundles = parse_open_bundle_names(ability_dump)
+        if incoming_bundle_name not in open_bundles:
+            open_bundles.append(incoming_bundle_name)
+        for bundle_name in open_bundles:
+            self._run(target, "shell", "aa", "force-stop", bundle_name, check=False)
 
     def _wake_and_unlock(self, target: str, session: _Session) -> None:
         self._run(target, "shell", "power-shell", "wakeup", check=False)
@@ -709,6 +731,14 @@ class LocalLivePreview:
         return self.hdc_bin
 
     def _run(self, target: str, *args: str, check: bool = True) -> float:
+        elapsed_ms, _ = self._execute(target, *args, check=check)
+        return elapsed_ms
+
+    def _run_output(self, target: str, *args: str, check: bool = True) -> str:
+        _, output = self._execute(target, *args, check=check)
+        return output
+
+    def _execute(self, target: str, *args: str, check: bool = True) -> tuple[float, str]:
         command = [self._resolve_hdc_bin(), "-t", target, *args]
         started_at = time.monotonic()
         try:
@@ -718,4 +748,4 @@ class LocalLivePreview:
         output = "\n".join(item.strip() for item in (result.stdout, result.stderr) if item and item.strip())
         if check and (result.returncode != 0 or "[Fail]" in output or "error:" in output.lower()):
             raise LivePreviewError(f"模拟器操作失败：{output or '未知 HDC 错误'}")
-        return (time.monotonic() - started_at) * 1000
+        return (time.monotonic() - started_at) * 1000, output

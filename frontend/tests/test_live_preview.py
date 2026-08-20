@@ -14,6 +14,7 @@ from scan_install.live_preview import (
     LivePreviewError,
     LocalLivePreview,
     normalized_to_pixel,
+    parse_open_bundle_names,
     parse_live_input,
     read_jpeg_size,
     swipe_velocity,
@@ -49,6 +50,24 @@ def make_jpeg(width: int, height: int) -> bytes:
 
 
 class LiveInputTests(unittest.TestCase):
+    def test_open_bundle_names_only_come_from_current_missions(self) -> None:
+        ability_dump = """User ID #100
+  current mission lists:{
+    Mission ID #70
+        bundle name [com.example.old.one]
+    Mission ID #71
+        bundle name [com.example.old.two]
+        bundle name [com.example.old.one]
+ }
+  ExtensionRecords:
+      bundle name [com.ohos.system.service]
+"""
+
+        self.assertEqual(
+            parse_open_bundle_names(ability_dump),
+            ["com.example.old.one", "com.example.old.two"],
+        )
+
     def test_parse_tap_requires_normalized_coordinates(self) -> None:
         action = parse_live_input({"type": "tap", "point": {"x": 0.25, "y": 0.75}})
         self.assertEqual(action.kind, "tap")
@@ -72,10 +91,28 @@ class LiveInputTests(unittest.TestCase):
 class LocalLivePreviewTests(unittest.TestCase):
     def test_install_and_launch_prepares_device_and_returns_first_frame(self) -> None:
         fake_hdc = FakeHdc()
+        original_runner = fake_hdc
+
+        def runner(command, **kwargs):
+            result = original_runner(command, **kwargs)
+            if command[-4:] == ["shell", "aa", "dump", "-a"]:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout="""current mission lists:{
+    Mission ID #1
+        bundle name [com.example.previous]
+ }
+  ExtensionRecords:
+""",
+                    stderr="",
+                )
+            return result
+
         preview = LocalLivePreview(
             preferred_target="emulator-phone",
             hdc_bin="/fake/hdc",
-            command_runner=fake_hdc,
+            command_runner=runner,
         )
         with patch("scan_install.live_preview.time.sleep"):
             with patch.object(Path, "is_file", return_value=True):
@@ -87,6 +124,13 @@ class LocalLivePreviewTests(unittest.TestCase):
                 )
 
         commands = [command[3:] for command in fake_hdc.commands if command[1:3] == ["-t", "emulator-phone"]]
+        dump_index = commands.index(["shell", "aa", "dump", "-a"])
+        previous_stop_index = commands.index(["shell", "aa", "force-stop", "com.example.previous"])
+        incoming_stop_index = commands.index(["shell", "aa", "force-stop", "com.example.app"])
+        install_index = commands.index(["install", "-r", "/tmp/app.hap"])
+        self.assertLess(dump_index, previous_stop_index)
+        self.assertLess(previous_stop_index, install_index)
+        self.assertLess(incoming_stop_index, install_index)
         self.assertIn(["install", "-r", "/tmp/app.hap"], commands)
         self.assertIn(["shell", "aa", "start", "-b", "com.example.app", "-a", "MainAbility"], commands)
         self.assertTrue(any("power-shell" in command for command in commands))

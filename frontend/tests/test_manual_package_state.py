@@ -2,6 +2,7 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "app.py"
@@ -13,6 +14,72 @@ SPEC.loader.exec_module(remote_ui_app)
 
 
 class ManualPackageStateTests(unittest.TestCase):
+    def test_enqueue_then_remove_rolls_back_to_previous_revision(self) -> None:
+        previous_revision = "2026-08-20T02:39:34+00:00"
+        cancelled_revision = "2026-08-20T02:40:00+00:00"
+        manifest = {"status": "ready", "created_at": "2026-08-20T02:39:50+00:00"}
+
+        for cancelled_status in ("cancelled", "canceled"):
+            with self.subTest(status=cancelled_status):
+                record = remote_ui_app.RunRecord(
+                    run_id="r" * 32,
+                    session_name="preview-refresh",
+                    prompt="test",
+                    workspace="/tmp/project",
+                    variant="expo-fast",
+                    created_at="2026-08-20T02:00:00+00:00",
+                    updated_at="2026-08-20T02:00:00+00:00",
+                    runtime="expo",
+                    latest_adjustment_at=cancelled_revision,
+                    preview_source_adjustment_at=previous_revision,
+                    preview_refresh_status="failed",
+                    preview_refresh_target_at=cancelled_revision,
+                    preview_refresh_error="最近一次续跑已取消。",
+                )
+                follow_up = {
+                    "status": "idle",
+                    "queue_length": 0,
+                    "active_command": None,
+                    "queue": [],
+                    "history": [
+                        {
+                            "type": "message",
+                            "status": "completed",
+                            "created_at": previous_revision,
+                        },
+                        {
+                            "type": "message",
+                            "status": cancelled_status,
+                            "created_at": cancelled_revision,
+                        },
+                    ],
+                }
+                response = {
+                    "command": follow_up["history"][-1],
+                    "follow_up": follow_up,
+                }
+
+                with patch.object(remote_ui_app, "load_run", return_value=record):
+                    with patch.object(remote_ui_app, "save_run", side_effect=lambda current: current):
+                        updated = remote_ui_app.persist_latest_adjustment(
+                            record,
+                            response,
+                            replace_from_state=True,
+                        )
+
+                self.assertEqual(updated.latest_adjustment_at, previous_revision)
+                self.assertEqual(updated.preview_source_adjustment_at, previous_revision)
+                self.assertEqual(updated.preview_refresh_status, "ready")
+                self.assertEqual(updated.preview_refresh_target_at, previous_revision)
+                self.assertEqual(updated.preview_refresh_error, "")
+                self.assertFalse(
+                    remote_ui_app.follow_up_changed_after_manifest(
+                        follow_up,
+                        manifest,
+                        updated.latest_adjustment_at,
+                    )
+                )
+
     def test_completed_follow_up_with_legacy_acceptance_timestamp_is_refreshable(self) -> None:
         record = remote_ui_app.RunRecord(
             run_id="r" * 32,

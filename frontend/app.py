@@ -2351,6 +2351,17 @@ def newer_hap_available(run_id: str, workspace: Path, created_at: str | None = N
         return False
 
 
+def follow_up_message_advances_revision(command: Any) -> bool:
+    """Return whether a message may have changed source code for this run."""
+    if not isinstance(command, dict) or command.get("type") != "message":
+        return False
+    status = str(command.get("status") or "").strip().lower()
+    return (
+        status not in {"cancelled", "canceled"}
+        and not command.get("interrupted_before_assistant_activity")
+    )
+
+
 def follow_up_changed_after_manifest(
     follow_up: dict[str, Any],
     hpack_manifest: dict[str, Any] | None,
@@ -2367,11 +2378,7 @@ def follow_up_changed_after_manifest(
         return True
     commands: list[dict[str, Any]] = []
     active = follow_up.get("active_command")
-    if (
-        isinstance(active, dict)
-        and active.get("type") == "message"
-        and not active.get("interrupted_before_assistant_activity")
-    ):
+    if follow_up_message_advances_revision(active):
         commands.append(active)
     for key in ("queue", "history"):
         items = follow_up.get(key)
@@ -2379,11 +2386,7 @@ def follow_up_changed_after_manifest(
             commands.extend(
                 command
                 for command in items
-                if (
-                    isinstance(command, dict)
-                    and command.get("type") == "message"
-                    and not command.get("interrupted_before_assistant_activity")
-                )
+                if follow_up_message_advances_revision(command)
             )
     for command in commands:
         command_at = parse_iso(str(command.get("created_at") or ""))
@@ -2396,11 +2399,7 @@ def newest_follow_up_message_at(follow_up: dict[str, Any]) -> str:
     """Return the newest message timestamp from active, queue and history."""
     commands: list[dict[str, Any]] = []
     active = follow_up.get("active_command")
-    if (
-        isinstance(active, dict)
-        and active.get("type") == "message"
-        and not active.get("interrupted_before_assistant_activity")
-    ):
+    if follow_up_message_advances_revision(active):
         commands.append(active)
     for key in ("queue", "history"):
         items = follow_up.get(key)
@@ -2408,11 +2407,7 @@ def newest_follow_up_message_at(follow_up: dict[str, Any]) -> str:
             commands.extend(
                 command
                 for command in items
-                if (
-                    isinstance(command, dict)
-                    and command.get("type") == "message"
-                    and not command.get("interrupted_before_assistant_activity")
-                )
+                if follow_up_message_advances_revision(command)
             )
     newest_text = ""
     newest_at = None
@@ -2435,7 +2430,7 @@ def persist_latest_adjustment(
     command = response.get("command")
     candidate_text = (
         str(command.get("created_at") or "")
-        if isinstance(command, dict) and command.get("type") == "message"
+        if follow_up_message_advances_revision(command)
         else ""
     )
     follow_up = response.get("follow_up")
@@ -2534,7 +2529,7 @@ def follow_up_message_for_adjustment(
             commands.extend(value for value in values if isinstance(value, dict))
     message_commands: list[tuple[datetime, dict[str, Any]]] = []
     for command in commands:
-        if command.get("type") != "message" or command.get("interrupted_before_assistant_activity"):
+        if not follow_up_message_advances_revision(command):
             continue
         command_at = parse_iso(str(command.get("created_at") or ""))
         if not command_at:

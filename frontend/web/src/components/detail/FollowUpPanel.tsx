@@ -18,7 +18,7 @@ interface FollowUpPanelProps {
   followUp: FollowUpState | undefined
   trace?: FollowUpTraceEvent[]
   className?: string
-  /** 演示模式：不实际请求 ArkPilot。 */
+  /** 演示模式：不实际请求后端 Agent。 */
   mock?: boolean
 }
 
@@ -48,7 +48,7 @@ function requestId() {
 }
 
 /**
- * ArkPilot follow-up-control 的 UI。
+ * Runtime follow-up-control 的 UI。
  *
  * 队列、FIFO 调度、中断确认都由后端控制；本组件只提交命令并渲染
  * follow_up 状态镜像，绝不直接写状态文件或向 tmux 发送按键。

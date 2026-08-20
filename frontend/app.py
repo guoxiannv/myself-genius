@@ -731,7 +731,7 @@ class RunRecord:
     # 最近一次签名任务启动时对应的调整版本。签名期间若又提交调整，
     # 即使新 manifest 完成时间更晚，也不能把该包误判为包含了新调整。
     package_source_adjustment_at: str = ""
-    # 仅兼容旧 run JSON；新版续跑状态由 ArkPilot follow-up-control 管理。
+    # 仅兼容旧 run JSON；新版续跑状态由各 Runtime 的 follow-up-control 管理。
     pending_follow_up_at: str = ""
     notes: str = ""
     prompt_file: str = ""
@@ -1430,6 +1430,7 @@ def run_desktop_preview(record_id: str) -> None:
             record,
             "desktop",
             status="ready",
+            artifact_digest=digest,
             screenshot_path=str(screenshot_path),
             live_available=True,
             error="",
@@ -1506,6 +1507,15 @@ def start_desktop_preview(record: RunRecord, *, automatic: bool = False) -> tupl
     return record, True
 
 
+def maybe_refresh_desktop_preview(record: RunRecord, run_status: str) -> tuple[RunRecord, bool]:
+    if record.runtime != "expo" or run_status != "completed":
+        return record, False
+    current = preview_sessions_payload(record)["desktop"]
+    if not (current.get("requested") or current.get("screenshot_path")):
+        return record, False
+    return start_desktop_preview(record, automatic=True)
+
+
 def monitor_hap_for_phone_preview(record_id: str) -> None:
     try:
         started_at = time.monotonic()
@@ -1553,9 +1563,19 @@ def build_tmux_command(record: RunRecord) -> list[str]:
     return command
 
 
-def build_expo_fast_command(record: RunRecord, *, resume: bool = False) -> list[str]:
+def build_expo_fast_command(
+    record: RunRecord,
+    *,
+    action: str = "initial",
+    launch: bool | None = None,
+    hap: bool | None = None,
+) -> list[str]:
     if EXPO_FAST_LAUNCHER is None:
         return []
+    if action not in {"initial", "rebuild", "preview"}:
+        raise ValueError(f"unsupported Expo Fast action: {action}")
+    launch_enabled = True if launch is None else launch
+    hap_enabled = action != "preview" if hap is None else hap
     command = [
         str(EXPO_FAST_LAUNCHER),
         "--project",
@@ -1565,10 +1585,14 @@ def build_expo_fast_command(record: RunRecord, *, resume: bool = False) -> list[
         "--session",
         record.session_name,
         "--hap",
-        "true",
+        str(hap_enabled).lower(),
+        "--launch",
+        str(launch_enabled).lower(),
     ]
-    if resume:
-        command.append("--resume")
+    if action == "rebuild":
+        command.append("--rebuild")
+    elif action == "preview":
+        command.append("--preview-only")
     return command
 
 
@@ -1720,11 +1744,30 @@ def summarize_expo_fast_events(state: dict[str, Any] | None) -> list[dict[str, A
 
 def expo_trace_descriptor(path: Path) -> dict[str, Any] | None:
     name = path.name
+    revision = re.fullmatch(r"(\d+)-follow-up", path.parent.name)
+    revision_number = int(revision.group(1)) if revision else None
     if name == "agent-trace.jsonl":
+        if revision_number is not None:
+            return {
+                "id": f"follow-up-{revision_number}",
+                "label": f"续跑调整 #{revision_number}",
+                "kind": "follow_up",
+                "revision": revision_number,
+                "order": 1000 + revision_number * 100,
+            }
         return {"id": "generation", "label": "代码生成", "kind": "generation", "order": 0}
     repair = re.fullmatch(r"agent-repair-trace(?:-(\d+))?\.jsonl", name)
     if repair:
         attempt = int(repair.group(1) or "1")
+        if revision_number is not None:
+            return {
+                "id": f"follow-up-{revision_number}-repair-{attempt}",
+                "label": f"续跑调整 #{revision_number} · 自动修复 #{attempt}",
+                "kind": "follow_up_repair",
+                "revision": revision_number,
+                "attempt": attempt,
+                "order": 1000 + revision_number * 100 + attempt,
+            }
         return {
             "id": f"repair-{attempt}",
             "label": f"自动修复 #{attempt}",
@@ -1924,11 +1967,11 @@ def load_expo_claude_trace_groups(
     if not trace_root.is_dir():
         return []
     traces: list[tuple[dict[str, Any], Path]] = []
-    for path in trace_root.glob("*.jsonl"):
+    for path in trace_root.rglob("*.jsonl"):
         descriptor = expo_trace_descriptor(path)
         if descriptor:
             traces.append((descriptor, path))
-    traces.sort(key=lambda item: (int(item[0]["order"]), item[1].name))
+    traces.sort(key=lambda item: (int(item[0]["order"]), item[1].relative_to(trace_root).as_posix()))
     state_name = str((state or {}).get("state") or "").strip().lower()
     state_started_at = str((state or {}).get("startedAt") or "")
     groups: list[dict[str, Any]] = []
@@ -1953,7 +1996,7 @@ def load_expo_claude_trace_groups(
         groups.append(
             {
                 **{key: value for key, value in descriptor.items() if key != "order"},
-                "trace_file": path.name,
+                "trace_file": path.relative_to(trace_root).as_posix(),
                 "status": status,
                 "event_count": trace["event_count"],
                 "action_count": sum(event["kind"] == "action" for event in events),
@@ -2173,17 +2216,25 @@ class FollowUpControlError(RuntimeError):
         self.details = details or {}
 
 
-def follow_up_cli_path() -> Path:
-    """Resolve the deployment-controlled ArkPilot follow-up CLI next to tmux-runner."""
+def follow_up_cli_path(record: RunRecord) -> Path:
+    """Resolve the runtime-owned follow-up controller."""
+    if record.runtime == "expo":
+        if EXPO_FAST_ROOT is None:
+            return Path("/__expo_fast_not_configured__/follow-up-control.sh")
+        return EXPO_FAST_ROOT / "follow-up-control.sh"
     return TMUX_RUNNER_PATH.parent / "follow-up-control.cjs"
 
 
 def call_follow_up_control(record: RunRecord, action: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Invoke ArkPilot's stable follow-up CLI without putting user text in argv."""
-    cli_path = follow_up_cli_path()
+    """Invoke the runtime's stable follow-up CLI without putting user text in argv."""
+    cli_path = follow_up_cli_path(record)
     if not cli_path.is_file():
         raise FollowUpControlError("follow-up 控制器未部署", code="follow_up_unavailable")
-    command = ["node", str(cli_path), action, "--cwd", record.workspace, "--run", record.session_name]
+    command = [str(cli_path), action, "--cwd", record.workspace, "--run", record.session_name]
+    env = build_expo_fast_env(record) if record.runtime == "expo" else None
+    cwd = str(EXPO_FAST_ROOT) if record.runtime == "expo" and EXPO_FAST_ROOT else None
+    if record.runtime != "expo":
+        command.insert(0, "node")
     payload_text = ""
     if body is not None:
         command.append("--json-stdin")
@@ -2196,6 +2247,8 @@ def call_follow_up_control(record: RunRecord, action: str, body: dict[str, Any] 
             capture_output=True,
             check=False,
             timeout=15,
+            env=env,
+            cwd=cwd,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise FollowUpControlError("follow-up 控制器调用失败", code="control_unavailable") from exc
@@ -2228,8 +2281,12 @@ def unavailable_follow_up(message: str = "续跑会话尚未就绪") -> dict[str
 
 
 def load_follow_up_status(record: RunRecord, run_state: dict[str, Any] | None) -> dict[str, Any]:
-    """Read the ArkPilot status mirror through its CLI; never write state files directly."""
-    if not isinstance(run_state, dict) or not isinstance(run_state.get("follow_up"), dict):
+    """Read the runtime status mirror through its CLI; never write state files directly."""
+    if record.runtime == "expo":
+        result = read_json(Path(record.workspace) / ".expo-fast" / "result.json")
+        if not isinstance(result, dict) or not str(result.get("sessionId") or "").strip():
+            return unavailable_follow_up()
+    elif not isinstance(run_state, dict) or not isinstance(run_state.get("follow_up"), dict):
         return unavailable_follow_up()
     try:
         response = call_follow_up_control(record, "status")
@@ -2376,6 +2433,30 @@ def package_qa_gate_ready(package_outdated: bool, qa_status: str) -> bool:
 
 HPACK_PACKAGE_LOCK = threading.Lock()
 HPACK_PACKAGE_IN_FLIGHT: set[str] = set()
+EXPO_RUN_OPERATION_LOCKS_GUARD = threading.Lock()
+EXPO_RUN_OPERATION_LOCKS: dict[str, threading.RLock] = {}
+
+
+def expo_run_operation_lock(run_id: str) -> threading.RLock:
+    """Serialize per-run follow-up, rebuild, and packaging state transitions."""
+    with EXPO_RUN_OPERATION_LOCKS_GUARD:
+        return EXPO_RUN_OPERATION_LOCKS.setdefault(run_id, threading.RLock())
+
+
+def expo_runtime_operation_in_flight(record: RunRecord) -> bool:
+    return record.status == "running" or process_alive(record.process_pid)
+
+
+def expo_package_operation_ready(
+    record: RunRecord,
+    run_status: str,
+    follow_up: dict[str, Any],
+) -> bool:
+    return bool(
+        run_status == "completed"
+        and str(follow_up.get("status") or "").strip().lower() == "idle"
+        and not expo_runtime_operation_in_flight(record)
+    )
 
 
 def start_hpack_packaging(
@@ -2388,25 +2469,35 @@ def start_hpack_packaging(
         return False
     if not find_latest_hap(Path(record.workspace), record.created_at):
         return False
-    with HPACK_PACKAGE_LOCK:
+    with expo_run_operation_lock(record.run_id):
         latest = load_run(record.run_id) or record
-        if latest.run_id in HPACK_PACKAGE_IN_FLIGHT or process_alive(latest.distribution_process_pid):
-            return False
-        manifest_path = hpack_manifest_path(latest.run_id)
-        if manifest_path.is_file():
-            if not replace_manifest:
+        if latest.runtime == "expo":
+            state = load_expo_fast_state(Path(latest.workspace))
+            follow_up = load_follow_up_status(latest, state)
+            if not expo_package_operation_ready(
+                latest,
+                expo_fast_run_status(latest, state),
+                follow_up,
+            ):
                 return False
-            try:
-                manifest_path.unlink()
-            except OSError:
+        with HPACK_PACKAGE_LOCK:
+            if latest.run_id in HPACK_PACKAGE_IN_FLIGHT or process_alive(latest.distribution_process_pid):
                 return False
-        latest.distribution_status = "waiting_hap"
-        latest.distribution_process_pid = None
-        latest.distribution_command = []
-        latest.package_source_adjustment_at = latest.latest_adjustment_at
-        latest.notes = "正在编译、签名并生成安装二维码。"
-        record = save_run(latest)
-        HPACK_PACKAGE_IN_FLIGHT.add(record.run_id)
+            manifest_path = hpack_manifest_path(latest.run_id)
+            if manifest_path.is_file():
+                if not replace_manifest:
+                    return False
+                try:
+                    manifest_path.unlink()
+                except OSError:
+                    return False
+            latest.distribution_status = "waiting_hap"
+            latest.distribution_process_pid = None
+            latest.distribution_command = []
+            latest.package_source_adjustment_at = latest.latest_adjustment_at
+            latest.notes = "正在编译、签名并生成安装二维码。"
+            record = save_run(latest)
+            HPACK_PACKAGE_IN_FLIGHT.add(record.run_id)
 
     def run() -> None:
         try:
@@ -2808,6 +2899,7 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
     package_error = expo_hap_package_error(hap_result, package_status, bool(hap_path))
     if run_status == "completed":
         record = sync_expo_package_status(record, package_status, package_error)
+        record, _preview_started = maybe_refresh_desktop_preview(record, run_status)
 
     preview_payloads = build_expo_preview_payloads(record, workspace, run_status)
     phone_session = preview_sessions_payload(record)["phone"]
@@ -2832,26 +2924,52 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
     detail = str((expo_state or {}).get("detail") or "").strip().lower()
     detail_label = str((expo_state or {}).get("detailLabel") or "").strip()
     trace_groups = load_expo_claude_trace_groups(workspace, expo_state)
+    follow_up_private = load_follow_up_status(record, expo_state)
+    follow_up_trace = load_follow_up_trace(follow_up_private)
+    follow_up = redact_follow_up_transcript_path(follow_up_private)
     hpack_manifest = load_hpack_manifest(record.run_id)
     record = load_run(record.run_id) or record
     if run_status == "completed" and package_status == "ready" and hap_path and not hpack_manifest:
         start_hpack_packaging(record)
         record = load_run(record.run_id) or record
     manifest_ready = bool(hpack_manifest and hpack_manifest.get("status") == "ready")
+    newer_hap = newer_hap_available(record.run_id, workspace, record.created_at)
+    follow_up_changed = follow_up_changed_after_manifest(
+        follow_up_private,
+        hpack_manifest,
+        record.latest_adjustment_at,
+    )
+    package_outdated = bool(
+        manifest_ready
+        and (
+            follow_up_changed
+            or package_revision_outdated(
+                record.latest_adjustment_at,
+                record.package_source_adjustment_at,
+            )
+        )
+    )
     package_in_flight = bool(
         record.run_id in HPACK_PACKAGE_IN_FLIGHT or process_alive(record.distribution_process_pid)
     )
-    install_ready = manifest_ready and not package_in_flight
+    runtime_rebuild_in_flight = expo_runtime_operation_in_flight(record)
+    package_operation_ready = expo_package_operation_ready(record, run_status, follow_up_private)
+    install_ready = manifest_ready and not package_outdated and not package_in_flight
+    latest_unsigned_ready = bool(hap_path and (not manifest_ready or newer_hap))
     if not HPACK_ENABLED:
         distribution_status = "disabled"
     elif package_in_flight:
         distribution_status = "packaging"
+    elif runtime_rebuild_in_flight:
+        distribution_status = "building"
     elif install_ready:
         distribution_status = "ready"
     elif record.distribution_status == "failed" or (
         hpack_manifest and hpack_manifest.get("status") == "failed"
     ):
         distribution_status = "failed"
+    elif package_outdated and not newer_hap:
+        distribution_status = "waiting_update"
     elif hap_path:
         distribution_status = "ready_to_package"
     else:
@@ -2916,13 +3034,6 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
         "error": "Expo 生成失败，请查看左侧状态。",
     }.get(detail, detail_label or "Expo Runtime 正在启动…")
 
-    empty_follow_up = {
-        "status": "unavailable",
-        "queue_length": 0,
-        "queue": [],
-        "history": [],
-        "last_error": "Expo Runtime 暂不支持续跑调整。",
-    }
     return {
         "run": asdict(record),
         "runtime": "expo",
@@ -3001,9 +3112,16 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
             if hpack_manifest
             else package_error
             or (str((expo_state or {}).get("error") or "") if run_status == "failed" else ""),
-            "package_can_start": bool(HPACK_ENABLED and hap_path and not install_ready and not package_in_flight),
+            "package_can_start": bool(
+                HPACK_ENABLED
+                and (latest_unsigned_ready or package_outdated)
+                and package_operation_ready
+                and not package_in_flight
+                and not runtime_rebuild_in_flight
+                and not install_ready
+            ),
             "package_current": install_ready,
-            "package_outdated": False,
+            "package_outdated": package_outdated,
             "media_ready": bool(media_path),
             "media_path": f"/api/runs/{record.run_id}/media" if media_path else "",
             "media_source_path": str(media_path) if media_path else "",
@@ -3013,10 +3131,10 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
             "live_input_path": str(primary_preview.get("live_input_path") or ""),
             "live_webrtc_config_path": str(primary_preview.get("live_webrtc_config_path") or ""),
             "previews": preview_payloads,
-            "newer_hap_available": False,
+            "newer_hap_available": newer_hap,
         },
-        "follow_up": empty_follow_up,
-        "follow_up_trace": [],
+        "follow_up": follow_up,
+        "follow_up_trace": follow_up_trace,
         "ui": {
             "poll_interval_ms": 1000,
             "waiting_message": waiting_message,
@@ -3343,7 +3461,13 @@ def run_tmux_in_background(record: RunRecord) -> None:
     threading.Thread(target=monitor_tmux_process, args=(record, process, log_path), daemon=True).start()
 
 
-def monitor_expo_fast_run(record: RunRecord, launcher: subprocess.Popen[Any], log_path: Path) -> None:
+def monitor_expo_fast_run(
+    record: RunRecord,
+    launcher: subprocess.Popen[Any],
+    log_path: Path,
+    *,
+    package_after: bool = False,
+) -> None:
     exit_code = launcher.wait()
     latest = load_run(record.run_id) or record
     latest.process_pid = None
@@ -3372,8 +3496,11 @@ def monitor_expo_fast_run(record: RunRecord, launcher: subprocess.Popen[Any], lo
             latest = save_run(latest)
             latest = sync_expo_package_status(latest, package_status, package_error)
             ensure_expo_publication(latest, can_publish=True)
-            if hap_path:
-                start_hpack_packaging(latest)
+            if package_after and hap_path:
+                start_hpack_packaging(
+                    latest,
+                    replace_manifest=hpack_manifest_path(latest.run_id).is_file(),
+                )
             elif release_signing_slot_for_record(latest):
                 save_run(latest)
             return
@@ -3390,9 +3517,16 @@ def monitor_expo_fast_run(record: RunRecord, launcher: subprocess.Popen[Any], lo
         time.sleep(1)
 
 
-def run_expo_fast_in_background(record: RunRecord, *, resume: bool = False) -> None:
+def run_expo_fast_in_background(
+    record: RunRecord,
+    *,
+    action: str = "initial",
+    launch: bool | None = None,
+    hap: bool | None = None,
+) -> None:
     workspace = Path(record.workspace)
-    command = build_expo_fast_command(record, resume=resume)
+    command = build_expo_fast_command(record, action=action, launch=launch, hap=hap)
+    package_after = (action != "preview" if hap is None else hap)
     if EXPO_FAST_LAUNCHER is None or not EXPO_FAST_LAUNCHER.is_file():
         record.status = "failed"
         record.notes = f"Expo Fast 启动器不存在: {EXPO_FAST_LAUNCHER or '<未配置>'}"
@@ -3445,6 +3579,7 @@ def run_expo_fast_in_background(record: RunRecord, *, resume: bool = False) -> N
     threading.Thread(
         target=monitor_expo_fast_run,
         args=(record, process, log_path),
+        kwargs={"package_after": package_after},
         daemon=True,
     ).start()
 
@@ -3455,7 +3590,7 @@ EXPO_PREVIEW_RETRIES_IN_FLIGHT: set[str] = set()
 
 def run_expo_preview_retry(record: RunRecord) -> None:
     try:
-        run_expo_fast_in_background(record, resume=True)
+        run_expo_fast_in_background(record, action="preview", launch=True, hap=False)
     finally:
         with EXPO_PREVIEW_RETRY_LOCK:
             EXPO_PREVIEW_RETRIES_IN_FLIGHT.discard(record.run_id)
@@ -3626,7 +3761,9 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         if re.fullmatch(r"/api/runs/[a-f0-9]+/follow-up/interrupt", parsed.path):
             return self.handle_interrupt_follow_up(parsed.path.split("/")[3])
         if re.fullmatch(r"/api/runs/[a-f0-9]+/package", parsed.path):
-            return self.handle_package_run(parsed.path.split("/")[3])
+            run_id = parsed.path.split("/")[3]
+            with expo_run_operation_lock(run_id):
+                return self.handle_package_run(run_id)
         if re.fullmatch(r"/api/runs/[a-f0-9]+/expo-serve", parsed.path):
             return self.handle_publish_expo_run(parsed.path.split("/")[3])
         if re.fullmatch(r"/api/runs/[a-f0-9]+/preview/retry", parsed.path):
@@ -4504,6 +4641,8 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
                 status = str(artifacts.get("distribution_status") or "waiting_hap")
                 message = {
                     "packaging": "手机安装包正在签名，请勿重复提交。",
+                    "building": "正在为最新调整重建 unsigned HAP，请勿重复提交。",
+                    "waiting_update": "调整后的最新 unsigned HAP 尚未生成。",
                     "waiting_hap": "Expo unsigned HAP 尚未生成。",
                     "failed": str(artifacts.get("distribution_error") or "手机安装包生成失败。"),
                     "disabled": "当前环境未启用 HPack。",
@@ -4511,6 +4650,29 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
                 self.send_json(
                     {"ok": False, "error": message, "code": "package_not_ready"},
                     status=HTTPStatus.CONFLICT,
+                )
+                return
+            if artifacts.get("package_outdated") and not artifacts.get("newer_hap_available"):
+                latest = load_run(run_id) or record
+                if process_alive(latest.process_pid):
+                    self.send_json(
+                        {"ok": False, "error": "Expo 最新版本仍在构建，请稍后重试。", "code": "package_busy"},
+                        status=HTTPStatus.CONFLICT,
+                    )
+                    return
+                latest.status = "running"
+                latest.notes = "正在为续跑后的最新源码重建 unsigned HAP。"
+                latest.process_pid = None
+                latest = save_run(latest)
+                threading.Thread(
+                    target=run_expo_fast_in_background,
+                    args=(latest,),
+                    kwargs={"action": "rebuild", "launch": False, "hap": True},
+                    daemon=True,
+                ).start()
+                self.send_json(
+                    {"ok": True, "accepted": True, "status": "building_hap"},
+                    status=HTTPStatus.ACCEPTED,
                 )
                 return
             started = start_hpack_packaging(
@@ -4634,15 +4796,31 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         if not text.strip():
             self.send_json({"ok": False, "error": "text is required", "code": "empty_message"}, status=HTTPStatus.BAD_REQUEST)
             return
-        try:
-            response = call_follow_up_control(record, "enqueue", {
-                "text": text,
-                "clientMessageId": str(body.get("clientMessageId") or ""),
-            })
-            persist_latest_adjustment(record, response)
-            self.send_json(redact_follow_up_response(response))
-        except FollowUpControlError as exc:
-            self.send_follow_up_error(exc)
+        with expo_run_operation_lock(run_id):
+            latest = load_run(run_id) or record
+            if latest.runtime == "expo" and (
+                expo_runtime_operation_in_flight(latest)
+                or latest.run_id in HPACK_PACKAGE_IN_FLIGHT
+                or process_alive(latest.distribution_process_pid)
+            ):
+                self.send_json(
+                    {
+                        "ok": False,
+                        "error": "Expo 构建或安装包任务正在运行，请完成后再提交调整。",
+                        "code": "control_busy",
+                    },
+                    status=HTTPStatus.CONFLICT,
+                )
+                return
+            try:
+                response = call_follow_up_control(latest, "enqueue", {
+                    "text": text,
+                    "clientMessageId": str(body.get("clientMessageId") or ""),
+                })
+                persist_latest_adjustment(latest, response)
+                self.send_json(redact_follow_up_response(response))
+            except FollowUpControlError as exc:
+                self.send_follow_up_error(exc)
 
     def handle_interrupt_follow_up(self, run_id: str) -> None:
         record = self.load_accessible_run(run_id)

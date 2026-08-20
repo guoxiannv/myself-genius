@@ -11,15 +11,28 @@ import { assignHdcPreviewPorts, configuredHdcPreviewTargets, configuredHdcTarget
 import { auditImplementationTrace } from '../scripts/trace-scope.mjs';
 import { auditProductSource, verifyHarmonyGoArtifacts } from '../scripts/verify-product.mjs';
 import { writeRunState } from '../scripts/run-state.mjs';
-import { canRunRepair, repairArtifactName } from '../scripts/repair-policy.mjs';
+import { resolveExecution } from '../scripts/execution-policy.mjs';
+import { repairArtifactName } from '../scripts/repair-artifact.mjs';
 import { assertDependencyRuntime, pinRuntimeDependencies, stageHarmonyCli } from '../scripts/dependencies.mjs';
 import { HAP_DEVICE_TYPES, runHapPoolBuild } from '../scripts/hap-build.mjs';
 import { launchHapPreview } from '../scripts/run-livetest.mjs';
 import { acquirePreviewDevice, acquirePreviewDevices, configuredPreviewPools } from '../scripts/preview-device-pool.mjs';
+import { bundleNameFromModuleJson, DEFAULT_HARMONY_GO_BUNDLE_NAME, resolveHarmonyGoBundleName } from '../scripts/harmony-go-runtime.mjs';
 
 const root = resolve(new URL('..', import.meta.url).pathname);
 const script = join(root, 'scripts/fast-harmony.mjs');
 const dependencyController = join(root, 'scripts/dependencies.mjs');
+
+test('Harmony Go bundle identity prefers explicit configuration, then HAP metadata, then the SDK default', () => {
+  const moduleJson = JSON.stringify({ app: { bundleName: 'com.example.from.hap' } });
+  assert.equal(bundleNameFromModuleJson(moduleJson), 'com.example.from.hap');
+  assert.equal(resolveHarmonyGoBundleName({
+    env: { EXPO_HARMONY_GO_BUNDLE_NAME: 'com.example.explicit' },
+    hapPath: '',
+  }), 'com.example.explicit');
+  assert.equal(resolveHarmonyGoBundleName({ env: {}, hapPath: '' }), DEFAULT_HARMONY_GO_BUNDLE_NAME);
+  assert.throws(() => bundleNameFromModuleJson('{}'), /has no app\.bundleName/);
+});
 
 test('runtime resources are standalone orchestrator assets without a retired skill package', () => {
   assert.equal(existsSync(join(root, 'skills/expo-harmony-fast')), false);
@@ -76,11 +89,12 @@ test('one-click launcher resolves isolated projects, prompt input, models, and t
   const plan = JSON.parse(result.stdout);
   assert.equal(plan.project, project);
   assert.equal(plan.promptKind, 'inline');
-  assert.equal(plan.candidate, 'repair');
+  assert.equal(Object.hasOwn(plan, 'candidate'), false);
   assert.equal(plan.model, 'deepseek-v4-flash');
   assert.equal(plan.repairModel, 'deepseek-v4-flash');
   assert.equal(plan.effort, 'low');
   assert.equal(plan.repairEffort, 'medium');
+  assert.equal(plan.repairLimit, 100);
   assert.equal(plan.repairTimeout, 15);
   assert.equal(plan.timeout, 0);
   assert.equal(plan.launch, false);
@@ -204,18 +218,19 @@ exit 0
   assert.match(unsignedLog, /bundle=\[\]/);
 });
 
-test('one-click launcher defaults to the tested learning-goals scenario and K3 repair lane', () => {
+test('one-click launcher defaults to the tested learning-goals scenario and single K3 execution policy', () => {
   const launcher = join(root, 'scripts/start-livetest.mjs');
   const result = spawnSync(process.execPath, [launcher, '--dry-run', '--launch', 'false'], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
   const plan = JSON.parse(result.stdout);
   assert.equal(plan.promptKind, 'default');
   assert.equal(plan.promptSource, join(root, 'prompts/learning-goals.md'));
-  assert.equal(plan.candidate, 'repair');
+  assert.equal(Object.hasOwn(plan, 'candidate'), false);
   assert.equal(plan.model, 'k3-256k');
   assert.equal(plan.effort, 'low');
   assert.equal(plan.repairModel, 'k3-256k');
   assert.equal(plan.repairEffort, 'medium');
+  assert.equal(plan.repairLimit, 100);
   assert.equal(plan.timeout, 0);
   assert.equal(plan.repairTimeout, 0);
   assert.equal(plan.foreground, false);
@@ -258,6 +273,101 @@ test('one-click launcher accepts a user-selected output directory under expo-app
   assert.equal(plan.session, 'expo-fast-my-selected-app');
   assert.equal(plan.repairTimeout, 0);
   assert.equal(existsSync(plan.project), false);
+});
+
+test('launcher separates follow-up, rebuild, and preview lifecycle actions', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-actions-'));
+  const project = join(workspace, 'existing-app');
+  const followUp = join(workspace, 'follow-up.md');
+  mkdirSync(project, { recursive: true });
+  writeFileSync(followUp, '把主按钮改成绿色。\n');
+  const launcher = join(root, 'scripts/start-livetest.mjs');
+  const common = ['--dry-run', '--project', project, '--prompt', '原始需求', '--launch', 'false'];
+  const invoke = (...actionArgs) => {
+    const result = spawnSync(process.execPath, [launcher, ...common, ...actionArgs], {
+      encoding: 'utf8',
+      env: { ...process.env, EXPO_FAST_ENV_FILE: join(workspace, 'missing.env') },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  const followUpPlan = invoke('--follow-up-file', followUp);
+  assert.equal(followUpPlan.action, 'follow-up');
+  assert.equal(followUpPlan.followUpPath, followUp);
+  assert.equal(followUpPlan.resume, true);
+  assert.equal(invoke('--rebuild').action, 'rebuild');
+  assert.equal(invoke('--preview-only').action, 'preview');
+  rmSync(workspace, { recursive: true, force: true });
+});
+
+test('controlled Agent MCP exposes check and build without a shell tool', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-agent-tools-'));
+  const server = join(root, 'scripts/agent-tools-server.mjs');
+  const input = [
+    { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } },
+    { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
+  ].map((message) => JSON.stringify(message)).join('\n') + '\n';
+  const result = spawnSync(process.execPath, [server, '--project', workspace], { input, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  const rows = result.stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  assert.deepEqual(rows[1].result.tools.map((tool) => tool.name), ['check', 'build']);
+  assert.doesNotMatch(JSON.stringify(rows[1]), /shell|command argument/i);
+  rmSync(workspace, { recursive: true, force: true });
+});
+
+test('Expo follow-up status is read-only until the initial Agent session exists', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-follow-up-status-'));
+  const controller = join(root, 'scripts/follow-up-control.mjs');
+  const result = spawnSync(process.execPath, [controller, 'status', '--cwd', workspace, '--run', 'test-run'], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.follow_up.status, 'unavailable');
+  assert.equal(output.follow_up.session_id, '');
+  assert.equal(existsSync(join(workspace, '.expo-fast')), false);
+  rmSync(workspace, { recursive: true, force: true });
+});
+
+test('Expo follow-up controller persists FIFO queue updates without argv message text', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-follow-up-'));
+  const stateDir = join(workspace, '.expo-fast');
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, 'result.json'), JSON.stringify({ sessionId: 'session-1' }));
+  writeFileSync(join(stateDir, 'follow-up.json'), JSON.stringify({
+    schemaVersion: 1,
+    runtime: 'expo',
+    run_name: 'test-run',
+    session_id: 'session-1',
+    status: 'running',
+    sequence: 0,
+    queue: [],
+    history: [],
+    active_command: { id: 'active', type: 'message', status: 'running', text: 'existing' },
+    worker_pid: process.pid,
+    active_pid: process.pid,
+  }));
+  const controller = join(root, 'scripts/follow-up-control.mjs');
+  const controllerSource = readFileSync(controller, 'utf8');
+  assert.match(controllerSource, /'--follow-up-file', command\.request_path,[\s\S]*?'--launch', 'false', '--hap', 'false'/);
+  const call = (action, body = null) => {
+    const args = [controller, action, '--cwd', workspace, '--run', 'test-run'];
+    if (body) args.push('--json-stdin');
+    const result = spawnSync(process.execPath, args, {
+      input: body ? JSON.stringify(body) : '',
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    return JSON.parse(result.stdout);
+  };
+  const queued = call('enqueue', { text: '增加重置按钮', clientMessageId: 'client-1' });
+  assert.equal(queued.follow_up.queue_length, 1);
+  assert.equal(queued.follow_up.queue[0].text, undefined);
+  const commandId = queued.command.id;
+  const updated = call('update', { commandId, text: '增加重置按钮并二次确认' });
+  assert.equal(updated.follow_up.queue_length, 1);
+  const removed = call('remove', { commandId });
+  assert.equal(removed.follow_up.queue_length, 0);
+  assert.equal(removed.follow_up.history.at(-1).status, 'cancelled');
+  rmSync(workspace, { recursive: true, force: true });
 });
 
 test('one machine-local env file configures every portable launcher path', () => {
@@ -642,6 +752,14 @@ test('HDC textual start failures are rejected even when the process exits zero',
 
 test('Harmony Go preview wakes and unlocks a reused target and retries a locked launch once', () => {
   const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
+  const runtime = readFileSync(join(root, 'scripts/harmony-go-runtime.mjs'), 'utf8');
+  assert.match(runner, /function ensureHarmonyGoInstalled\(target\)/);
+  assert.match(runtime, /EXPO_HARMONY_GO_HAP/);
+  assert.match(runtime, /EXPO_HARMONY_GO_BUNDLE_NAME/);
+  assert.match(runtime, /bundleNameFromHap/);
+  assert.doesNotMatch(runner, /harmonyGoUserId\(target\);\s*return;/);
+  assert.match(runner, /A shell installed outside Runner may not have launched yet either/);
+  assert.match(runner, /ensureHarmonyGoInstalled\(target\);\s*const activeDevicePort/);
   assert.match(runner, /function wakeAndUnlockHarmonyTarget\(target\)/);
   assert.match(runner, /'power-shell', 'wakeup'/);
   assert.match(runner, /'uiInput', 'swipe'/);
@@ -779,7 +897,6 @@ test('direct-HAP preview rejects the legacy Harmony Go smoke agent before genera
   const result = spawnSync(process.execPath, [join(root, 'scripts/run-livetest.mjs'),
     '--project', project,
     '--request', request,
-    '--candidate', 'direct',
     '--smoke-agent', 'true',
   ], { encoding: 'utf8' });
   assert.notEqual(result.status, 0);
@@ -822,7 +939,6 @@ test('external controller records a terminal failed state without invoking the p
   const result = spawnSync(process.execPath, [runner,
     '--project', project,
     '--request', request,
-    '--candidate', 'direct',
     '--effort', 'invalid',
     '--launch', 'false',
   ], { encoding: 'utf8' });
@@ -832,7 +948,7 @@ test('external controller records a terminal failed state without invoking the p
   assert.equal(state.status, 'failed');
   assert.equal(state.history[0].state, 'failed');
   assert.equal(state.history.at(-1).state, 'failed');
-  assert.match(state.error, /unknown effort/);
+  assert.match(state.error, /effort must be low, medium, high, or max/);
 });
 
 test('runner publishes a validated SDK pool HAP into the run-owned output', () => {
@@ -885,6 +1001,80 @@ test('runner publishes a validated SDK pool HAP into the run-owned output', () =
   assert.equal(result.bundleName, 'com.example.product');
   assert.ok(result.hapPath.startsWith(join(realpathSync(project), '.expo-fast/hap')));
   assert.equal(existsSync(result.hapPath), true);
+});
+
+test('forced HAP rebuild invalidates an existing ready result and invokes the SDK pool', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-hap-rebuild-'));
+  const project = join(workspace, 'product');
+  const sdk = join(workspace, 'sdk');
+  const pool = join(workspace, 'pool');
+  mkdirSync(project);
+  mkdirSync(sdk);
+  mkdirSync(pool);
+  const realProject = realpathSync(project);
+  const output = join(realProject, '.expo-fast/hap');
+  mkdirSync(output, { recursive: true });
+
+  const oldHapPath = join(output, 'old.hap');
+  const oldHap = 'old-source-hap';
+  writeFileSync(oldHapPath, oldHap);
+  writeFileSync(join(output, 'build-result.json'), JSON.stringify({
+    schemaVersion: 1,
+    status: 'success',
+    jobId: 'hap-old-run',
+    productRoot: realProject,
+    hapPath: oldHapPath,
+    hapSha256: createHash('sha256').update(oldHap).digest('hex'),
+    deviceTypes: ['phone', '2in1'],
+    buildMode: 'release',
+  }));
+
+  let invocations = 0;
+  const reused = runHapPoolBuild({
+    project,
+    sdk,
+    pool,
+    runId: 'reuse-run',
+    commandRunner() {
+      invocations += 1;
+      return { status: 1, stdout: '', stderr: 'must not run' };
+    },
+  });
+  assert.equal(reused.reused, true);
+  assert.equal(invocations, 0);
+
+  const rebuilt = runHapPoolBuild({
+    project,
+    sdk,
+    pool,
+    runId: 'fresh-run',
+    reuseExisting: false,
+    commandRunner(_command, args) {
+      invocations += 1;
+      assert.equal(existsSync(join(output, 'build-result.json')), false);
+      const jobId = args[args.indexOf('--job-id') + 1];
+      const hapPath = join(output, 'fresh.hap');
+      const contents = 'fresh-source-hap';
+      writeFileSync(hapPath, contents);
+      writeFileSync(join(output, 'build-result.json'), JSON.stringify({
+        schemaVersion: 1,
+        status: 'success',
+        jobId,
+        productRoot: realProject,
+        hapPath,
+        hapSha256: createHash('sha256').update(contents).digest('hex'),
+        deviceTypes: ['phone', '2in1'],
+        buildMode: 'release',
+      }));
+      return { status: 0, stdout: 'ok', stderr: '' };
+    },
+  });
+  assert.equal(invocations, 1);
+  assert.equal(rebuilt.status, 'ready');
+  assert.notEqual(rebuilt.hapSha256, reused.hapSha256);
+
+  const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
+  assert.match(runner, /reuseExisting: action !== 'rebuild'/);
 });
 
 test('runner records a bounded HAP failure when the SDK pool command cannot publish diagnostics', () => {
@@ -1189,30 +1379,31 @@ test('external dependency controller CLI synchronizes an already installed exact
   assert.equal(evidence.actualVersions['react-native-svg'], '15.15.4');
 });
 
-test('three candidates stay linear and default repair retries up to 100 times', () => {
-  const config = JSON.parse(readFileSync(join(root, 'config/candidates.json'), 'utf8'));
-  assert.deepEqual(Object.keys(config.candidates), ['direct', 'brief', 'repair']);
-  assert.equal(config.candidates.direct.writeBrief, true);
-  assert.equal(config.candidates.direct.repairTurns, 0);
-  assert.equal(config.candidates.brief.repairTurns, 1);
-  assert.equal(config.candidates.repair.repairTurns, 100);
-  assert.equal(config.candidates.repair.model, 'k3-256k');
-  assert.equal(config.candidates.repair.effort, 'low');
-  assert.equal(config.candidates.repair.repairModel, 'k3-256k');
-  assert.equal(config.candidates.repair.repairEffort, 'medium');
-  assert.equal(config.default, 'auto');
+test('single execution policy uses external model controls and caps deterministic repair at 100 attempts', () => {
+  const config = JSON.parse(readFileSync(join(root, 'config/execution.json'), 'utf8'));
+  assert.deepEqual(config, {
+    schemaVersion: 1,
+    model: 'k3-256k',
+    effort: 'low',
+    repairModel: 'k3-256k',
+    repairEffort: 'medium',
+    repairLimit: 100,
+  });
+  assert.equal(existsSync(join(root, 'config/candidates.json')), false);
   const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
   assert.match(runner, /Cold-start experiment integrity forbids/);
   assert.doesNotMatch(runner, /cpSync\(join\(baseProject, 'src'/);
   assert.doesNotMatch(runner, /product-invariants\.md/);
   assert.match(runner, /'--permission-mode', 'dontAsk'/);
   assert.match(runner, /--strict-mcp-config/);
-  assert.match(runner, /'--tools', 'Read,Write,Edit'/);
+  assert.match(runner, /selfVerify \? 'Read,Write,Edit,mcp__expo_fast__check,mcp__expo_fast__build' : 'Read,Write,Edit'/);
+  assert.match(runner, /mcpServers: selfVerify \?/);
   assert.match(runner, /Read\(\.\/App\.tsx\)/);
   assert.match(runner, /Read\(\.\/\.expo-fast\/model-capability-index\.txt\)/);
   assert.doesNotMatch(runner, /Read\(\.\/\.expo-fast\/capability-catalog\.json\)/);
   assert.match(runner, /Write\(\.\/src\/\*\*\)/);
-  assert.match(runner, /Deterministic product diagnostics failed/);
+  const verification = readFileSync(join(root, 'scripts/verification.mjs'), 'utf8');
+  assert.match(verification, /Deterministic product diagnostics failed/);
   assert.match(runner, /requestSha256/);
   assert.match(runner, /templateAssetSha256/);
   assert.match(runner, /REQUIRED rows are request-matched AVAILABLE capabilities/);
@@ -1220,11 +1411,17 @@ test('three candidates stay linear and default repair retries up to 100 times', 
   assert.match(runner, /EXPO_FAST_LIVE_CLAUDE/);
   assert.match(runner, /summarizeClaudeEvent/);
   assert.match(runner, /for \(;;\)/);
-  assert.match(runner, /canRunRepair\(repairPolicy, repairAttempt\)/);
+  assert.doesNotMatch(runner, /complexityScore|candidates\[mode\]|repairTurns|canRunRepair|repairPolicy/);
+  assert.match(runner, /const lines = 10/);
+  assert.match(runner, /const execution = \{ model, effort, repairModel, repairEffort, repairLimit \}/);
+  assert.match(runner, /repairAttempt >= repairLimit/);
+  assert.match(runner, /still failed after \$\{repairLimit\} repair attempts/);
+  assert.match(runner, /deterministic gates failed; starting same-session repair \$\{repairAttempt\}/);
+  assert.match(runner, /status: metrics\.status/);
   assert.match(runner, /repairArtifactName\('agent-repair-trace'/);
   assert.match(runner, /\[dependencies, 'seed', project\]/);
-  assert.match(runner, /\[dependencies, 'sync', project\]/);
-  assert.match(runner, /\[dependencies, 'export', project, catalogRoot\]/);
+  assert.match(verification, /\[dependencies, 'sync', project\]/);
+  assert.match(verification, /\[dependencies, 'export', project, catalogRoot\]/);
   assert.doesNotMatch(runner, /\[helper, 'seed-modules', project\]/);
   assert.match(runner, /enforcement: 'advisory', blocking: false/);
   assert.match(runner, /trace-scope warning/);
@@ -1233,22 +1430,45 @@ test('three candidates stay linear and default repair retries up to 100 times', 
   assert.doesNotMatch(runner, /repairTimeoutMinutes \|\| 8/);
   assert.match(runner, /timeoutMinutes > 0 \? setTimeout/);
   assert.doesNotMatch(runner, /claudeTimeoutMinutes \|\| 20/);
-  assert.match(runner, /const model = o\.model \|\| candidates\[mode\]\.model/);
-  assert.match(runner, /const effort = o\.effort \|\| candidates\[mode\]\.effort/);
-  assert.match(runner, /const repairModel = o\.repairModel \|\| o\.model/);
-  assert.match(runner, /const repairEffort = o\.repairEffort \|\| o\.effort/);
+  assert.match(runner, /resolveExecution\(o\)/);
+  const launcher = readFileSync(join(root, 'scripts/start-livetest.mjs'), 'utf8');
+  assert.match(launcher, /'--repairLimit', String\(plan\.repairLimit\)/);
   assert.doesNotMatch(runner, /--dangerously-skip-permissions/);
 });
 
-test('repair policy enforces numeric bounds and gives every retry separate evidence', () => {
-  assert.equal(canRunRepair(0, 0), false);
-  assert.equal(canRunRepair(1, 0), true);
-  assert.equal(canRunRepair(1, 1), false);
-  assert.equal(canRunRepair(100, 99), true);
-  assert.equal(canRunRepair(100, 100), false);
+test('initial 0-to-1 product prompt remains byte-stable while follow-up tools evolve', () => {
+  const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
+  const source = runner.match(/function buildPrompt\(project\) \{[\s\S]*?\n\}\n\nasync function claudeTurn/)?.[0]
+    .replace(/\n\nasync function claudeTurn$/, '');
+  assert.ok(source, 'buildPrompt source');
+  const buildPrompt = Function('readFileSync', 'join', `${source}; return buildPrompt;`)(readFileSync, join);
+  const project = mkdtempSync(join(tmpdir(), 'expo-fast-prompt-contract-'));
+  mkdirSync(join(project, '.expo-fast'), { recursive: true });
+  writeFileSync(join(project, '.expo-fast/request.md'), readFileSync(join(root, 'prompts/learning-goals.md')));
+  const digest = createHash('sha256').update(buildPrompt(project)).digest('hex');
+  assert.equal(digest, '54309185afceaf7ccfb38fbe52e2f5f1c8a3510d71442cce359626545fa3ef86');
+  rmSync(project, { recursive: true, force: true });
+});
+
+test('execution policy resolves explicit overrides and main-turn inheritance centrally', () => {
+  assert.deepEqual(resolveExecution({}), {
+    model: 'k3-256k', effort: 'low', repairModel: 'k3-256k', repairEffort: 'medium', repairLimit: 100,
+  });
+  assert.deepEqual(resolveExecution({ model: 'main-model', effort: 'high' }), {
+    model: 'main-model', effort: 'high', repairModel: 'main-model', repairEffort: 'high', repairLimit: 100,
+  });
+  assert.deepEqual(resolveExecution({ model: 'main-model', effort: 'low', repairModel: 'repair-model', repairEffort: 'max' }), {
+    model: 'main-model', effort: 'low', repairModel: 'repair-model', repairEffort: 'max', repairLimit: 100,
+  });
+  assert.throws(() => resolveExecution({ effort: 'automatic' }), /effort must be low, medium, high, or max/);
+  assert.throws(() => resolveExecution({ repairLimit: 0 }), /repair limit must be an integer between 1 and 100/);
+  assert.throws(() => resolveExecution({ repairLimit: 101 }), /repair limit must be an integer between 1 and 100/);
+});
+
+test('repair artifacts give every retry separate evidence', () => {
   assert.equal(repairArtifactName('agent-repair-trace', 1, '.jsonl'), 'agent-repair-trace.jsonl');
   assert.equal(repairArtifactName('agent-repair-trace', 2, '.jsonl'), 'agent-repair-trace-2.jsonl');
-  assert.throws(() => canRunRepair(-1, 0), /invalid repairTurns policy/);
+  assert.throws(() => repairArtifactName('agent-repair-trace', 0, '.jsonl'), /invalid repair attempt/);
 });
 
 test('trace analyzer includes every numbered repair trace in attempt order', () => {
@@ -1293,11 +1513,11 @@ test('starter and model contract use Harmony-safe Path-only icon geometry', () =
   assert.match(runner, /Production icons must be Path-only/);
 });
 
-test('automatic selection routes complex multi-surface requests to repair', () => {
-  const scoreText = '四个 Tab 导出导入 周报 环比 连续 休息日 补记 逾期 SVG 图表 删除 二次确认';
-  let score = scoreText.length;
-  for (const pattern of [/四个 Tab|四个页面|four tabs/i, /导出|导入|迁移/, /周报|环比|历史周/, /连续|休息日|补记|逾期/, /SVG|图表|堆叠/, /删除|二次确认|确认/]) if (pattern.test(scoreText)) score += 1200;
-  assert.ok(score >= 4000);
+test('candidate CLI is removed instead of silently selecting an execution path', () => {
+  const launcher = join(root, 'scripts/start-livetest.mjs');
+  const result = spawnSync(process.execPath, [launcher, '--dry-run', '--candidate', 'repair', '--launch', 'false'], { encoding: 'utf8' });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /unknown option: --candidate/);
 });
 
 function writeEvidence(project, category = 'form-submit') {
@@ -1392,6 +1612,8 @@ test('cold-start trace scope accepts whitelisted native file tools and rejects e
     row('Write', { file_path: 'App.tsx', content: 'export default null' }),
     row('Write', { file_path: 'src/store.ts', content: 'export {}' }),
     row('Edit', { file_path: 'package.json', old_string: '{}', new_string: '{"dependencies":{}}' }),
+    row('mcp__expo_fast__check', {}),
+    row('mcp__expo_fast__build', {}),
   ].join('\n'));
   assert.equal(auditImplementationTrace(project, trace).status, 'pass');
 

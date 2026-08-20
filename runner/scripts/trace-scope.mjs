@@ -12,6 +12,8 @@ const ALLOWED_PRODUCT_TOOLS = new Set([
   'Read',
   'Write',
   'Edit',
+  'mcp__expo_fast__check',
+  'mcp__expo_fast__build',
 ]);
 
 function inside(root, path) {

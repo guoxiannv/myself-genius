@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { basename, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -9,14 +9,16 @@ import { discoverHdcPreviewPools, hdcOutputFailed, parseHdcForwardRules, parseHd
 import { acquirePreviewDevice, configuredPreviewPools } from './preview-device-pool.mjs';
 import { auditImplementationTrace } from './trace-scope.mjs';
 import { writeRunState } from './run-state.mjs';
-import { canRunRepair, repairArtifactName } from './repair-policy.mjs';
+import { executionDefaults, resolveExecution } from './execution-policy.mjs';
+import { repairArtifactName } from './repair-artifact.mjs';
 import { readExistingHapResult, runHapPoolBuild } from './hap-build.mjs';
+import { verifyImplementation } from './verification.mjs';
+import { harmonyGoBundleName, harmonyGoShellHapPath } from './harmony-go-runtime.mjs';
 
 const root = resolve(new URL('..', import.meta.url).pathname);
-const candidates = JSON.parse(readFileSync(join(root, 'config/candidates.json'), 'utf8')).candidates;
 const helper = join(root, 'scripts/fast-harmony.mjs');
 const dependencies = join(root, 'scripts/dependencies.mjs');
-const verifier = join(root, 'scripts/verify-product.mjs');
+const agentToolsServer = join(root, 'scripts/agent-tools-server.mjs');
 const sdk = resolve(root, process.env.EXPO_HARMONY_SDK_ROOT || '../sdk');
 const hdc = resolve(process.env.HDC || `${process.env.DEVECO_PATH || '/Applications/DevEco-Studio.app'}/Contents/sdk/default/openharmony/toolchains/hdc`);
 const node22 = process.env.EXPO_FAST_NODE || process.execPath;
@@ -24,6 +26,9 @@ const claude = process.env.CLAUDE_BIN || 'claude';
 const liveClaude = process.env.EXPO_FAST_LIVE_CLAUDE === '1';
 const harmonyGoLocalOrigin = 'http://127.0.0.1:3333';
 let activeRunState = null;
+let activeMetrics = null;
+let activeRevision = null;
+let activeResultPath = '';
 
 function setRunState(state, detail, context = {}, extra = {}) {
   if (!activeRunState) return null;
@@ -73,8 +78,7 @@ function displayClaudeChunk(chunk, state) {
 }
 function run(cmd, args, options = {}) { const started = Date.now(); const result = spawnSync(cmd, args, { cwd: options.cwd, env: { ...process.env, ...(options.env || {}) }, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }); if (options.log) writeFileSync(options.log, `${result.stdout || ''}${result.stderr || ''}`); if (result.status !== 0) throw new Error(`${cmd} exited ${result.status}\n${result.stderr || result.stdout || ''}`); return { ms: Date.now() - started, stdout: result.stdout || '' }; }
 function writeJson(path, value) { mkdirSync(resolve(path, '..'), { recursive: true }); writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`); }
-function recoverTrace(project, metrics) {
-  const path = join(project, '.expo-fast/agent-trace.jsonl');
+function recoverTrace(project, metrics, path = join(project, '.expo-fast/agent-trace.jsonl')) {
   if (!existsSync(path)) return metrics;
   const rows = readFileSync(path, 'utf8').split(/\r?\n/).filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
   const sessionId = rows.find((row) => row.session_id)?.session_id;
@@ -84,9 +88,16 @@ function recoverTrace(project, metrics) {
   if (!metrics.traceUsage && result) metrics.traceUsage = { totalCostUsd: result.total_cost_usd, turns: result.num_turns, usage: result.usage, modelUsage: result.modelUsage };
   if (!metrics.modelRouting) {
     const traceModels = [...new Set(rows.filter((row) => row.type === 'assistant' && row.message?.model).map((row) => row.message.model))];
-    metrics.modelRouting = { requested: metrics.selection?.model || '', traceModels, billedModels: Object.keys(result?.modelUsage || {}) };
+    metrics.modelRouting = { requested: metrics.execution?.model || '', traceModels, billedModels: Object.keys(result?.modelUsage || {}) };
   }
   return metrics;
+}
+function traceUsage(path) {
+  if (!existsSync(path)) return null;
+  const rows = readFileSync(path, 'utf8').split(/\r?\n/).filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
+  const result = [...rows].reverse().find((row) => row.type === 'result');
+  if (!result) return null;
+  return { totalCostUsd: result.total_cost_usd, turns: result.num_turns, durationMs: result.duration_ms, usage: result.usage, modelUsage: result.modelUsage };
 }
 function recoverRepairTrace(project, metrics, path = join(project, '.expo-fast/agent-repair-trace.jsonl')) {
   if (!existsSync(path)) return metrics;
@@ -94,18 +105,13 @@ function recoverRepairTrace(project, metrics, path = join(project, '.expo-fast/a
   const result = [...rows].reverse().find((row) => row.type === 'result');
   if (result) {
     if (!metrics.stages.repairMs && result.duration_ms) metrics.stages.repairMs = result.duration_ms;
-    const entry = { trace: basename(path), totalCostUsd: result.total_cost_usd, turns: result.num_turns, usage: result.usage, modelUsage: result.modelUsage };
+    const entry = { trace: relative(project, path), totalCostUsd: result.total_cost_usd, turns: result.num_turns, usage: result.usage, modelUsage: result.modelUsage };
     const entries = (metrics.repairTraceUsages ||= []);
     const index = entries.findIndex((item) => item.trace === entry.trace);
     if (index >= 0) entries[index] = entry; else entries.push(entry);
     metrics.repairTraceUsage = { totalCostUsd: entries.reduce((sum, item) => sum + (Number(item.totalCostUsd) || 0), 0), turns: entries.reduce((sum, item) => sum + (Number(item.turns) || 0), 0), attempts: entries };
   }
   return metrics;
-}
-function complexityScore(request) {
-  let score = request.length;
-  for (const pattern of [/四个 Tab|四个页面|four tabs/i, /导出|导入|迁移/, /周报|环比|历史周/, /连续|休息日|补记|逾期/, /SVG|图表|堆叠/, /删除|二次确认|确认/]) if (pattern.test(request)) score += 1200;
-  return score;
 }
 function digestProductSource(project) {
   const paths = [join(project, 'App.tsx'), ...readdirSync(join(project, 'src'), { recursive: true }).map((entry) => join(project, 'src', String(entry))).filter((path) => existsSync(path) && statSync(path).isFile())].sort();
@@ -114,6 +120,46 @@ function digestProductSource(project) {
   return hash.digest('hex');
 }
 function sha256(value) { return createHash('sha256').update(value).digest('hex'); }
+function buildFollowUpPrompt(text) {
+  return `The user wants to modify the existing product in this same project and conversation. Preserve working behavior that is not part of the request, and do not recreate the app from scratch.\n\nUSER FOLLOW-UP:\n${text.trim()}\n\nImplement the requested change completely in the current App.tsx/src/** and permitted product files. Use only catalog-supported exact dependency versions. After meaningful edits, call expo_fast.check and fix every diagnostic. When the change is complete, call expo_fast.build once and fix any remaining failure before stopping. Do not use arbitrary shell commands or inspect paths outside the product whitelist.`;
+}
+function ensureInitialRevision(metrics) {
+  metrics.revisions ||= [];
+  if (metrics.revisions.length) return;
+  metrics.revisions.push({
+    number: 0,
+    kind: 'initial',
+    status: metrics.status || 'passed',
+    request: metrics.request,
+    trace: '.expo-fast/agent-trace.jsonl',
+    startedAt: metrics.startedAt,
+    completedAt: metrics.generationCompletedAt || metrics.completedAt,
+    durationMs: metrics.generationMs,
+  });
+}
+function beginFollowUpRevision(project, metrics, requestPath, startedAt) {
+  ensureInitialRevision(metrics);
+  for (const revision of metrics.revisions) {
+    if (revision.status === 'running') {
+      revision.status = 'interrupted';
+      revision.completedAt ||= startedAt.toISOString();
+    }
+  }
+  const number = Math.max(...metrics.revisions.map((revision) => Number(revision.number) || 0)) + 1;
+  const directory = `.expo-fast/revisions/${String(number).padStart(3, '0')}-follow-up`;
+  mkdirSync(join(project, directory), { recursive: true });
+  const revision = {
+    number,
+    kind: 'follow-up',
+    status: 'running',
+    request: relative(project, requestPath),
+    trace: `${directory}/agent-trace.jsonl`,
+    startedAt: startedAt.toISOString(),
+    repairAttempts: [],
+  };
+  metrics.revisions.push(revision);
+  return { revision, directory: join(project, directory) };
+}
 function requiredCapabilityPackages(request) {
   const rules = [
     [/@react-native-async-storage|localStorage|持久|即时保存|本机|离线|断网/i, '@react-native-async-storage/async-storage'],
@@ -141,33 +187,14 @@ function writeModelCapabilityIndex(project, request) {
   writeFileSync(path, content);
   return { path, sha256: sha256(content), sourceSha256: sha256(source), bytes: Buffer.byteLength(content), entries: catalog.available.length, requiredPackages: [...required].sort() };
 }
-function buildPrompt(project, mode) {
+function buildPrompt(project) {
   const request = readFileSync(join(project, '.expo-fast/request.md'), 'utf8').trim();
-  const lines = mode === 'direct' ? 6 : 10;
+  const lines = 10;
   const extra = `\nBefore coding, preserve the required model-visible Spec → Plan → Code order: write .expo-fast/brief.json with at most ${lines} short lines total. Include a mini spec (product, primary flow, acceptance), a mini plan (data/state and file order), and a capabilities array containing every REQUIRED package/export plus only the optional AVAILABLE packages actually needed. When the request names multiple device classes, include the responsive device contract in acceptance. Add every REQUIRED and selected AVAILABLE package to package.json dependencies at its exact version. Production icons must be Path-only: encode circles, lines, rectangles, and dots as path commands because direct mixed SVG shape children render incompletely in this Harmony Go host. Charts may use other catalog-supported inline SVG primitives. Continue immediately to code; do not stop after the brief.`;
   return `Build this Expo React Native product from scratch in the current freshly prepared Harmony Go technical scaffold. No prior product implementation is present.\n\nUSER REQUEST:\n${request}\n\nRead only AGENTS.md, package.json, app.json, index.js, tsconfig.json, App.tsx, src/**, .expo-fast/model-capability-index.txt, and .expo-fast/sdk-fingerprint.json. These paths are permission-whitelisted and authoritative; do not attempt any other path, SDK scan, or web access. The model capability index is a deterministic projection of the local compatibility catalog: REQUIRED rows are request-matched AVAILABLE capabilities and must be represented in the brief, package dependencies, and working code; other AVAILABLE rows are optional; UNAVAILABLE rows must never be imported. ${extra}\n\nImplement the complete requested product now; do not collapse requested behavior into placeholders. Derive acceptance rules directly from the user request. Work in vertical slices, not a bottom-up library pass. Write .expo-fast/brief.json, then immediately replace starter App.tsx/app-shell, expose every requested destination, and implement a real primary state mutation. Keep the app runnable as you add data/persistence, complete screens, secondary actions, charts, and polish. Write each complete file as soon as it is ready; never leave entry composition or requested screens until the end.\n\nKeep the implementation compact: prefer 6-10 cohesive product files and avoid rewriting an already complete file unless integration requires it. Reuse the existing theme, local icon factory, and generic UI primitives; extend them only when a requested control truly needs it. Avoid commentary, long comments, duplicate wrappers, and one-file-per-small-component architecture. Treat useWindowDimensions().width as logical layout width; never infer breakpoints from physical pixels or emulator resolution. Use phone <640, tablet 640–1279, and desktop >=1280. For apps with multiple top-level destinations, phone uses bottom navigation and a single content column, tablet uses top horizontal navigation and one or two content columns as space allows, and desktop uses a fixed-width left sidebar plus a flexible main area as siblings inside the same horizontal root container. Never place the desktop sidebar before or outside that row container. Desktop dashboard/list cards must form a real multi-column layout, such as wrapping cards with about 48% basis. Do not invent tabs for a single-destination app; still preserve the same responsive content rules. Add stable literal testID and accessibilityLabel values to tabs, primary actions, and state summaries that change after actions.\n\nUse src/components/icons.tsx as the local Lucide-style icon system with one consistent 2.2 default stroke width. Every production icon and chart must use inline react-native-svg primitives; never use emoji, text glyphs, Unicode symbols, or an external icon library. Resolve native product behavior through the capability index instead of replacing it with text-only UI. For bulk non-sensitive local app state, use REQUIRED AsyncStorage; hydrate before writes, seed only when storage is empty, namespace storage keys with the app slug from app.json, and persist every mutation. Treat dates as local calendar dates and keep domain units separate when aggregating. Validate imported data before any destructive overwrite. Requested direct actions must perform their named system result in that action, and requested animations must actually animate.\n\nUse no package unless it has a REQUIRED or AVAILABLE row in the capability index and declare it in package.json dependencies at that exact version. Preserve all scaffold dependencies and every other package.json field. Do not create prose Spec/Plan, HTML, ArkTS, native files, tests, docs, or subagents. Do not edit other infrastructure. Do not run any shell command, install, Expo, lint, test, typecheck, grep, or build; the orchestrator owns dependency synchronization and verification. After the whole app is connected, spend the remaining pass on missing user-visible behavior, then stop. Do not narrate progress, check formatting, reread the whole project, or perform a late architectural rewrite.`;
 }
 
-function verifyImplementation(project, catalogRoot, metrics, suffix = '') {
-  const stage = (name) => `${name}${suffix}`;
-  const diagnostics = [];
-  const check = (name, cmd, args, log) => {
-    const started = Date.now();
-    try { metrics.stages[stage(name)] = run(cmd, args, { cwd: project, log }).ms; }
-    catch (error) {
-      metrics.stages[stage(name)] = Date.now() - started;
-      diagnostics.push(`${name}:\n${error.stack || error}`);
-    }
-  };
-  check('dependencySyncMs', node22, [dependencies, 'sync', project], join(project, '.expo-fast/capability-resolution.log'));
-  if (existsSync(join(project, '.expo-fast/capability-selection.json'))) metrics.capabilities = JSON.parse(readFileSync(join(project, '.expo-fast/capability-selection.json'), 'utf8'));
-  check('typecheckMs', node22, [join(project, 'node_modules/typescript/bin/tsc'), '--noEmit'], join(project, '.expo-fast/typecheck.log'));
-  check('sourceAuditMs', node22, [verifier, 'audit', project], join(project, '.expo-fast/source-audit-command.log'));
-  if (diagnostics.length) throw new Error(`Deterministic product diagnostics failed (${diagnostics.length}):\n\n${diagnostics.join('\n\n')}`);
-  metrics.stages[stage('exportMs')] = run(node22, [dependencies, 'export', project, catalogRoot], { cwd: project }).ms;
-  metrics.stages[stage('artifactAuditMs')] = run(node22, [verifier, 'artifacts', project, catalogRoot], { cwd: project, log: join(project, '.expo-fast/artifact-audit-command.log') }).ms;
-}
-async function claudeTurn(project, mode, trace, prompt, sessionId, resume = false, timeoutMinutes = 0, acceptDeadline = false, effort = candidates[mode].effort, model = candidates[mode].model) {
+async function claudeTurn(project, trace, prompt, sessionId, resume = false, timeoutMinutes = 0, acceptDeadline = false, effort = executionDefaults.effort, model = executionDefaults.model, selfVerify = false) {
   const sessionArgs = resume ? ['--resume', sessionId] : ['--session-id', sessionId];
   const allowedTools = [
     'Read(./AGENTS.md)', 'Read(./package.json)', 'Read(./app.json)', 'Read(./index.js)', 'Read(./tsconfig.json)', 'Read(./App.tsx)', 'Read(./src/**)',
@@ -178,9 +205,13 @@ async function claudeTurn(project, mode, trace, prompt, sessionId, resume = fals
     'Read(./.expo-fast/export.log)', 'Read(./.expo-fast/build-evidence.json)',
     'Write(./App.tsx)', 'Write(./src/**)', 'Write(./.expo-fast/brief.json)',
     'Edit(./App.tsx)', 'Edit(./src/**)', 'Edit(./.expo-fast/brief.json)', 'Edit(./package.json)',
-  ].join(',');
-  const emptyMcpConfig = JSON.stringify({ mcpServers: {} });
-  const args = ['-p', '--permission-mode', 'dontAsk', '--model', model, '--effort', effort, '--mcp-config', emptyMcpConfig, '--strict-mcp-config', '--tools', 'Read,Write,Edit', '--allowedTools', allowedTools, '--output-format', 'stream-json', '--verbose', ...sessionArgs, prompt];
+  ];
+  if (selfVerify) allowedTools.push('mcp__expo_fast__check', 'mcp__expo_fast__build');
+  const mcpConfig = JSON.stringify({ mcpServers: selfVerify ? {
+    expo_fast: { command: node22, args: [agentToolsServer, '--project', project] },
+  } : {} });
+  const tools = selfVerify ? 'Read,Write,Edit,mcp__expo_fast__check,mcp__expo_fast__build' : 'Read,Write,Edit';
+  const args = ['-p', '--permission-mode', 'dontAsk', '--model', model, '--effort', effort, '--mcp-config', mcpConfig, '--strict-mcp-config', '--tools', tools, '--allowedTools', allowedTools.join(','), '--output-format', 'stream-json', '--verbose', ...sessionArgs, prompt];
   if (!Number.isFinite(timeoutMinutes) || timeoutMinutes < 0) throw new Error(`invalid Claude timeout: ${timeoutMinutes}`);
   const started = Date.now();
   const outcome = await new Promise((ok, fail) => {
@@ -256,14 +287,6 @@ function ensureReverseWithFallback(target, preferredDevicePort, hostPort) {
     { cause: lastError },
   );
 }
-const harmonyGoBundleName = 'com.example.myapplication1.ide';
-function harmonyGoShellHapPath() {
-  const configured = String(process.env.EXPO_HARMONY_GO_HAP || '').trim();
-  const candidate = configured
-    ? resolve(configured)
-    : join(root, '.harmony-go-shell/harmony/entry/build/default/outputs/default/entry-default-unsigned.hap');
-  return existsSync(candidate) ? candidate : '';
-}
 function harmonyGoUserId(target) {
   const bundleDump = hdcRun(['-t', target, 'shell', 'bm', 'dump', '-n', harmonyGoBundleName]);
   const userId = bundleDump.match(/"userId"\s*:\s*(\d+)/)?.[1];
@@ -274,33 +297,38 @@ function pauseMs(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, ms);
 }
 function ensureHarmonyGoInstalled(target) {
+  let installed = true;
   try {
     harmonyGoUserId(target);
-    return;
   } catch {
-    // Shell is missing; fall through to install.
+    installed = false;
   }
-  const hap = harmonyGoShellHapPath();
-  if (!hap) {
-    throw new Error(`Harmony Go is not installed on ${target} and no shell HAP is available; set EXPO_HARMONY_GO_HAP or build the shell via sdk harmony:go:build`);
+  if (!installed) {
+    const hap = harmonyGoShellHapPath();
+    if (!hap) {
+      throw new Error(`Harmony Go is not installed on ${target} and no shell HAP is available; set EXPO_HARMONY_GO_HAP or build the shell via sdk harmony:go:build`);
+    }
+    hdcRun(['-t', target, 'install', '-r', hap]);
   }
-  hdcRun(['-t', target, 'install', '-r', hap]);
   const userId = harmonyGoUserId(target);
-  // A freshly installed shell has no entry files directory yet; the first
-  // launch creates it, and configureHarmonyGoOrigin writes into it.
+  // A shell installed outside Runner may not have launched yet either. Ensure
+  // its entry files directory exists before configureHarmonyGoOrigin writes it.
   const entryFiles = `/data/app/el2/${userId}/base/${harmonyGoBundleName}/haps/entry/files`;
-  startHarmonyGo(target);
-  const deadline = Date.now() + 15000;
-  for (;;) {
-    const probe = spawnSync(hdc, ['-t', target, 'shell', `test -d ${entryFiles} && echo EXISTS`], { encoding: 'utf8' });
-    if ((probe.stdout || '').includes('EXISTS')) break;
-    if (Date.now() > deadline) throw new Error(`Harmony Go entry files directory did not appear on ${target}: ${entryFiles}`);
-    pauseMs(500);
+  let probe = spawnSync(hdc, ['-t', target, 'shell', `test -d ${entryFiles} && echo EXISTS`], { encoding: 'utf8' });
+  if (!(probe.stdout || '').includes('EXISTS')) {
+    startHarmonyGo(target);
+    const deadline = Date.now() + 15000;
+    for (;;) {
+      probe = spawnSync(hdc, ['-t', target, 'shell', `test -d ${entryFiles} && echo EXISTS`], { encoding: 'utf8' });
+      if ((probe.stdout || '').includes('EXISTS')) break;
+      if (Date.now() > deadline) throw new Error(`Harmony Go entry files directory did not appear on ${target}: ${entryFiles}`);
+      pauseMs(500);
+    }
+    hdcRun(['-t', target, 'shell', 'aa', 'force-stop', harmonyGoBundleName]);
   }
-  hdcRun(['-t', target, 'shell', 'aa', 'force-stop', harmonyGoBundleName]);
 }
 function configureHarmonyGoOrigin(target, devicePort) {
-  const bundleName = 'com.example.myapplication1.ide';
+  const bundleName = harmonyGoBundleName;
   const userId = harmonyGoUserId(target);
   const configPath = `/data/app/el2/${userId}/base/${bundleName}/haps/entry/files/miniapp-server.txt`;
   const origin = `http://127.0.0.1:${devicePort}`;
@@ -332,7 +360,7 @@ function wakeAndUnlockHarmonyTarget(target) {
   ]);
 }
 function startHarmonyGo(target) {
-  const args = ['-t', target, 'shell', 'aa', 'start', '-a', 'EntryAbility', '-b', 'com.example.myapplication1.ide'];
+  const args = ['-t', target, 'shell', 'aa', 'start', '-a', 'EntryAbility', '-b', harmonyGoBundleName];
   try {
     hdcRun(args);
   } catch (error) {
@@ -348,7 +376,7 @@ export function prepareHarmonyGoTarget(kind, target, devicePort, gatewayPort) {
     configureHarmonyGoOrigin(target, activeDevicePort);
     wakeAndUnlockHarmonyTarget(target);
     hdcRun(['-t', target, 'shell', 'uitest', 'uiInput', 'keyEvent', 'Home']);
-    hdcRun(['-t', target, 'shell', 'aa', 'force-stop', 'com.example.myapplication1.ide']);
+    hdcRun(['-t', target, 'shell', 'aa', 'force-stop', harmonyGoBundleName]);
     startHarmonyGo(target);
     return activeDevicePort;
   } catch (error) {
@@ -362,7 +390,7 @@ export async function verifyHarmonyGoForeground(project, kind, target) {
     try {
       const layout = dumpLayout(project, target, `launch-shell-${kind}`);
       visible = visibleBundleNames(layout);
-      if (visible.includes('com.example.myapplication1.ide')) return;
+      if (visible.includes(harmonyGoBundleName)) return;
     } catch (error) {
       if (attempt === 5) throw previewTargetError(kind, target, error);
     }
@@ -554,7 +582,7 @@ async function revealCatalogProject(project, target, manifestId, layout, actions
 async function prepareCatalog(project, target, manifestId, actions, evidenceName, expectedOrigin) {
   let layout = dumpLayout(project, target, evidenceName('launch-catalog'));
   const foregroundBundles = visibleBundleNames(layout);
-  if (!foregroundBundles.includes('com.example.myapplication1.ide')) {
+  if (!foregroundBundles.includes(harmonyGoBundleName)) {
     throw new Error(`Harmony Go did not reach the foreground on target ${target}; visible bundle(s): ${foregroundBundles.join(', ') || 'none'}`);
   }
   const projectsTab = collect(layout, (node) => node.attributes?.type === 'Button' && nodeText(node) === '项目')[0];
@@ -657,31 +685,44 @@ export async function installAndOpen(project, target, manifestId, previewKind = 
   }
   const identity = assertCurrentMiniApp(layout, manifestId, productMarkers, 'launch-product');
   const shotDevice = `/data/local/tmp/expo-fast-${process.pid}-launch-${previewKind || 'default'}.jpeg`; const shotLocal = join(project, `.expo-fast/launch-screenshot${previewKind ? `-${previewKind}` : ''}.jpeg`); hdcRun(['-t', target, 'shell', 'uitest', 'screenCap', '-p', shotDevice]); hdcRun(['-t', target, 'file', 'recv', shotDevice, shotLocal]);
-  return { result: 'PASS', target, previewKind, screenshot: shotLocal, bundleName: 'com.example.myapplication1.ide', manifestId, currentProjectTitle: identity.currentProjectTitle, currentProjectBounds: identity.currentProjectBounds, appNode: identity.productMarker, appNodeBounds: identity.productMarkerBounds, actions };
+  return { result: 'PASS', target, previewKind, screenshot: shotLocal, bundleName: harmonyGoBundleName, manifestId, currentProjectTitle: identity.currentProjectTitle, currentProjectBounds: identity.currentProjectBounds, appNode: identity.productMarker, appNodeBounds: identity.productMarkerBounds, actions };
 }
 async function main() {
-  const o = parse(process.argv.slice(2)); const project = resolve(o.project); const request = resolve(o.request || join(project, '.expo-fast/request.md')); const requestText = readFileSync(request, 'utf8'); const requestedMode = o.candidate || 'auto'; const mode = requestedMode === 'auto' ? (complexityScore(requestText) >= 4000 ? 'repair' : 'brief') : requestedMode; if (!candidates[mode]) throw new Error(`unknown candidate ${mode}`); const invocationStartedAt = new Date();
-  const model = o.model || candidates[mode].model;
-  const effort = o.effort || candidates[mode].effort;
-  const repairModel = o.repairModel || o.model || candidates[mode].repairModel || model;
-  const repairEffort = o.repairEffort || o.effort || candidates[mode].repairEffort || effort;
+  const o = parse(process.argv.slice(2)); const project = resolve(o.project); const request = resolve(o.request || join(project, '.expo-fast/request.md')); const requestText = readFileSync(request, 'utf8'); const invocationStartedAt = new Date();
   activeRunState = { project, runId: randomUUID(), startedAt: invocationStartedAt.toISOString(), state: 'generating_code' };
-  const stateContext = { requestedMode, candidate: mode, model, effort, repairModel, repairEffort, resume: o.resume === 'true' };
-  if (!['low', 'medium', 'high', 'max'].includes(effort) || !['low', 'medium', 'high', 'max'].includes(repairEffort)) throw new Error(`unknown effort main=${effort} repair=${repairEffort}`);
+  if (Object.hasOwn(o, 'candidate')) throw new Error('--candidate is no longer supported; pass --model, --effort, --repairModel, and --repairEffort directly');
+  const action = o.action || 'initial';
+  if (!['initial', 'follow-up', 'rebuild', 'preview'].includes(action)) throw new Error(`unknown action: ${action}`);
+  activeRunState.action = action;
+  const isInitial = action === 'initial';
+  const isFollowUp = action === 'follow-up';
+  const followUpPath = isFollowUp ? resolve(o.followUp || '') : '';
+  if (isFollowUp && (!followUpPath || !existsSync(followUpPath))) throw new Error(`follow-up request does not exist: ${followUpPath || '<missing>'}`);
+  const { model, effort, repairModel, repairEffort, repairLimit } = resolveExecution(o);
+  const execution = { model, effort, repairModel, repairEffort, repairLimit };
+  const stateContext = { ...execution, action, resume: !isInitial };
   if (o.launch !== 'false' && (o.smokeAgent === 'true' || o['smoke-agent'] === 'true' || o.validateSmoke === 'true' || o['validate-smoke'] === 'true')) {
     throw new Error('Harmony Go smoke validation is not supported for direct-HAP preview; rerun without --smoke-agent/--validate-smoke');
   }
-  progress(`start · candidate=${mode} · model=${model} · effort=${effort} · repair=${repairModel}/${repairEffort} · project=${project}`);
+  progress(`start · action=${action} · model=${model} · effort=${effort} · repair=${repairModel}/${repairEffort} · project=${project}`);
   if (o.baseProject || o['base-project']) throw new Error('Cold-start experiment integrity forbids --baseProject/--base-project. Use a new empty project directory.');
-  const resume = o.resume === 'true';
   const oldResultPath = join(project, '.expo-fast/result.json');
-  const metrics = resume && existsSync(oldResultPath)
+  if (!isInitial && !existsSync(oldResultPath)) throw new Error(`${action} requires an existing .expo-fast/result.json`);
+  const metrics = !isInitial
     ? JSON.parse(readFileSync(oldResultPath, 'utf8'))
-    : { candidate: mode, selection: { requested: requestedMode, complexityScore: complexityScore(requestText), model, effort, repairModel, repairEffort }, project, request, startedAt: invocationStartedAt.toISOString(), stages: {} };
+    : { execution, project, request, startedAt: invocationStartedAt.toISOString(), stages: {}, revisions: [] };
+  delete metrics.candidate;
+  delete metrics.selection;
+  metrics.execution = execution;
   metrics.stages ||= {};
-  if (resume) { setRunState('generating_code', 'verification', stateContext, { reset: true }); recoverTrace(project, metrics); recoverRepairTrace(project, metrics); }
+  activeMetrics = metrics;
+  activeResultPath = oldResultPath;
+  if (!isInitial) { setRunState('generating_code', action === 'follow-up' ? 'follow_up' : action, stateContext, { reset: true }); recoverTrace(project, metrics); recoverRepairTrace(project, metrics); }
   let sessionId = metrics.sessionId;
-  if (!resume) {
+  let currentRevision = null;
+  let revisionDirectory = join(project, '.expo-fast');
+  let implementationTrace = join(project, '.expo-fast/agent-trace.jsonl');
+  if (isInitial) {
     progress('prepare cold-start template and capability index');
     run(node22, [helper, 'prepare', project, request]); setRunState('generating_code', 'preparing', stateContext, { reset: true }); writeFileSync(join(project, 'AGENTS.md'), readFileSync(join(root, 'AGENTS.md'))); writeFileSync(join(project, 'CLAUDE.md'), '@AGENTS.md\n');
     const modelCapabilityIndex = writeModelCapabilityIndex(project, requestText);
@@ -693,41 +734,75 @@ async function main() {
     sessionId = randomUUID(); metrics.sessionId = sessionId;
     setRunState('generating_code', 'model_generation', { sessionId });
     progress(`implementation turn · session=${sessionId} · model=${model} · effort=${effort}`);
-    const implementationTurn = await claudeTurn(project, mode, join(project, '.expo-fast/agent-trace.jsonl'), buildPrompt(project, mode), sessionId, false, Number(o.claudeTimeoutMinutes || 0), o.acceptClaudeDeadline === 'true', effort, model);
+    const implementationTurn = await claudeTurn(project, join(project, '.expo-fast/agent-trace.jsonl'), buildPrompt(project), sessionId, false, Number(o.claudeTimeoutMinutes || 0), o.acceptClaudeDeadline === 'true', effort, model);
     metrics.stages.claudeMs = implementationTurn.ms; metrics.claudeDeadlineReached = implementationTurn.deadlineReached;
     progress(`implementation turn finished · ${metrics.stages.claudeMs}ms`);
     recoverTrace(project, metrics);
+    currentRevision = {
+      number: 0,
+      kind: 'initial',
+      status: 'running',
+      request: relative(project, request),
+      trace: '.expo-fast/agent-trace.jsonl',
+      startedAt: invocationStartedAt.toISOString(),
+      repairAttempts: [],
+    };
+    activeRevision = currentRevision;
+    metrics.revisions = [currentRevision];
+  } else if (isFollowUp) {
+    if (!sessionId) throw new Error('follow-up requires the original Claude sessionId in result.json');
+    const started = beginFollowUpRevision(project, metrics, followUpPath, invocationStartedAt);
+    currentRevision = started.revision;
+    activeRevision = currentRevision;
+    revisionDirectory = started.directory;
+    implementationTrace = join(revisionDirectory, 'agent-trace.jsonl');
+    writeJson(oldResultPath, metrics);
+    const followUpText = readFileSync(followUpPath, 'utf8').trim();
+    if (!followUpText) throw new Error('follow-up request is empty');
+    setRunState('generating_code', 'follow_up', { ...stateContext, revision: currentRevision.number, sessionId });
+    progress(`follow-up turn · revision=${currentRevision.number} · session=${sessionId} · model=${model} · effort=${effort}`);
+    const followUpTurn = await claudeTurn(project, implementationTrace, buildFollowUpPrompt(followUpText), sessionId, true, Number(o.claudeTimeoutMinutes || 0), false, effort, model, true);
+    currentRevision.agentMs = followUpTurn.ms;
+    currentRevision.usage = traceUsage(implementationTrace);
+    progress(`follow-up turn finished · ${followUpTurn.ms}ms`);
   }
-  const implementationTrace = join(project, '.expo-fast/agent-trace.jsonl');
   if (existsSync(implementationTrace)) {
-    metrics.traceScope = advisoryTraceScope(auditImplementationTrace(project, implementationTrace), 'implementation', '.expo-fast/trace-scope-audit.json');
-    writeJson(join(project, '.expo-fast/trace-scope-audit.json'), metrics.traceScope);
+    const auditPath = join(revisionDirectory, 'trace-scope-audit.json');
+    const auditLabel = isFollowUp ? `follow-up ${currentRevision.number}` : 'implementation';
+    const scope = advisoryTraceScope(auditImplementationTrace(project, implementationTrace), auditLabel, relative(project, auditPath));
+    if (currentRevision) currentRevision.traceScope = scope;
+    if (isInitial) metrics.traceScope = scope;
+    writeJson(auditPath, scope);
   }
   const catalogRoot = join(project, 'dist/harmony-go');
-  const repairPolicy = candidates[mode].repairTurns;
   let repairAttempt = 0;
-  let verificationSuffix = '';
-  for (;;) {
+  const verificationBase = isFollowUp ? `FollowUp${currentRevision.number}` : action === 'rebuild' ? `Rebuild${(metrics.operations?.length || 0) + 1}` : '';
+  let verificationSuffix = verificationBase;
+  while (action !== 'preview') {
     const isRepairVerification = repairAttempt > 0;
-    setRunState(isRepairVerification ? 'repairing' : activeRunState.state, isRepairVerification ? 'repair_verification' : 'verification', { repairAttempt });
+    setRunState(isRepairVerification ? 'repairing' : activeRunState.state, isRepairVerification ? 'repair_verification' : 'verification', { repairAttempt, action, revision: currentRevision?.number });
     progress(isRepairVerification ? `deterministic repair verification · attempt=${repairAttempt}` : 'deterministic dependency/typecheck/source/export gates');
     try {
-      verifyImplementation(project, catalogRoot, metrics, verificationSuffix);
+      verifyImplementation({ project, catalogRoot, node: node22, metrics, suffix: verificationSuffix });
       progress(isRepairVerification ? `repair gates passed · attempts=${repairAttempt}` : 'deterministic gates passed');
       break;
     } catch (error) {
       writeFileSync(join(project, '.expo-fast/verification-errors.txt'), `${error.stack || error}\n`);
-      if (!canRunRepair(repairPolicy, repairAttempt)) throw error;
+      if (!isInitial && !isFollowUp) throw error;
+      if (repairAttempt >= repairLimit) {
+        throw new Error(`deterministic verification still failed after ${repairLimit} repair attempts`, { cause: error });
+      }
       repairAttempt += 1;
-      setRunState('repairing', 'model_repair', { repairAttempt, repairPolicy });
-      progress(`deterministic gates failed; starting same-session repair ${repairAttempt}/${repairPolicy} · model=${repairModel} · effort=${repairEffort}`);
+      setRunState('repairing', 'model_repair', { repairAttempt, repairLimit, action, revision: currentRevision?.number });
+      progress(`deterministic gates failed; starting same-session repair ${repairAttempt} · model=${repairModel} · effort=${repairEffort}`);
       const traceName = repairArtifactName('agent-repair-trace', repairAttempt, '.jsonl');
       const auditName = repairArtifactName('repair-trace-scope-audit', repairAttempt, '.json');
-      const repairTrace = join(project, '.expo-fast', traceName);
-      const attemptMetrics = { attempt: repairAttempt, model: repairModel, effort: repairEffort, trace: `.expo-fast/${traceName}`, startedAt: new Date().toISOString(), status: 'running' };
+      const repairTrace = join(revisionDirectory, traceName);
+      const attemptMetrics = { attempt: repairAttempt, model: repairModel, effort: repairEffort, trace: relative(project, repairTrace), startedAt: new Date().toISOString(), status: 'running' };
       (metrics.repairAttempts ||= []).push(attemptMetrics);
+      if (currentRevision) currentRevision.repairAttempts.push(attemptMetrics);
       try {
-        const repairTurn = await claudeTurn(project, mode, repairTrace, `Deterministic verification failed on repair cycle ${repairAttempt}. Read only .expo-fast/verification-errors.txt and the whitelisted current product source or deterministic diagnostic files needed to understand it. Fix only reported product problems in App.tsx/src/**, .expo-fast/brief.json, or package.json dependencies. Any dependency must use its exact catalog.available version; preserve all scaffold dependencies and other package.json fields. Do not attempt any other path or run commands; stop after the narrow repair.`, sessionId, true, Number(o.repairTimeoutMinutes ?? 0), false, repairEffort, repairModel);
+        const repairTurn = await claudeTurn(project, repairTrace, `Deterministic verification failed on repair cycle ${repairAttempt}. Read only .expo-fast/verification-errors.txt and the whitelisted current product source or deterministic diagnostic files needed to understand it. Fix only reported product problems in App.tsx/src/**, .expo-fast/brief.json, or package.json dependencies. Any dependency must use its exact catalog.available version; preserve all scaffold dependencies and other package.json fields. Use expo_fast.check after edits, fix every reported diagnostic, then use expo_fast.build once before stopping. Do not attempt any other path or run arbitrary shell commands.`, sessionId, true, Number(o.repairTimeoutMinutes ?? 0), false, repairEffort, repairModel, true);
         attemptMetrics.ms = repairTurn.ms;
         attemptMetrics.status = 'completed';
         attemptMetrics.completedAt = new Date().toISOString();
@@ -739,38 +814,48 @@ async function main() {
         throw repairError;
       }
       recoverRepairTrace(project, metrics, repairTrace);
-      const traceScope = advisoryTraceScope(auditImplementationTrace(project, repairTrace), `repair ${repairAttempt}`, `.expo-fast/${auditName}`);
+      const auditArtifact = relative(project, join(revisionDirectory, auditName));
+      const traceScope = advisoryTraceScope(auditImplementationTrace(project, repairTrace), `repair ${repairAttempt}`, auditArtifact);
       attemptMetrics.traceScope = traceScope;
-      (metrics.repairTraceScopes ||= []).push({ attempt: repairAttempt, trace: `.expo-fast/${traceName}`, ...traceScope });
+      (metrics.repairTraceScopes ||= []).push({ attempt: repairAttempt, trace: relative(project, repairTrace), ...traceScope });
       if (repairAttempt === 1) metrics.repairTraceScope = traceScope;
-      writeJson(join(project, '.expo-fast', auditName), traceScope);
-      verificationSuffix = repairAttempt === 1 ? 'Retry' : `Retry${repairAttempt}`;
+      writeJson(join(revisionDirectory, auditName), traceScope);
+      verificationSuffix = `${verificationBase}${repairAttempt === 1 ? 'Retry' : `Retry${repairAttempt}`}`;
     }
   }
-  if (resume && !metrics.generationMs && metrics.stages.claudeMs) {
+  if (!isInitial && !metrics.generationMs && metrics.stages.claudeMs) {
     metrics.generationMs = Object.entries(metrics.stages).filter(([name]) => /^(?:seedModules|claude|repair|dependencySync|typecheck|sourceAudit|export|artifactAudit).*Ms$/.test(name)).reduce((sum, [, value]) => sum + (Number(value) || 0), 0);
     metrics.totalMs = metrics.generationMs;
   }
-  if (!resume) {
+  if (isInitial) {
     metrics.generationCompletedAt = new Date().toISOString();
     metrics.generationMs = Date.now() - invocationStartedAt.getTime();
     metrics.totalMs = metrics.generationMs;
   }
   let hap = readExistingHapResult(project);
-  if (o.hap === 'true' && hap?.status !== 'ready') {
+  if (o.hap === 'true' && (action === 'rebuild' || hap?.status !== 'ready')) {
     const pool = resolve(o.pool || process.env.EXPO_HARMONY_POOL_ROOT || join(root, '../harmony-pool'));
     const waitSeconds = Number(o.hapWaitSeconds || process.env.EXPO_HARMONY_HAP_WAIT_SECONDS || 3600);
     setRunState(activeRunState.state, 'hap_building', { hap: { status: 'building', pool, startedAt: new Date().toISOString() } });
     progress(`build unsigned HAP through SDK pool · pool=${pool}`);
     const startedAt = Date.now();
-    hap = runHapPoolBuild({ project, sdk, pool, node: node22, runId: activeRunState.runId, waitSeconds });
+    hap = runHapPoolBuild({
+      project,
+      sdk,
+      pool,
+      node: node22,
+      runId: activeRunState.runId,
+      waitSeconds,
+      reuseExisting: action !== 'rebuild',
+    });
     metrics.stages.hapBuildMs = Date.now() - startedAt;
     progress(hap.status === 'ready'
       ? `unsigned HAP ready · slot=${hap.slotId || 'unknown'} · ${hap.hapPath}`
       : `unsigned HAP failed · ${hap.failureStage || 'unknown'} · ${hap.error || 'see build-result.json'}`);
-  } else if (o.hap !== 'true') {
+  } else if (o.hap !== 'true' && isInitial) {
     hap = { status: 'skipped' };
   }
+  hap ||= { status: 'skipped' };
   metrics.hap = hap;
   let previewFailure = null;
   let launchPreviewState = {};
@@ -861,10 +946,19 @@ async function main() {
     metrics.preview = { status: 'skipped' };
   }
   const completedAt = new Date().toISOString();
-  if (resume) (metrics.resumes ||= []).push({ startedAt: invocationStartedAt.toISOString(), completedAt, ms: Date.now() - invocationStartedAt.getTime(), purpose: o.launch === 'false' ? 'reverify' : 'core-smoke' });
+  const operationMs = Date.now() - invocationStartedAt.getTime();
+  if (!isInitial) (metrics.resumes ||= []).push({ startedAt: invocationStartedAt.toISOString(), completedAt, ms: operationMs, purpose: action });
   metrics.completedAt = completedAt;
-  metrics.totalMs = Date.now() - invocationStartedAt.getTime();
+  if (isInitial) metrics.totalMs = operationMs;
+  else metrics.lastOperationMs = operationMs;
   metrics.status = hap?.status === 'failed' || previewFailure || metrics.preview?.status === 'partial' ? 'partial' : 'passed';
+  if (!currentRevision && !isInitial) (metrics.operations ||= []).push({ action, startedAt: invocationStartedAt.toISOString(), completedAt, ms: operationMs, status: metrics.status });
+  if (currentRevision) {
+    currentRevision.completedAt = completedAt;
+    currentRevision.durationMs = operationMs;
+    currentRevision.status = metrics.status;
+    currentRevision.repairCount = repairAttempt;
+  }
   writeJson(join(project, '.expo-fast/result.json'), metrics);
   setRunState('completed', 'done', {
     result: previewFailure
@@ -884,7 +978,20 @@ async function main() {
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((e) => {
-    try { setRunState('failed', 'error', {}, { error: e.stack || e }); }
+    try {
+      if (activeRunState?.action === 'follow-up' && activeMetrics && activeRevision?.status === 'running') {
+        activeRevision.status = 'failed';
+        activeRevision.completedAt = new Date().toISOString();
+        activeRevision.durationMs = Math.max(0, Date.now() - Date.parse(activeRevision.startedAt));
+        activeRevision.error = String(e.stack || e).slice(0, 4000);
+        writeJson(activeResultPath, activeMetrics);
+      }
+      if (activeRunState?.action === 'follow-up') {
+        setRunState('completed', 'follow_up_failed', { action: 'follow-up', result: 'failed' }, { error: e.stack || e });
+      } else {
+        setRunState('failed', 'error', {}, { error: e.stack || e });
+      }
+    }
     catch (stateError) { console.error(`could not write .expo-fast/state.json: ${stateError.stack || stateError}`); }
     console.error(e.stack || e); process.exitCode = 1;
   });

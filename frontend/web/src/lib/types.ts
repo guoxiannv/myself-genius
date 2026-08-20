@@ -105,6 +105,12 @@ export interface RunPreviewSession {
   /** 兼容后端早期字段，返回给 Web 时也应是可访问 URL。 */
   screenshot_path?: string
   live_available?: boolean
+  /** 当前模拟器安装版本或正式 HAP 是否落后于最新续跑源码。 */
+  outdated?: boolean
+  /** 最新 HAP 已就绪，可以手动重装到手机模拟器。 */
+  refresh_available?: boolean
+  refresh_status?: "idle" | "queued" | "building" | "ready" | "failed" | string
+  refresh_error?: string
   error?: string
   updated_at?: string
 }
@@ -154,6 +160,9 @@ export interface RunArtifacts {
   package_current: boolean
   /** 已有签名包，但后续调整使它不再对应最新代码。 */
   package_outdated: boolean
+  preview_source_outdated?: boolean
+  preview_refresh_status?: string
+  preview_refresh_error?: string
   media_ready: boolean
   media_path: string
   media_source_path: string

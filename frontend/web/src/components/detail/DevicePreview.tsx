@@ -66,11 +66,23 @@ export function DevicePreview({
   const phoneNeedsRequest = activePreview === "phone" && isExpo && (
     !activeSession?.requested || previewInactive
   )
+  const phonePreviewOutdated = activePreview === "phone" && isExpo && Boolean(activeSession?.outdated)
+  const phoneRefreshAvailable = phonePreviewOutdated && Boolean(activeSession?.refresh_available)
+  const desktopRefreshMessage = activePreview === "desktop" && isExpo
+    ? activeSession?.outdated && ["queued", "building"].includes(String(activeSession.refresh_status || ""))
+      ? "正在为最新修改构建 HAP…"
+      : previewStarting
+        ? desktopPreviewRefreshMessage(sessionStatus)
+        : ""
+    : ""
   const sessionScreenshot = activeSession?.screenshot_url || activeSession?.screenshot_path || ""
   const mediaPath = activeArtifacts.media_path || sessionScreenshot
   const hasMedia = Boolean((activeArtifacts.media_ready || sessionScreenshot) && mediaPath)
   const isVideo = !sessionScreenshot && (activeArtifacts.media_type === "mp4" || activeArtifacts.media_type === "webm")
   const liveEnabled = Boolean(runId && activeArtifacts.live_ready && activeArtifacts.live_frame_path && sessionStatus !== "released")
+  const showInactiveAction = hasMedia && !liveEnabled && (
+    previewFailed || phoneNeedsRequest || previewInactive
+  )
   const [frameSource, setFrameSource] = useState("")
   const [liveError, setLiveError] = useState("")
   const [liveTransport, setLiveTransport] = useState<"connecting" | "webrtc" | "rest">(
@@ -450,7 +462,7 @@ export function DevicePreview({
   const startAction = runId ? (
     <button
       type="button"
-      disabled={retryingPreview || previewStarting}
+      disabled={retryingPreview || previewStarting || (phonePreviewOutdated && !phoneRefreshAvailable)}
       onClick={() => void startPreview()}
       className={`inline-flex h-11 w-full max-w-[300px] items-center justify-center gap-2 rounded-xl border px-5 text-sm font-semibold shadow-lg transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black disabled:cursor-wait disabled:opacity-60 disabled:hover:translate-y-0 ${
         previewFailed
@@ -463,11 +475,13 @@ export function DevicePreview({
       {previewFailed ? <RetryIcon /> : <PreviewPlayIcon />}
       {retryingPreview || previewStarting
         ? "正在排队…"
-        : previewFailed
-          ? `重新预览${activePreview === "phone" ? "手机" : "PC"}`
-          : activePreview === "phone"
-            ? "在手机模拟器上预览"
-            : "在 PC 模拟器上预览"}
+        : phoneRefreshAvailable
+          ? "刷新手机预览"
+          : previewFailed
+            ? `重新预览${activePreview === "phone" ? "手机" : "PC"}`
+            : activePreview === "phone"
+              ? "在手机模拟器上预览"
+              : "在 PC 模拟器上预览"}
     </button>
   ) : null
 
@@ -508,15 +522,19 @@ export function DevicePreview({
       message={
         retryingPreview || previewStarting
           ? previewStatusMessage(sessionStatus, activePreview)
-          : previewFailed
-            ? activeSession?.error || ("error" in activeArtifacts ? activeArtifacts.error : "") || "设备预览失败，生成产物仍然可用。"
-            : phoneNeedsRequest || previewInactive
-              ? hasMedia
-                ? "当前显示最后一次预览画面；模拟器会话已释放。"
-                : activePreview === "phone"
-                  ? "手机预览将在你点击后申请模拟器并安装 HAP。"
-                  : waitingMessage
-              : waitingMessage
+          : phonePreviewOutdated && !phoneRefreshAvailable
+            ? activeSession?.refresh_status === "failed"
+              ? activeSession?.refresh_error || "最新预览 HAP 构建失败。"
+              : "正在为最新修改构建 HAP…"
+            : previewFailed
+              ? activeSession?.error || ("error" in activeArtifacts ? activeArtifacts.error : "") || "设备预览失败，生成产物仍然可用。"
+              : phoneNeedsRequest || previewInactive
+                ? hasMedia
+                  ? "当前显示最后一次预览画面；模拟器会话已释放。"
+                  : activePreview === "phone"
+                    ? "手机预览将在你点击后申请模拟器并安装 HAP。"
+                    : waitingMessage
+                : waitingMessage
       }
       failed={previewFailed}
       action={(previewFailed || phoneNeedsRequest || previewInactive) ? startAction : null}
@@ -587,11 +605,21 @@ export function DevicePreview({
             style={{ aspectRatio: activePreview === "phone" ? "1320 / 2856" : "3 / 2" }}
           >
             {previewContent}
+            {desktopRefreshMessage ? (
+              <div
+                className="pointer-events-none absolute inset-x-3 bottom-3 z-10 flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-black/75 px-3 py-2.5 text-xs font-medium text-white shadow-xl backdrop-blur-md"
+                role="status"
+                aria-live="polite"
+              >
+                <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-white/25 border-t-accent" aria-hidden="true" />
+                <span>{desktopRefreshMessage}</span>
+              </div>
+            ) : null}
           </div>
         </div>
       </div>
 
-      {hasMedia && !liveEnabled && (previewFailed || phoneNeedsRequest || previewInactive) ? (
+      {showInactiveAction ? (
         <div className="mt-3 flex flex-col items-center gap-2">
           <p className={`max-w-[320px] text-center text-xs leading-relaxed ${previewFailed ? "text-warning" : "text-subtle"}`}>
             {previewFailed
@@ -603,7 +631,18 @@ export function DevicePreview({
         </div>
       ) : null}
 
-      {liveEnabled && liveError ? (
+      {phonePreviewOutdated && (hasMedia || liveEnabled) && !showInactiveAction ? (
+        <div className="mt-3 flex w-full max-w-[320px] flex-col items-center gap-2">
+          {phoneRefreshAvailable ? startAction : (
+            <p className={`text-center text-xs leading-relaxed ${activeSession?.refresh_status === "failed" ? "text-warning" : "text-subtle"}`}>
+              {activeSession?.refresh_status === "failed"
+                ? activeSession?.refresh_error || "最新预览 HAP 构建失败。"
+                : "最新修改正在生成 HAP，完成后可刷新手机模拟器。"}
+            </p>
+          )}
+          {retryPreviewError ? <p className="text-center text-xs text-warning">{retryPreviewError}</p> : null}
+        </div>
+      ) : liveEnabled && liveError ? (
         <p className="mt-3 max-w-[320px] text-center text-xs leading-relaxed text-warning">
           {liveError}
         </p>
@@ -665,6 +704,20 @@ function previewStatusMessage(status: string, kind: PreviewKind) {
       return "应用已安装，正在等待首帧…"
     default:
       return "已进入设备队列，正在等待空闲模拟器…"
+  }
+}
+
+function desktopPreviewRefreshMessage(status: string) {
+  switch (status) {
+    case "allocating":
+      return "正在申请 PC 模拟器…"
+    case "installing":
+      return "正在安装最新 HAP 到 PC 模拟器…"
+    case "loading_bundle":
+    case "launching":
+      return "安装完成，正在等待应用首帧…"
+    default:
+      return "最新 HAP 已就绪，正在刷新 PC 预览…"
   }
 }
 

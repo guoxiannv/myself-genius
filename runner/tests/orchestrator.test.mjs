@@ -1077,6 +1077,50 @@ test('forced HAP rebuild invalidates an existing ready result and invokes the SD
   assert.match(runner, /reuseExisting: action !== 'rebuild'/);
 });
 
+test('preview refresh HAP build stays isolated from the canonical run artifact', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-preview-hap-'));
+  const project = join(workspace, 'product');
+  const sdk = join(workspace, 'sdk');
+  const pool = join(workspace, 'pool');
+  mkdirSync(project);
+  mkdirSync(sdk);
+  mkdirSync(pool);
+  const realProject = realpathSync(project);
+  const canonical = join(realProject, '.expo-fast/hap');
+  const output = join(realProject, '.expo-fast/preview-refresh/revision-2');
+  mkdirSync(canonical, { recursive: true });
+  writeFileSync(join(canonical, 'build-result.json'), '{"status":"sentinel"}');
+
+  const result = runHapPoolBuild({
+    project,
+    sdk,
+    pool,
+    outputRoot: output,
+    runId: 'revision-2',
+    reuseExisting: false,
+    commandRunner(_command, args) {
+      assert.equal(args[args.indexOf('--output') + 1], output);
+      const hapPath = join(output, 'revision-2.hap');
+      mkdirSync(output, { recursive: true });
+      writeFileSync(hapPath, 'revision-2');
+      writeFileSync(join(output, 'build-result.json'), JSON.stringify({
+        status: 'success',
+        jobId: 'revision-2',
+        productRoot: realProject,
+        hapPath,
+        hapSha256: createHash('sha256').update('revision-2').digest('hex'),
+        deviceTypes: ['phone', '2in1'],
+        buildMode: 'release',
+      }));
+      return { status: 0, stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(result.status, 'ready');
+  assert.ok(result.hapPath.startsWith(output));
+  assert.equal(readFileSync(join(canonical, 'build-result.json'), 'utf8'), '{"status":"sentinel"}');
+});
+
 test('runner records a bounded HAP failure when the SDK pool command cannot publish diagnostics', () => {
   const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-hap-failure-'));
   const project = join(workspace, 'product');

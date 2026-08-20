@@ -231,6 +231,110 @@ class EffectiveCaptureStatusTests(unittest.TestCase):
         self.assertFalse(accepted)
         starter.assert_not_called()
 
+    def test_phone_preview_exposes_refresh_only_after_latest_hap_is_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            hap_root = workspace / ".expo-fast" / "hap"
+            hap_root.mkdir(parents=True)
+            hap_path = hap_root / "latest.hap"
+            hap_path.write_bytes(b"latest-hap")
+            digest = remote_ui_app.hashlib.sha256(b"latest-hap").hexdigest()
+            (hap_root / "build-result.json").write_text(json.dumps({
+                "status": "success",
+                "hapPath": str(hap_path),
+                "hapSha256": digest,
+            }), encoding="utf-8")
+            record = remote_ui_app.RunRecord(
+                run_id="u" * 32,
+                session_name="phone-refresh-state",
+                prompt="test",
+                workspace=str(workspace),
+                variant="expo-fast",
+                created_at=remote_ui_app.to_iso(),
+                updated_at=remote_ui_app.to_iso(),
+                runtime="expo",
+                latest_adjustment_at="2026-08-20T03:00:00+00:00",
+                preview_source_adjustment_at="2026-08-20T02:00:00+00:00",
+                preview_refresh_status="building",
+                preview_sessions={"phone": {
+                    "requested": True,
+                    "status": "ready",
+                    "artifact_digest": "old-digest",
+                    "live_available": True,
+                }},
+            )
+
+            building = remote_ui_app.preview_sessions_api_payload(record)["phone"]
+            self.assertTrue(building["outdated"])
+            self.assertFalse(building["refresh_available"])
+            self.assertEqual(building["refresh_status"], "building")
+
+            record.preview_source_adjustment_at = record.latest_adjustment_at
+            record.preview_refresh_status = "ready"
+            ready = remote_ui_app.preview_sessions_api_payload(record)["phone"]
+            self.assertTrue(ready["outdated"])
+            self.assertTrue(ready["refresh_available"])
+
+    def test_phone_preview_does_not_reinstall_stale_hap_during_refresh(self) -> None:
+        record = remote_ui_app.RunRecord(
+            run_id="w" * 32,
+            session_name="phone-refresh-block",
+            prompt="test",
+            workspace="/tmp/project",
+            variant="expo-fast",
+            created_at=remote_ui_app.to_iso(),
+            updated_at=remote_ui_app.to_iso(),
+            runtime="expo",
+            latest_adjustment_at="2026-08-20T03:00:00+00:00",
+            preview_source_adjustment_at="",
+        )
+
+        with self.assertRaisesRegex(remote_ui_app.LivePreviewError, "正在构建"):
+            remote_ui_app.start_phone_preview(record)
+
+    def test_preview_hap_promotion_is_atomic_and_removes_only_old_refresh_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            output = workspace / ".expo-fast" / "preview-refresh" / "revision-3"
+            output.mkdir(parents=True)
+            source_hap = output / "fresh.hap"
+            source_hap.write_bytes(b"fresh-preview")
+            canonical = workspace / ".expo-fast" / "hap"
+            canonical.mkdir(parents=True)
+            old_refresh = canonical / "preview-old.hap"
+            old_refresh.write_bytes(b"old-preview")
+            initial_hap = canonical / "initial.hap"
+            initial_hap.write_bytes(b"initial")
+            adjustment_at = "2026-08-20T03:00:00+00:00"
+            record = remote_ui_app.RunRecord(
+                run_id="p" * 32,
+                session_name="preview-promotion",
+                prompt="test",
+                workspace=str(workspace),
+                variant="expo-fast",
+                created_at=remote_ui_app.to_iso(),
+                updated_at=remote_ui_app.to_iso(),
+                runtime="expo",
+                latest_adjustment_at=adjustment_at,
+            )
+
+            hap_path, digest = remote_ui_app.promote_preview_hap(record, output, {
+                "status": "success",
+                "hapPath": str(source_hap),
+                "hapSha256": remote_ui_app.hashlib.sha256(b"fresh-preview").hexdigest(),
+                "deviceTypes": ["phone", "2in1"],
+                "buildMode": "release",
+            })
+
+            self.assertTrue(hap_path.is_file())
+            self.assertEqual(hap_path.read_bytes(), b"fresh-preview")
+            self.assertEqual(digest, remote_ui_app.hashlib.sha256(b"fresh-preview").hexdigest())
+            self.assertFalse(old_refresh.exists())
+            self.assertTrue(initial_hap.exists())
+            result = json.loads((canonical / "build-result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["previewSourceAdjustmentAt"], adjustment_at)
+            self.assertEqual(result["hapPath"], str(hap_path))
+
     def test_viewer_state_releases_hidden_idle_and_long_sessions(self) -> None:
         run_id = "v" * 32
         kind = "desktop"

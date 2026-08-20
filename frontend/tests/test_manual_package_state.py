@@ -13,6 +13,35 @@ SPEC.loader.exec_module(remote_ui_app)
 
 
 class ManualPackageStateTests(unittest.TestCase):
+    def test_completed_follow_up_with_legacy_acceptance_timestamp_is_refreshable(self) -> None:
+        record = remote_ui_app.RunRecord(
+            run_id="r" * 32,
+            session_name="preview-refresh",
+            prompt="test",
+            workspace="/tmp/project",
+            variant="expo-fast",
+            created_at="2026-08-20T02:00:00+00:00",
+            updated_at="2026-08-20T02:00:00+00:00",
+            runtime="expo",
+            latest_adjustment_at="2026-08-20T02:39:34.690588+00:00",
+        )
+        follow_up = {
+            "status": "idle",
+            "queue_length": 0,
+            "active_command": None,
+            "queue": [],
+            "history": [{
+                "type": "message",
+                "status": "completed",
+                "created_at": "2026-08-20T02:39:34.686Z",
+            }],
+        }
+
+        ready, error = remote_ui_app.follow_up_ready_for_preview_refresh(record, follow_up)
+
+        self.assertTrue(ready)
+        self.assertEqual(error, "")
+
     def test_adjustment_newer_than_manifest_marks_package_outdated(self) -> None:
         manifest = {"status": "ready", "created_at": "2026-07-27T10:00:00+00:00"}
         follow_up = {

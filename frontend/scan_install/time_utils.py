@@ -15,6 +15,9 @@ def parse_iso(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value)
+        # Python 3.9 does not accept the RFC 3339 ``Z`` suffix emitted by the
+        # Runner's Node.js controller; normalize it before parsing.
+        normalized = f"{value[:-1]}+00:00" if value.endswith(("Z", "z")) else value
+        return datetime.fromisoformat(normalized)
     except ValueError:
         return None

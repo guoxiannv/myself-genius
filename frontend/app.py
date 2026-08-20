@@ -470,6 +470,7 @@ def stop_existing_workspace_runs(workspace: Path) -> None:
             or record.capture_status in {"waiting_hap", "running"}
             or record.distribution_status in {"waiting_hap", "packaging"}
             or process_alive(record.process_pid)
+            or process_alive(record.preview_refresh_process_pid)
             or process_alive(record.capture_process_pid)
             or process_alive(record.distribution_process_pid)
         )
@@ -497,6 +498,15 @@ def stop_existing_workspace_runs(workspace: Path) -> None:
             record.process_pid = None
             if record.status in {"queued", "running"}:
                 record.status = "failed"
+
+        if record.preview_refresh_process_pid and process_alive(record.preview_refresh_process_pid):
+            touched = True
+            if not stop_process_group_or_pid(record.preview_refresh_process_pid):
+                failures.append(f"preview-refresh pid={record.preview_refresh_process_pid}")
+            record.preview_refresh_process_pid = None
+            if record.preview_refresh_status in {"queued", "building"}:
+                record.preview_refresh_status = "failed"
+                record.preview_refresh_error = "预览 HAP 后台构建已停止。"
 
         if record.distribution_process_pid and process_alive(record.distribution_process_pid):
             touched = True
@@ -728,6 +738,14 @@ class RunRecord:
     # Remote UI 成功提交的最近一次调整时间。即使控制器暂时不可用或服务重启，
     # 也能立即判定已有二维码过期，避免把首版本误显示为最新版本。
     latest_adjustment_at: str = ""
+    # 当前正式 unsigned HAP 对应的最近一次调整。续跑后的 HAP 在独立临时目录
+    # 构建，只有目标 revision 仍然最新时才会提升到 .expo-fast/hap。
+    preview_source_adjustment_at: str = ""
+    preview_refresh_target_at: str = ""
+    preview_refresh_status: str = "idle"
+    preview_refresh_process_pid: int | None = None
+    preview_refresh_command: list[str] = field(default_factory=list)
+    preview_refresh_error: str = ""
     # 最近一次签名任务启动时对应的调整版本。签名期间若又提交调整，
     # 即使新 manifest 完成时间更晚，也不能把该包误判为包含了新调整。
     package_source_adjustment_at: str = ""
@@ -848,7 +866,22 @@ def preview_sessions_payload(record: RunRecord) -> dict[str, dict[str, Any]]:
 
 def preview_sessions_api_payload(record: RunRecord) -> dict[str, dict[str, Any]]:
     sessions = preview_sessions_payload(record)
+    source_outdated = expo_preview_source_outdated(record)
+    hap_result = load_expo_hap_result(Path(record.workspace)) if record.runtime == "expo" else None
+    current_digest = (
+        str((hap_result or {}).get("hapSha256") or "")
+        if record.runtime == "expo" and resolve_expo_hap_artifact(Path(record.workspace), hap_result)
+        else ""
+    )
     for kind, session in sessions.items():
+        installed_digest = str(session.get("artifact_digest") or "")
+        installed_outdated = bool(installed_digest and current_digest and installed_digest != current_digest)
+        session["outdated"] = bool(source_outdated or installed_outdated)
+        session["refresh_available"] = bool(
+            kind == "phone" and installed_outdated and not source_outdated
+        )
+        session["refresh_status"] = str(record.preview_refresh_status or "idle")
+        session["refresh_error"] = str(record.preview_refresh_error or "")
         has_screenshot = bool(session.get("screenshot_path"))
         session["screenshot_url"] = (
             f"/api/runs/{record.run_id}/media?preview={kind}" if has_screenshot else ""
@@ -1357,6 +1390,10 @@ def start_phone_preview(record: RunRecord, *, automatic: bool = False) -> tuple[
     current = preview_sessions_payload(record)["phone"]
     if current.get("status") in {"queued", "allocating", "installing", "launching"}:
         return record, False
+    if record.runtime == "expo" and expo_preview_source_outdated(record):
+        if automatic:
+            return record, False
+        raise LivePreviewError("最新修改的 HAP 正在构建，请完成后再刷新手机预览。")
     hap_path = preview_hap_artifact(record)
     if not hap_path:
         if automatic:
@@ -1458,6 +1495,10 @@ def run_desktop_preview(record_id: str) -> None:
 
 def start_desktop_preview(record: RunRecord, *, automatic: bool = False) -> tuple[RunRecord, bool]:
     current = preview_sessions_payload(record)["desktop"]
+    if record.runtime == "expo" and expo_preview_source_outdated(record):
+        if automatic:
+            return record, False
+        raise LivePreviewError("最新修改的 HAP 正在构建，请完成后再刷新 PC 预览。")
     current_status = str(current.get("status") or "").strip().lower()
     if current_status in {"queued", "allocating", "installing", "loading_bundle", "launching"}:
         # A daemon preview worker can disappear during a backend restart or an
@@ -2410,10 +2451,20 @@ def persist_latest_adjustment(
     latest = load_run(record.run_id) or record
     if replace_from_state:
         latest.latest_adjustment_at = state_text
+        if latest.latest_adjustment_at == latest.preview_source_adjustment_at:
+            latest.preview_refresh_status = "ready" if state_text else "idle"
+            latest.preview_refresh_target_at = state_text
+            latest.preview_refresh_error = ""
+        elif latest.latest_adjustment_at:
+            latest.preview_refresh_status = "queued"
+            latest.preview_refresh_target_at = latest.latest_adjustment_at
         return save_run(latest)
     previous_at = parse_iso(latest.latest_adjustment_at)
     if candidate_at and (not previous_at or candidate_at > previous_at):
         latest.latest_adjustment_at = candidate_text
+        latest.preview_refresh_status = "queued"
+        latest.preview_refresh_target_at = candidate_text
+        latest.preview_refresh_error = ""
         latest = save_run(latest)
     return latest
 
@@ -2435,6 +2486,9 @@ HPACK_PACKAGE_LOCK = threading.Lock()
 HPACK_PACKAGE_IN_FLIGHT: set[str] = set()
 EXPO_RUN_OPERATION_LOCKS_GUARD = threading.Lock()
 EXPO_RUN_OPERATION_LOCKS: dict[str, threading.RLock] = {}
+EXPO_PREVIEW_REFRESH_LOCK = threading.Lock()
+EXPO_PREVIEW_REFRESH_IN_FLIGHT: set[str] = set()
+EXPO_PREVIEW_REFRESH_MONITORS_IN_FLIGHT: set[str] = set()
 
 
 def expo_run_operation_lock(run_id: str) -> threading.RLock:
@@ -2445,6 +2499,309 @@ def expo_run_operation_lock(run_id: str) -> threading.RLock:
 
 def expo_runtime_operation_in_flight(record: RunRecord) -> bool:
     return record.status == "running" or process_alive(record.process_pid)
+
+
+def expo_preview_source_outdated(record: RunRecord) -> bool:
+    return bool(
+        record.runtime == "expo"
+        and record.latest_adjustment_at
+        and record.latest_adjustment_at != record.preview_source_adjustment_at
+    )
+
+
+def expo_preview_refresh_in_flight(record: RunRecord) -> bool:
+    return bool(
+        record.run_id in EXPO_PREVIEW_REFRESH_IN_FLIGHT
+        or record.run_id in EXPO_PREVIEW_REFRESH_MONITORS_IN_FLIGHT
+        or process_alive(record.preview_refresh_process_pid)
+    )
+
+
+def follow_up_message_for_adjustment(
+    follow_up: dict[str, Any],
+    adjustment_at: str,
+) -> dict[str, Any] | None:
+    target_at = parse_iso(adjustment_at)
+    if not target_at:
+        return None
+    commands: list[dict[str, Any]] = []
+    active = follow_up.get("active_command")
+    if isinstance(active, dict):
+        commands.append(active)
+    for key in ("queue", "history"):
+        values = follow_up.get(key)
+        if isinstance(values, list):
+            commands.extend(value for value in values if isinstance(value, dict))
+    message_commands: list[tuple[datetime, dict[str, Any]]] = []
+    for command in commands:
+        if command.get("type") != "message" or command.get("interrupted_before_assistant_activity"):
+            continue
+        command_at = parse_iso(str(command.get("created_at") or ""))
+        if not command_at:
+            continue
+        if command_at == target_at:
+            return command
+        message_commands.append((command_at, command))
+    # Older frontend builds persisted their own acceptance time when the
+    # controller response had not yet mirrored the queued command. It differs
+    # from command.created_at by only a few milliseconds; accept that legacy
+    # record without weakening latest-revision selection.
+    if message_commands:
+        newest_at, newest_command = max(message_commands, key=lambda item: item[0])
+        if abs((newest_at - target_at).total_seconds()) <= 5:
+            return newest_command
+    return None
+
+
+def follow_up_ready_for_preview_refresh(
+    record: RunRecord,
+    follow_up: dict[str, Any],
+) -> tuple[bool, str]:
+    if not expo_preview_source_outdated(record):
+        return False, ""
+    if str(follow_up.get("status") or "").strip().lower() != "idle":
+        return False, ""
+    if follow_up.get("active_command") or int(follow_up.get("queue_length") or 0) > 0:
+        return False, ""
+    command = follow_up_message_for_adjustment(follow_up, record.latest_adjustment_at)
+    if not command:
+        return False, ""
+    status = str(command.get("status") or "").strip().lower()
+    if status == "completed":
+        return True, ""
+    if status in {"failed", "interrupted", "cancelled", "canceled"}:
+        return False, str(command.get("error") or f"最近一次续跑状态为 {status}，未生成新预览。")
+    return False, ""
+
+
+def promote_preview_hap(
+    record: RunRecord,
+    output_root: Path,
+    build_result: dict[str, Any],
+) -> tuple[Path, str]:
+    if str(build_result.get("status") or "").strip().lower() != "success":
+        error = build_result.get("error")
+        if isinstance(error, dict):
+            error = error.get("message")
+        raise RuntimeError(str(error or "后台 HAP 构建未发布成功产物。"))
+    raw_hap = Path(str(build_result.get("hapPath") or "")).expanduser()
+    if not raw_hap.is_file() or raw_hap.is_symlink():
+        raise RuntimeError("后台 HAP 构建产物缺失或无效。")
+    source_hap = raw_hap.resolve()
+    try:
+        source_hap.relative_to(output_root.resolve())
+    except ValueError as exc:
+        raise RuntimeError("后台 HAP 构建产物超出隔离输出目录。") from exc
+    digest = hashlib.sha256(source_hap.read_bytes()).hexdigest()
+    expected_digest = str(build_result.get("hapSha256") or "")
+    if expected_digest and expected_digest != digest:
+        raise RuntimeError("后台 HAP 构建产物摘要与结果元数据不一致。")
+
+    canonical_root = Path(record.workspace) / ".expo-fast" / "hap"
+    canonical_root.mkdir(parents=True, exist_ok=True)
+    target_name = f"preview-{hashlib.sha256(record.latest_adjustment_at.encode()).hexdigest()[:12]}.hap"
+    target_hap = canonical_root / target_name
+    temporary_hap = canonical_root / f".{target_name}.{uuid4().hex}.tmp"
+    try:
+        shutil.copy2(source_hap, temporary_hap)
+        temporary_hap.replace(target_hap)
+    finally:
+        temporary_hap.unlink(missing_ok=True)
+
+    published = {
+        **build_result,
+        "status": "success",
+        "hapPath": str(target_hap.resolve()),
+        "hapSha256": digest,
+        "productRoot": str(Path(record.workspace).resolve()),
+        "resultPath": str(expo_hap_result_path(Path(record.workspace))),
+        "logPath": str(build_result.get("logPath") or ""),
+        "previewSourceAdjustmentAt": record.latest_adjustment_at,
+    }
+    write_json(expo_hap_result_path(Path(record.workspace)), published)
+    for previous_hap in canonical_root.glob("preview-*.hap"):
+        if previous_hap != target_hap:
+            previous_hap.unlink(missing_ok=True)
+    return target_hap.resolve(), digest
+
+
+def run_expo_preview_hap_refresh(record_id: str, target_at: str, output_root: Path) -> None:
+    should_reschedule = False
+    log_path = LOG_DIR / f"{record_id}.preview-hap.log"
+    try:
+        record = load_run(record_id)
+        if not record or EXPO_FAST_ROOT is None:
+            return
+        refresher = EXPO_FAST_ROOT / "refresh-preview-hap.sh"
+        if not refresher.is_file():
+            raise RuntimeError(f"预览 HAP 构建器不存在: {refresher}")
+        command = [
+            str(refresher),
+            "--project", record.workspace,
+            "--output", str(output_root),
+            "--run-id", f"{record.run_id}-{hashlib.sha256(target_at.encode()).hexdigest()[:12]}",
+        ]
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("ab") as log_stream:
+            log_stream.write(f"$ {' '.join(command)}\n".encode("utf-8", errors="ignore"))
+            log_stream.flush()
+            process = subprocess.Popen(
+                command,
+                cwd=str(EXPO_FAST_ROOT),
+                stdout=log_stream,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                env=build_expo_fast_env(record),
+            )
+            with expo_run_operation_lock(record_id):
+                latest = load_run(record_id)
+                if not latest:
+                    stop_process_group_or_pid(process.pid)
+                    return
+                latest.preview_refresh_process_pid = process.pid
+                latest.preview_refresh_command = command
+                save_run(latest)
+            return_code = process.wait()
+
+        build_result = read_json(output_root / "build-result.json") or {}
+        pool_log = output_root / "build.log"
+        if pool_log.is_file():
+            persistent_pool_log = LOG_DIR / f"{record_id}.preview-hap-build.log"
+            shutil.copy2(pool_log, persistent_pool_log)
+            build_result["logPath"] = str(persistent_pool_log)
+        with expo_run_operation_lock(record_id):
+            latest = load_run(record_id)
+            if not latest:
+                return
+            latest.preview_refresh_process_pid = None
+            if latest.latest_adjustment_at != target_at:
+                latest.preview_refresh_status = "queued"
+                latest.preview_refresh_target_at = latest.latest_adjustment_at
+                latest.preview_refresh_error = ""
+                save_run(latest)
+                should_reschedule = True
+                return
+            if return_code != 0:
+                error = build_result.get("error")
+                if isinstance(error, dict):
+                    error = error.get("message")
+                raise RuntimeError(str(error or f"后台 HAP 构建退出码为 {return_code}，日志: {log_path}"))
+            promote_preview_hap(latest, output_root, build_result)
+            latest = load_run(record_id) or latest
+            if latest.latest_adjustment_at != target_at:
+                latest.preview_refresh_status = "queued"
+                latest.preview_refresh_target_at = latest.latest_adjustment_at
+                should_reschedule = True
+            else:
+                latest.preview_source_adjustment_at = target_at
+                latest.preview_refresh_target_at = target_at
+                latest.preview_refresh_status = "ready"
+                latest.preview_refresh_error = ""
+            latest.preview_refresh_process_pid = None
+            latest = save_run(latest)
+        if not should_reschedule:
+            maybe_refresh_desktop_preview(latest, "completed")
+    except Exception as exc:
+        with expo_run_operation_lock(record_id):
+            latest = load_run(record_id)
+            if latest:
+                latest.preview_refresh_process_pid = None
+                if latest.latest_adjustment_at != target_at:
+                    latest.preview_refresh_status = "queued"
+                    latest.preview_refresh_target_at = latest.latest_adjustment_at
+                    latest.preview_refresh_error = ""
+                    should_reschedule = True
+                else:
+                    latest.preview_refresh_status = "failed"
+                    latest.preview_refresh_error = str(exc)[:1000]
+                save_run(latest)
+    finally:
+        shutil.rmtree(output_root, ignore_errors=True)
+        with EXPO_PREVIEW_REFRESH_LOCK:
+            EXPO_PREVIEW_REFRESH_IN_FLIGHT.discard(record_id)
+        if should_reschedule:
+            latest = load_run(record_id)
+            if latest:
+                start_expo_preview_refresh_monitor(latest)
+
+
+def start_expo_preview_hap_refresh(
+    record: RunRecord,
+    follow_up: dict[str, Any] | None = None,
+) -> bool:
+    with expo_run_operation_lock(record.run_id):
+        latest = load_run(record.run_id) or record
+        current_follow_up = follow_up or load_follow_up_status(
+            latest,
+            load_expo_fast_state(Path(latest.workspace)),
+        )
+        ready, terminal_error = follow_up_ready_for_preview_refresh(latest, current_follow_up)
+        if terminal_error:
+            latest.preview_refresh_status = "failed"
+            latest.preview_refresh_error = terminal_error[:1000]
+            save_run(latest)
+            return False
+        if not ready:
+            return False
+        with EXPO_PREVIEW_REFRESH_LOCK:
+            if latest.run_id in EXPO_PREVIEW_REFRESH_IN_FLIGHT:
+                return False
+            if process_alive(latest.preview_refresh_process_pid):
+                return False
+            EXPO_PREVIEW_REFRESH_IN_FLIGHT.add(latest.run_id)
+        target_at = latest.latest_adjustment_at
+        suffix = f"{hashlib.sha256(target_at.encode()).hexdigest()[:12]}-{uuid4().hex[:8]}"
+        output_root = Path(latest.workspace) / ".expo-fast" / "preview-refresh" / suffix
+        latest.preview_refresh_target_at = target_at
+        latest.preview_refresh_status = "building"
+        latest.preview_refresh_process_pid = None
+        latest.preview_refresh_error = ""
+        latest = save_run(latest)
+    threading.Thread(
+        target=run_expo_preview_hap_refresh,
+        args=(latest.run_id, target_at, output_root),
+        daemon=True,
+    ).start()
+    return True
+
+
+def monitor_expo_preview_refresh(record_id: str) -> None:
+    try:
+        while True:
+            latest = load_run(record_id)
+            if not latest or latest.runtime != "expo" or not expo_preview_source_outdated(latest):
+                return
+            follow_up = load_follow_up_status(
+                latest,
+                load_expo_fast_state(Path(latest.workspace)),
+            )
+            ready, terminal_error = follow_up_ready_for_preview_refresh(latest, follow_up)
+            if ready:
+                start_expo_preview_hap_refresh(latest, follow_up)
+                return
+            if terminal_error:
+                latest.preview_refresh_status = "failed"
+                latest.preview_refresh_error = terminal_error[:1000]
+                save_run(latest)
+                return
+            time.sleep(1)
+    finally:
+        with EXPO_PREVIEW_REFRESH_LOCK:
+            EXPO_PREVIEW_REFRESH_MONITORS_IN_FLIGHT.discard(record_id)
+
+
+def start_expo_preview_refresh_monitor(record: RunRecord) -> bool:
+    if record.runtime != "expo" or not expo_preview_source_outdated(record):
+        return False
+    with EXPO_PREVIEW_REFRESH_LOCK:
+        if (
+            record.run_id in EXPO_PREVIEW_REFRESH_MONITORS_IN_FLIGHT
+            or record.run_id in EXPO_PREVIEW_REFRESH_IN_FLIGHT
+        ):
+            return False
+        EXPO_PREVIEW_REFRESH_MONITORS_IN_FLIGHT.add(record.run_id)
+    threading.Thread(target=monitor_expo_preview_refresh, args=(record.run_id,), daemon=True).start()
+    return True
 
 
 def expo_package_operation_ready(
@@ -2472,6 +2829,8 @@ def start_hpack_packaging(
     with expo_run_operation_lock(record.run_id):
         latest = load_run(record.run_id) or record
         if latest.runtime == "expo":
+            if expo_preview_source_outdated(latest):
+                return False
             state = load_expo_fast_state(Path(latest.workspace))
             follow_up = load_follow_up_status(latest, state)
             if not expo_package_operation_ready(
@@ -2893,6 +3252,9 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
     workspace = Path(record.workspace)
     expo_state = load_expo_fast_state(workspace)
     run_status = expo_fast_run_status(record, expo_state)
+    follow_up_private = load_follow_up_status(record, expo_state)
+    if run_status == "completed" and expo_preview_source_outdated(record):
+        start_expo_preview_refresh_monitor(record)
     hap_result = load_expo_hap_result(workspace)
     hap_path = resolve_expo_hap_artifact(workspace, hap_result)
     package_status = expo_hap_status(expo_state, hap_result, run_status, bool(hap_path))
@@ -2924,12 +3286,17 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
     detail = str((expo_state or {}).get("detail") or "").strip().lower()
     detail_label = str((expo_state or {}).get("detailLabel") or "").strip()
     trace_groups = load_expo_claude_trace_groups(workspace, expo_state)
-    follow_up_private = load_follow_up_status(record, expo_state)
     follow_up_trace = load_follow_up_trace(follow_up_private)
     follow_up = redact_follow_up_transcript_path(follow_up_private)
     hpack_manifest = load_hpack_manifest(record.run_id)
     record = load_run(record.run_id) or record
-    if run_status == "completed" and package_status == "ready" and hap_path and not hpack_manifest:
+    if (
+        run_status == "completed"
+        and package_status == "ready"
+        and hap_path
+        and not hpack_manifest
+        and not expo_preview_source_outdated(record)
+    ):
         start_hpack_packaging(record)
         record = load_run(record.run_id) or record
     manifest_ready = bool(hpack_manifest and hpack_manifest.get("status") == "ready")
@@ -2953,6 +3320,15 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
         record.run_id in HPACK_PACKAGE_IN_FLIGHT or process_alive(record.distribution_process_pid)
     )
     runtime_rebuild_in_flight = expo_runtime_operation_in_flight(record)
+    preview_source_outdated = expo_preview_source_outdated(record)
+    preview_refresh_in_flight = expo_preview_refresh_in_flight(record)
+    preview_refresh_pending = bool(
+        preview_source_outdated
+        and (
+            preview_refresh_in_flight
+            or record.preview_refresh_status in {"queued", "building"}
+        )
+    )
     package_operation_ready = expo_package_operation_ready(record, run_status, follow_up_private)
     install_ready = manifest_ready and not package_outdated and not package_in_flight
     latest_unsigned_ready = bool(hap_path and (not manifest_ready or newer_hap))
@@ -2960,7 +3336,7 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
         distribution_status = "disabled"
     elif package_in_flight:
         distribution_status = "packaging"
-    elif runtime_rebuild_in_flight:
+    elif runtime_rebuild_in_flight or preview_refresh_pending:
         distribution_status = "building"
     elif install_ready:
         distribution_status = "ready"
@@ -3118,10 +3494,14 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
                 and package_operation_ready
                 and not package_in_flight
                 and not runtime_rebuild_in_flight
+                and not preview_refresh_pending
                 and not install_ready
             ),
             "package_current": install_ready,
             "package_outdated": package_outdated,
+            "preview_source_outdated": preview_source_outdated,
+            "preview_refresh_status": record.preview_refresh_status,
+            "preview_refresh_error": record.preview_refresh_error,
             "media_ready": bool(media_path),
             "media_path": f"/api/runs/{record.run_id}/media" if media_path else "",
             "media_source_path": str(media_path) if media_path else "",
@@ -4660,18 +5040,29 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
                         status=HTTPStatus.CONFLICT,
                     )
                     return
-                latest.status = "running"
-                latest.notes = "正在为续跑后的最新源码重建 unsigned HAP。"
-                latest.process_pid = None
-                latest = save_run(latest)
-                threading.Thread(
-                    target=run_expo_fast_in_background,
-                    args=(latest,),
-                    kwargs={"action": "rebuild", "launch": False, "hap": True},
-                    daemon=True,
-                ).start()
+                follow_up = load_follow_up_status(
+                    latest,
+                    load_expo_fast_state(Path(latest.workspace)),
+                )
+                accepted = start_expo_preview_hap_refresh(latest, follow_up)
+                if not accepted:
+                    start_expo_preview_refresh_monitor(load_run(run_id) or latest)
                 self.send_json(
-                    {"ok": True, "accepted": True, "status": "building_hap"},
+                    {"ok": True, "accepted": accepted, "status": "building_hap"},
+                    status=HTTPStatus.ACCEPTED,
+                )
+                return
+            if artifacts.get("preview_source_outdated"):
+                latest = load_run(run_id) or record
+                follow_up = load_follow_up_status(
+                    latest,
+                    load_expo_fast_state(Path(latest.workspace)),
+                )
+                accepted = start_expo_preview_hap_refresh(latest, follow_up)
+                if not accepted:
+                    start_expo_preview_refresh_monitor(load_run(run_id) or latest)
+                self.send_json(
+                    {"ok": True, "accepted": accepted, "status": "building_hap"},
                     status=HTTPStatus.ACCEPTED,
                 )
                 return
@@ -4817,7 +5208,8 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
                     "text": text,
                     "clientMessageId": str(body.get("clientMessageId") or ""),
                 })
-                persist_latest_adjustment(latest, response)
+                latest = persist_latest_adjustment(latest, response)
+                start_expo_preview_refresh_monitor(latest)
                 self.send_json(redact_follow_up_response(response))
             except FollowUpControlError as exc:
                 self.send_follow_up_error(exc)

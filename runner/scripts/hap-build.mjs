@@ -107,9 +107,11 @@ function writeSyntheticFailure(resultPath, { jobId, project, error, durationMs =
   return metadata;
 }
 
-export function readExistingHapResult(projectRoot) {
+export function readExistingHapResult(projectRoot, requestedOutputRoot = null) {
   const project = resolve(projectRoot);
-  const outputRoot = resolve(project, HAP_OUTPUT_RELATIVE_PATH);
+  const outputRoot = requestedOutputRoot
+    ? resolve(requestedOutputRoot)
+    : resolve(project, HAP_OUTPUT_RELATIVE_PATH);
   const resultPath = join(outputRoot, HAP_RESULT_FILE);
   if (!existsSync(resultPath)) return null;
   try {
@@ -130,18 +132,21 @@ export function runHapPoolBuild({
   waitSeconds = 3600,
   buildMode = 'release',
   reuseExisting = true,
+  outputRoot: requestedOutputRoot = null,
   commandRunner = spawnSync,
 }) {
   const startedAt = Date.now();
   const project = realpathSync(resolve(projectRoot));
   const sdk = realpathSync(resolve(sdkRoot));
   const pool = resolve(poolRoot);
-  const outputRoot = resolve(project, HAP_OUTPUT_RELATIVE_PATH);
+  const outputRoot = requestedOutputRoot
+    ? resolve(requestedOutputRoot)
+    : resolve(project, HAP_OUTPUT_RELATIVE_PATH);
   const resultPath = join(outputRoot, HAP_RESULT_FILE);
   mkdirSync(outputRoot, { recursive: true });
 
   if (reuseExisting) {
-    const existing = readExistingHapResult(project);
+    const existing = readExistingHapResult(project, outputRoot);
     if (existing?.status === 'ready') return { ...existing, reused: true };
   } else {
     // A forced rebuild must publish fresh metadata. Otherwise a pool command that

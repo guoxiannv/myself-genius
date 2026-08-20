@@ -396,6 +396,42 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         self.assertEqual(saved.expo_package_status, "ready")
         self.assertIn("unsigned HAP 已生成", saved.notes)
 
+    def test_icon_generation_state_has_specific_waiting_message(self) -> None:
+        workspace = remote_ui_app.EXPO_FAST_APP_ROOT / "icon-generation-app"
+        state_dir = workspace / ".expo-fast"
+        state_dir.mkdir(parents=True)
+        (state_dir / "state.json").write_text(
+            json.dumps(
+                {
+                    "state": "generating_code",
+                    "label": "生成代码",
+                    "status": "running",
+                    "detail": "app_icon_generation",
+                    "detailLabel": "生成应用图标",
+                }
+            ),
+            encoding="utf-8",
+        )
+        now = remote_ui_app.to_iso()
+        record = remote_ui_app.RunRecord(
+            run_id="e6f6a000000000000000000000000008",
+            session_name="expo-fast-icon-generation",
+            prompt="图标状态测试",
+            workspace=str(workspace),
+            variant="expo-fast",
+            created_at=now,
+            updated_at=now,
+            runtime="expo",
+            status="running",
+        )
+        remote_ui_app.save_run(record)
+
+        payload = remote_ui_app.build_progress_payload(record)
+
+        self.assertEqual(payload["status"], "running")
+        self.assertEqual(payload["stage"], "app_icon_generation")
+        self.assertEqual(payload["ui"]["waiting_message"], "正在根据应用 Brief 生成图标…")
+
     def test_hap_keeps_package_flow_available_when_preview_media_is_missing(self) -> None:
         workspace = remote_ui_app.EXPO_FAST_APP_ROOT / "hap-without-preview"
         state_dir = workspace / ".expo-fast"

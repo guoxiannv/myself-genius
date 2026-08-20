@@ -167,9 +167,12 @@ test('independent icon task waits for brief and records ready or fallback eviden
 
 test('Harmony Go export waits for the independent icon declaration without serializing model work', () => {
   const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
+  const iconState = runner.indexOf("setRunState('generating_code', 'app_icon_generation'");
   const wait = runner.indexOf('metrics.appIcon = await appIconTask');
   const exportGate = runner.indexOf("const catalogRoot = join(project, 'dist/harmony-go')");
   assert.ok(wait > runner.indexOf('await claudeTurn('));
+  assert.ok(iconState > runner.indexOf('await claudeTurn('));
+  assert.ok(iconState < wait);
   assert.ok(exportGate > wait);
 });
 
@@ -1096,6 +1099,7 @@ test('external controller atomically records live generation, repair, and comple
   const project = mkdtempSync(join(tmpdir(), 'expo-fast-state-'));
   const runId = 'run-state-test';
   writeRunState(project, 'generating_code', { runId, reset: true, detail: 'model_generation', context: { model: 'k3-256k' } });
+  writeRunState(project, 'generating_code', { runId, detail: 'app_icon_generation', context: { appIcon: { model: 'k3-256k' } } });
   writeRunState(project, 'repairing', { runId, detail: 'model_repair' });
   writeRunState(project, 'completed', { runId, detail: 'done', context: { result: 'passed' } });
 
@@ -1109,7 +1113,8 @@ test('external controller atomically records live generation, repair, and comple
   assert.equal(state.detailLabel, '完成');
   assert.equal(state.context.model, 'k3-256k');
   assert.equal(state.context.result, 'passed');
-  assert.deepEqual(state.history.map((entry) => entry.state), ['generating_code', 'repairing', 'completed']);
+  assert.deepEqual(state.history.map((entry) => entry.state), ['generating_code', 'generating_code', 'repairing', 'completed']);
+  assert.equal(state.history[1].detailLabel, '生成应用图标');
   assert.deepEqual(readdirSync(stateDir), ['state.json']);
 
   const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');

@@ -51,19 +51,22 @@ function buildExpoStepDefs(data: RunProgress | null | undefined): StepDef[] {
   const detailIndexes: Record<string, number> = {
     preparing: 0,
     model_generation: 1,
-    verification: 2,
-    model_repair: 2,
-    repair_verification: 2,
-    launching: 3,
+    app_icon_generation: 2,
+    verification: 3,
+    model_repair: 3,
+    repair_verification: 3,
     hap_building: 4,
-    done: 4,
+    launching: 5,
+    preview_queued: 5,
+    preview_failed: 5,
+    done: 5,
   }
   const lastKnownDetail = [...(state?.history || [])]
     .reverse()
     .map((item) => normalize(item.detail))
     .find((item) => item in detailIndexes)
   const effectiveDetail = detail in detailIndexes ? detail : lastKnownDetail || "preparing"
-  const currentIndex = stateName === "completed" ? 4 : detailIndexes[effectiveDetail] ?? 0
+  const currentIndex = stateName === "completed" ? 5 : detailIndexes[effectiveDetail] ?? 0
   const failed = stateName === "failed" || statusFailed(data?.status)
   const completed = stateName === "completed"
   const packageStatus = normalize(data?.expo?.package?.status)
@@ -71,26 +74,25 @@ function buildExpoStepDefs(data: RunProgress | null | undefined): StepDef[] {
   const definitions = [
     { id: "expo-prepare", label: "工程准备", desc: "创建独立工作目录、Prompt 与能力索引" },
     { id: "expo-generate", label: "代码生成", desc: "由 Expo Harmony Fast Runtime 生成应用" },
+    { id: "expo-icon", label: "图标生成", desc: "根据应用 Brief 生成并写入平台图标资源" },
     { id: "expo-verify", label: "验证修复", desc: "执行依赖、类型、源码与产物门禁，必要时自动修复" },
+    { id: "expo-package", label: "HAP 构建", desc: "通过 SDK 固定 slot 池构建 unsigned HAP" },
     { id: "expo-launch", label: "启动验收", desc: "在 Harmony Go 中启动并验证应用身份" },
   ]
 
   const steps: StepDef[] = definitions.map((step, index) => ({
     ...step,
-    done: completed || currentIndex > index,
-    active: !completed && !failed && currentIndex === index,
-    failed: failed && currentIndex === index,
-    weight: 20,
+    done: step.id === "expo-package"
+      ? statusDone(packageStatus) || packageStatus === "skipped"
+      : completed || currentIndex > index,
+    active: step.id === "expo-package"
+      ? statusActive(packageStatus)
+      : !completed && !failed && currentIndex === index,
+    failed: step.id === "expo-package"
+      ? statusFailed(packageStatus)
+      : failed && currentIndex === index,
+    weight: [15, 20, 10, 20, 20, 15][index],
   }))
-  steps.push({
-    id: "expo-package",
-    label: "HAP 构建",
-    desc: "通过 SDK 固定 slot 池构建 unsigned HAP",
-    done: statusDone(packageStatus) || packageStatus === "skipped",
-    active: statusActive(packageStatus),
-    failed: statusFailed(packageStatus),
-    weight: 20,
-  })
   return steps
 }
 

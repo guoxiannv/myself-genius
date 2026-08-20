@@ -714,6 +714,7 @@ async function main() {
   let implementationTrace = join(project, '.expo-fast/agent-trace.jsonl');
   let appIconTask = Promise.resolve(null);
   let appIconAbortController = null;
+  let appIconModel = '';
   if (isInitial) {
     progress('prepare cold-start template and capability index');
     run(node22, [helper, 'prepare', project, request]); setRunState('generating_code', 'preparing', stateContext, { reset: true }); writeFileSync(join(project, 'AGENTS.md'), readFileSync(join(root, 'AGENTS.md'))); writeFileSync(join(project, 'CLAUDE.md'), '@AGENTS.md\n');
@@ -725,7 +726,7 @@ async function main() {
     progress(`dependencies prepared · ${metrics.stages.seedModulesMs}ms`);
     sessionId = randomUUID(); metrics.sessionId = sessionId;
     appIconAbortController = new AbortController();
-    const appIconModel = process.env.EXPO_FAST_APP_ICON_MODEL || model;
+    appIconModel = process.env.EXPO_FAST_APP_ICON_MODEL || model;
     appIconTask = generateAppIconAfterBrief({
       project,
       request: requestText,
@@ -789,6 +790,11 @@ async function main() {
   if (isInitial) {
     // The icon task runs alongside product implementation, but Harmony Go export
     // must observe its final app.json declaration and generated PNG assets.
+    setRunState('generating_code', 'app_icon_generation', {
+      ...stateContext,
+      sessionId,
+      appIcon: { status: 'generating', model: appIconModel },
+    });
     metrics.appIcon = await appIconTask;
     metrics.stages.appIconMs = Number(metrics.appIcon?.durationMs) || 0;
   }

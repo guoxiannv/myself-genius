@@ -3394,6 +3394,7 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
     waiting_message = {
         "preparing": "正在准备 Expo 工程与能力索引…",
         "model_generation": "Expo Runtime 正在生成应用代码…",
+        "app_icon_generation": "正在根据应用 Brief 生成图标…",
         "verification": "正在验证 Expo 生成结果…",
         "model_repair": "正在修复 Expo 应用…",
         "repair_verification": "正在验证修复结果…",

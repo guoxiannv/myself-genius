@@ -12,6 +12,7 @@ import { spawn, spawnSync } from 'node:child_process';
 export const APP_ICON_ASSET_ROOT = 'assets/app-icon';
 export const APP_ICON_EVIDENCE_ROOT = '.expo-fast/app-icon';
 export const APP_ICON_SIZE = 1024;
+export const APP_SPLASH_ICON_SIZE = 144;
 
 const iconSchema = {
   type: 'object',
@@ -206,7 +207,11 @@ function commandExists(command, commandRunner = spawnSync) {
 export function rasterizeIconSvg(
   svgPath,
   pngPath,
-  { commandRunner = spawnSync, rasterizer = process.env.EXPO_FAST_ICON_RASTERIZER || '' } = {}
+  {
+    commandRunner = spawnSync,
+    rasterizer = process.env.EXPO_FAST_ICON_RASTERIZER || '',
+    size = APP_ICON_SIZE,
+  } = {}
 ) {
   const candidates = rasterizer
     ? [rasterizer]
@@ -217,11 +222,11 @@ export function rasterizeIconSvg(
   if (!selected) throw new Error('No SVG rasterizer is available (tried sips, rsvg-convert, magick)');
   let args;
   if (basename(selected) === 'sips') {
-    args = ['-s', 'format', 'png', '-z', String(APP_ICON_SIZE), String(APP_ICON_SIZE), svgPath, '--out', pngPath];
+    args = ['-s', 'format', 'png', '-z', String(size), String(size), svgPath, '--out', pngPath];
   } else if (basename(selected) === 'rsvg-convert') {
-    args = ['-w', String(APP_ICON_SIZE), '-h', String(APP_ICON_SIZE), '-o', pngPath, svgPath];
+    args = ['-w', String(size), '-h', String(size), '-o', pngPath, svgPath];
   } else {
-    args = [svgPath, '-resize', `${APP_ICON_SIZE}x${APP_ICON_SIZE}!`, pngPath];
+    args = [svgPath, '-resize', `${size}x${size}!`, pngPath];
   }
   const result = commandRunner(selected, args, {
     encoding: 'utf8',
@@ -232,8 +237,8 @@ export function rasterizeIconSvg(
     throw new Error(`SVG rasterizer ${selected} failed: ${result.stderr || result.stdout || result.status}`);
   }
   const metadata = pngMetadata(pngPath);
-  if (metadata.width !== APP_ICON_SIZE || metadata.height !== APP_ICON_SIZE) {
-    throw new Error(`Rasterized icon must be ${APP_ICON_SIZE}×${APP_ICON_SIZE}: ${pngPath}`);
+  if (metadata.width !== size || metadata.height !== size) {
+    throw new Error(`Rasterized icon must be ${size}×${size}: ${pngPath}`);
   }
   return { rasterizer: selected, ...metadata };
 }
@@ -265,15 +270,18 @@ export function installGeneratedIcon(
     background: join(assetRoot, 'background.png'),
     foreground: join(assetRoot, 'foreground.png'),
     composite: join(assetRoot, 'icon.png'),
+    splash: join(assetRoot, 'splash-icon.png'),
   };
   const renders = {
     background: rasterize(svgPaths.background, pngPaths.background),
     foreground: rasterize(svgPaths.foreground, pngPaths.foreground),
     composite: rasterize(svgPaths.composite, pngPaths.composite),
+    splash: rasterize(svgPaths.composite, pngPaths.splash, { size: APP_SPLASH_ICON_SIZE }),
   };
-  for (const path of Object.values(pngPaths)) {
+  for (const [name, path] of Object.entries(pngPaths)) {
     const metadata = pngMetadata(path);
-    if (metadata.width !== APP_ICON_SIZE || metadata.height !== APP_ICON_SIZE) {
+    const expectedSize = name === 'splash' ? APP_SPLASH_ICON_SIZE : APP_ICON_SIZE;
+    if (metadata.width !== expectedSize || metadata.height !== expectedSize) {
       throw new Error(`Generated app icon has invalid dimensions: ${path}`);
     }
   }
@@ -282,6 +290,8 @@ export function installGeneratedIcon(
   const app = JSON.parse(readFileSync(appJsonPath, 'utf8'));
   app.expo ??= {};
   app.expo.icon = `./${APP_ICON_ASSET_ROOT}/icon.png`;
+  app.expo.splash ??= {};
+  app.expo.splash.image ??= `./${APP_ICON_ASSET_ROOT}/splash-icon.png`;
   app.expo.harmony ??= {};
   app.expo.harmony.icon = {
     foregroundImage: `./${APP_ICON_ASSET_ROOT}/foreground.png`,

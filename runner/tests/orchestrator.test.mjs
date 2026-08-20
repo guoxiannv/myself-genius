@@ -29,6 +29,7 @@ import { acquirePreviewDevice, acquirePreviewDevices, configuredPreviewPools } f
 import { bundleNameFromModuleJson, DEFAULT_HARMONY_GO_BUNDLE_NAME, resolveHarmonyGoBundleName } from '../scripts/harmony-go-runtime.mjs';
 import {
   APP_ICON_SIZE,
+  APP_SPLASH_ICON_SIZE,
   composeIconSvg,
   generateAppIconAfterBrief,
   installGeneratedIcon,
@@ -43,17 +44,17 @@ const dependencyController = join(root, 'scripts/dependencies.mjs');
 const iconBackgroundSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><defs><linearGradient id="bg_gradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FF9A62"/><stop offset="1" stop-color="#F04462"/></linearGradient></defs><rect width="1024" height="1024" fill="url(#bg_gradient)"/></svg>`;
 const iconForegroundSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><circle cx="512" cy="512" r="250" fill="#FFFFFF"/><path d="M512 315V512L650 590" fill="none" stroke="#F04462" stroke-width="72" stroke-linecap="round"/></svg>`;
 
-function writeFakeIconPng(path) {
+function writeFakeIconPng(path, size = APP_ICON_SIZE) {
   const data = Buffer.alloc(33);
   Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(data, 0);
   data.writeUInt32BE(13, 8);
   data.write('IHDR', 12, 'ascii');
-  data.writeUInt32BE(APP_ICON_SIZE, 16);
-  data.writeUInt32BE(APP_ICON_SIZE, 20);
+  data.writeUInt32BE(size, 16);
+  data.writeUInt32BE(size, 20);
   data[24] = 8;
   data[25] = 6;
   writeFileSync(path, data);
-  return { rasterizer: 'test', width: APP_ICON_SIZE, height: APP_ICON_SIZE, bytes: data.length };
+  return { rasterizer: 'test', width: size, height: size, bytes: data.length };
 }
 
 test('app icon context prefers product semantics from flexible brief shapes', () => {
@@ -93,23 +94,62 @@ test('app icon SVG contract requires opaque background and safe local vector con
   );
 });
 
-test('generated icon assets declare SDK-owned Harmony layers only after all PNGs validate', () => {
+test('generated icon assets declare app, splash, and SDK-owned Harmony icons after all PNGs validate', () => {
   const project = mkdtempSync(join(tmpdir(), 'expo-fast-app-icon-install-'));
-  writeFileSync(join(project, 'app.json'), `${JSON.stringify({ expo: { name: 'Timer', slug: 'timer' } })}\n`);
+  writeFileSync(join(project, 'app.json'), `${JSON.stringify({
+    expo: {
+      name: 'Timer',
+      slug: 'timer',
+      splash: { backgroundColor: '#FFF7ED' },
+    },
+  })}\n`);
   const installed = installGeneratedIcon(project, {
     backgroundSvg: iconBackgroundSvg,
     foregroundSvg: iconForegroundSvg,
   }, {
-    rasterize(_svgPath, pngPath) { return writeFakeIconPng(pngPath); },
+    rasterize(_svgPath, pngPath, { size = APP_ICON_SIZE } = {}) {
+      return writeFakeIconPng(pngPath, size);
+    },
   });
   const app = JSON.parse(readFileSync(join(project, 'app.json'), 'utf8'));
   assert.equal(app.expo.icon, './assets/app-icon/icon.png');
+  assert.deepEqual(app.expo.splash, {
+    backgroundColor: '#FFF7ED',
+    image: './assets/app-icon/splash-icon.png',
+  });
   assert.deepEqual(app.expo.harmony.icon, {
     foregroundImage: './assets/app-icon/foreground.png',
     backgroundImage: './assets/app-icon/background.png',
   });
   assert.equal(installed.assets.background, 'assets/app-icon/background.png');
+  assert.equal(installed.assets.splash, 'assets/app-icon/splash-icon.png');
+  assert.equal(installed.renders.splash.width, APP_SPLASH_ICON_SIZE);
+  assert.equal(installed.renders.splash.height, APP_SPLASH_ICON_SIZE);
   assert.equal(existsSync(join(project, 'plugins/with-generated-app-icon.cjs')), false);
+});
+
+test('generated app icons preserve an explicitly configured splash image', () => {
+  const project = mkdtempSync(join(tmpdir(), 'expo-fast-app-icon-custom-splash-'));
+  writeFileSync(join(project, 'app.json'), `${JSON.stringify({
+    expo: {
+      name: 'Timer',
+      slug: 'timer',
+      splash: { image: './assets/custom-splash.png', backgroundColor: '#111827' },
+    },
+  })}\n`);
+  installGeneratedIcon(project, {
+    backgroundSvg: iconBackgroundSvg,
+    foregroundSvg: iconForegroundSvg,
+  }, {
+    rasterize(_svgPath, pngPath, { size = APP_ICON_SIZE } = {}) {
+      return writeFakeIconPng(pngPath, size);
+    },
+  });
+  const app = JSON.parse(readFileSync(join(project, 'app.json'), 'utf8'));
+  assert.deepEqual(app.expo.splash, {
+    image: './assets/custom-splash.png',
+    backgroundColor: '#111827',
+  });
 });
 
 test('independent icon task waits for brief and records ready or fallback evidence', async () => {

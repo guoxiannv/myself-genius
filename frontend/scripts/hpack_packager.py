@@ -150,7 +150,7 @@ def read_hap_metadata(hap_path: Path) -> dict[str, object]:
 def ensure_release_hap(metadata: dict[str, object]) -> None:
     if metadata.get("debug") is not False or metadata.get("build_mode") != "release":
         raise PackagerError(
-            "手机分发 HAP 必须使用 release 构建 "
+            "设备分发 HAP 必须使用 release 构建 "
             f"(debug={metadata.get('debug')!r}, buildMode={metadata.get('build_mode')!r})"
         )
 
@@ -161,20 +161,26 @@ def ensure_phone_hap(metadata: dict[str, object]) -> None:
         raise PackagerError(f"手机分发 HAP 必须支持 phone，实际 deviceTypes={device_types!r}")
 
 
-def normalize_workspace_for_phone_distribution(workspace: Path) -> None:
+def ensure_pc_hap(metadata: dict[str, object]) -> None:
+    device_types = metadata.get("device_types")
+    if not isinstance(device_types, list) or "2in1" not in device_types:
+        raise PackagerError(f"PC 分发 HAP 必须支持 2in1，实际 deviceTypes={device_types!r}")
+
+
+def normalize_workspace_for_device_distribution(workspace: Path) -> None:
     module_path = workspace / "entry" / "src" / "main" / "module.json5"
     if not module_path.is_file():
         raise PackagerError(f"缺少 entry/src/main/module.json5: {module_path}")
     source = read_text(module_path)
     normalized, count = re.subn(
         r'(["\']?deviceTypes["\']?\s*:\s*)\[[^\]]*\]',
-        '\\1[\n      "phone"\n    ]',
+        '\\1[\n      "phone",\n      "2in1"\n    ]',
         source,
         count=1,
         flags=re.S,
     )
     if count != 1:
-        raise PackagerError(f"无法规范手机 deviceTypes: {module_path}")
+        raise PackagerError(f"无法规范 phone/2in1 deviceTypes: {module_path}")
     if normalized != source:
         module_path.write_text(normalized, encoding="utf-8")
 
@@ -532,6 +538,7 @@ def rebuild_unsigned_hap(
     metadata = read_hap_metadata(hap_path)
     ensure_release_hap(metadata)
     ensure_phone_hap(metadata)
+    ensure_pc_hap(metadata)
     return hap_path
 
 
@@ -717,9 +724,12 @@ def write_prebuilt_install_page(
         "<style>body{margin:0;background:#0b1020;color:#fff;font-family:-apple-system,BlinkMacSystemFont,sans-serif}"
         ".card{max-width:520px;margin:12vh auto;padding:32px;border:1px solid #27324b;border-radius:24px;background:#121a2e;text-align:center}"
         "a{display:inline-block;margin-top:20px;padding:13px 24px;border-radius:999px;background:#77e0c1;color:#07120f;text-decoration:none;font-weight:700}"
-        "p{color:#aab5cb;line-height:1.7}</style></head><body><main class=\"card\">"
-        f"<h1>{html.escape(app_name)}</h1><p>版本 {html.escape(version_name)}<br>请在 HarmonyOS 手机上确认安装。</p>"
-        f"<a href=\"{html.escape(install_store_url, quote=True)}\">安装应用</a>"
+        ".tip{font-size:13px;margin-top:20px}.meta{font-size:14px}p{color:#aab5cb;line-height:1.7}</style>"
+        "</head><body><main class=\"card\">"
+        f"<h1>{html.escape(app_name)}</h1><p class=\"meta\">版本 {html.escape(version_name)}<br>支持 HarmonyOS 手机和 PC</p>"
+        f"<a href=\"{html.escape(install_store_url, quote=True)}\">一键安装到本机</a>"
+        "<p class=\"tip\">请在需要安装应用的 HarmonyOS 设备的华为浏览器中打开本页，点击按钮后按系统提示确认。"
+        "不需要 DevEco Studio、HDC、终端或开发者选项。设备仍需满足该安装包 Profile 的分发范围。</p>"
         "</main></body></html>",
         encoding="utf-8",
     )
@@ -745,6 +755,7 @@ def package_prebuilt_hap(
     app_icon_url = f"{base_url}/assets/AppIcon.png"
     ensure_release_hap(metadata)
     ensure_phone_hap(metadata)
+    ensure_pc_hap(metadata)
     remote_dir = f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{args.run_id[:8]}"
     secrets = [args.key_pwd, args.keystore_pwd]
     env = build_env(args.java_home, workspace)
@@ -841,6 +852,7 @@ def package_prebuilt_hap(
             secrets=secrets,
         )
         unsigned_manifest.unlink()
+
         write_prebuilt_install_page(
             build_dir / "index.html",
             app_name=app_name,
@@ -956,7 +968,7 @@ def package(args: argparse.Namespace) -> dict[str, object]:
     ensure_hvigor_wrapper(workspace, args.hvigorw)
     ensure_hpack_dir(workspace, args.hpack_bin, env)
     ensure_app_icon(workspace, static_hpack_root)
-    normalize_workspace_for_phone_distribution(workspace)
+    normalize_workspace_for_device_distribution(workspace)
     sign_files = copy_signing_files(workspace / "hpack" / "sign", cert, profile, keystore)
     effective_key_pwd = args.key_pwd
     if not signing_identity.get("source_certificate_matches"):

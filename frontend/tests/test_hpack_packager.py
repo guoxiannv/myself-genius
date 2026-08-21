@@ -125,7 +125,11 @@ class HPackPackagerSigningTests(unittest.TestCase):
         with self.assertRaisesRegex(hpack_packager.PackagerError, "必须支持 phone"):
             hpack_packager.ensure_phone_hap({"device_types": ["2in1"]})
 
-    def test_normalizes_pro_workspace_to_phone_only(self) -> None:
+    def test_rejects_hap_without_pc_device_type(self) -> None:
+        with self.assertRaisesRegex(hpack_packager.PackagerError, "必须支持 2in1"):
+            hpack_packager.ensure_pc_hap({"device_types": ["phone"]})
+
+    def test_normalizes_pro_workspace_for_phone_and_pc(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             module_path = Path(temp_dir) / "entry" / "src" / "main" / "module.json5"
             module_path.parent.mkdir(parents=True)
@@ -134,11 +138,10 @@ class HPackPackagerSigningTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            hpack_packager.normalize_workspace_for_phone_distribution(Path(temp_dir))
+            hpack_packager.normalize_workspace_for_device_distribution(Path(temp_dir))
 
             normalized = module_path.read_text(encoding="utf-8")
-            self.assertIn('"deviceTypes": [\n      "phone"\n    ]', normalized)
-            self.assertNotIn('"2in1"', normalized)
+            self.assertIn('"deviceTypes": [\n      "phone",\n      "2in1"\n    ]', normalized)
 
     def test_packages_prebuilt_expo_hap_into_install_distribution(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -177,7 +180,7 @@ class HPackPackagerSigningTests(unittest.TestCase):
                 "manifest_target_api": "6.0.2(22)",
                 "debug": False,
                 "build_mode": "release",
-                "device_types": ["phone"],
+                "device_types": ["phone", "2in1"],
             }
 
             def fake_run(command, cwd, _env, _secrets):
@@ -222,7 +225,10 @@ class HPackPackagerSigningTests(unittest.TestCase):
             self.assertEqual(manifest["app"]["bundleName"], "com.example.expo")
             self.assertEqual(manifest["app"]["minAPIVersion"], "6.0.1(21)")
             self.assertEqual(manifest["app"]["targetAPIVersion"], "6.0.2(22)")
-            self.assertEqual(manifest["app"]["modules"][0]["deviceTypes"], ["phone"])
+            self.assertEqual(manifest["app"]["modules"][0]["deviceTypes"], ["phone", "2in1"])
+            install_page = (published / "index.html").read_text(encoding="utf-8")
+            self.assertIn("一键安装到本机", install_page)
+            self.assertIn("不需要 DevEco Studio、HDC、终端或开发者选项", install_page)
 
     def test_rebuild_command_targets_release_hap_for_selected_product(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -248,7 +254,7 @@ class HPackPackagerSigningTests(unittest.TestCase):
                         "module.json",
                         json.dumps({
                             "app": {"debug": False, "buildMode": "release"},
-                            "module": {"deviceTypes": ["phone"]},
+                            "module": {"deviceTypes": ["phone", "2in1"]},
                         }),
                     )
                 return None

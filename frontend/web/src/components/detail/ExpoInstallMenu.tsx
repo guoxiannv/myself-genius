@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from "react"
 import { api, withCacheBust } from "@/lib/api"
 import type { ExpoServeState, RunArtifacts } from "@/lib/types"
 
-// 占位地址：接入正式 HarmonyOS PC 版 ExpoGo 安装包后只需替换这一项。
+// 旧的 ExpoGo + 外网预览安装链接保留在代码中，但默认不在菜单中暴露。
+// 如需临时回滚或排障，构建时设置 VITE_SHOW_LEGACY_PC_INSTALL=true。
+const SHOW_LEGACY_PC_INSTALL = import.meta.env.VITE_SHOW_LEGACY_PC_INSTALL === "true"
 const EXPO_GO_PC_DOWNLOAD_URL = "https://appgallery.huawei.com/link/invite-test-wap?taskId=6bf8b471bc2dded43952e4f1cb58f1eb"
 
 type InstallTarget = "phone" | "desktop"
@@ -18,8 +20,8 @@ export function ExpoInstallMenu({
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [dialog, setDialog] = useState<InstallTarget | null>(null)
-  const [phoneRequestPending, setPhoneRequestPending] = useState(false)
-  const [phoneRequestError, setPhoneRequestError] = useState("")
+  const [packageRequestPending, setPackageRequestPending] = useState(false)
+  const [packageRequestError, setPackageRequestError] = useState("")
   const menuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -43,17 +45,15 @@ export function ExpoInstallMenu({
   const openDialog = (target: InstallTarget) => {
     setMenuOpen(false)
     setDialog(target)
-    if (target !== "phone" || artifacts.install_ready || phoneRequestPending) return
-    setPhoneRequestPending(true)
-    setPhoneRequestError("")
+    if (artifacts.install_ready || packageRequestPending || artifacts.distribution_status === "packaging") return
+    setPackageRequestPending(true)
+    setPackageRequestError("")
     api.packageRun(runId)
       .catch((error: unknown) => {
-        setPhoneRequestError(error instanceof Error ? error.message : "手机安装包生成失败。")
+        setPackageRequestError(error instanceof Error ? error.message : "安装包生成失败。")
       })
-      .finally(() => setPhoneRequestPending(false))
+      .finally(() => setPackageRequestPending(false))
   }
-
-  const installAvailable = Boolean(artifacts.hap_found)
 
   return (
     <>
@@ -77,13 +77,11 @@ export function ExpoInstallMenu({
           >
             <InstallOption
               label="安装到手机"
-              description={installAvailable ? "使用当前 HAP 生成手机安装包" : "后台生成，点击后展示二维码"}
               icon={<PhoneIcon />}
               onClick={() => openDialog("phone")}
             />
             <InstallOption
               label="安装到 PC"
-              description={installAvailable ? "使用当前 HAP 安装到 PC 模拟器" : "获取 ExpoGo 与预览地址"}
               icon={<DesktopIcon />}
               onClick={() => openDialog("desktop")}
             />
@@ -96,11 +94,11 @@ export function ExpoInstallMenu({
           {dialog === "phone" ? (
             <PhoneInstallContent
               artifacts={artifacts}
-              requestPending={phoneRequestPending}
-              requestError={phoneRequestError}
+              requestPending={packageRequestPending}
+              requestError={packageRequestError}
             />
           ) : (
-            <PcInstallContent serve={serve} />
+            SHOW_LEGACY_PC_INSTALL ? <LegacyPcInstallContent artifacts={artifacts} serve={serve} /> : <PcInstallContent artifacts={artifacts} requestPending={packageRequestPending} requestError={packageRequestError} />
           )}
         </InstallDialog>
       )}
@@ -110,12 +108,10 @@ export function ExpoInstallMenu({
 
 function InstallOption({
   label,
-  description,
   icon,
   onClick,
 }: {
   label: string
-  description: string
   icon: React.ReactNode
   onClick: () => void
 }) {
@@ -131,7 +127,6 @@ function InstallOption({
       </span>
       <span className="min-w-0">
         <span className="block text-sm font-semibold text-foreground">{label}</span>
-        <span className="block text-[11px] text-muted">{description}</span>
       </span>
     </button>
   )
@@ -220,7 +215,7 @@ function PhoneInstallContent({
         />
       </div>
       <p className="text-center text-xs leading-relaxed text-muted">
-        请使用 HarmonyOS 手机扫描二维码。当前是 internal-testing 包，仅 Profile 已登记 UDID 的设备可安装；未登记设备会提示应用验证失败 10019。
+        请使用 HarmonyOS 手机扫描二维码，当前是内部测试包，仅限已登记设备 UDID 方可安装。
       </p>
       <a
         href={artifacts.install_url}
@@ -234,107 +229,73 @@ function PhoneInstallContent({
   )
 }
 
-function PcInstallContent({ serve }: { serve?: ExpoServeState }) {
-  const previewUrl = serve?.public_url || ""
-
+function PcInstallContent({ artifacts, requestPending, requestError }: { artifacts: RunArtifacts; requestPending: boolean; requestError: string }) {
+  const signedReady = Boolean(artifacts.install_ready && artifacts.install_store_url)
+  if (!signedReady) {
+    const failed = Boolean(requestError) || artifacts.distribution_status === "failed"
+    return (
+      <div className="py-4 text-center">
+        <p className={`text-sm ${failed ? "text-danger" : "text-muted"}`}>
+          {failed
+            ? requestError || artifacts.distribution_error || "PC 安装包生成失败，请稍后重试。"
+            : requestPending || artifacts.distribution_status === "packaging"
+              ? "PC 安装包生成中，请稍候…"
+              : "正在准备 PC 安装包，请稍候…"}
+        </p>
+      </div>
+    )
+  }
   return (
     <div className="space-y-5">
-      <GuideStep number="1" title="下载 ExpoGo">
-        <p className="text-xs leading-relaxed text-muted">
-          在 HarmonyOS PC 上复制下面的链接，用浏览器打开并下载、安装 ExpoGo。
-        </p>
-        <CopyableUrl value={EXPO_GO_PC_DOWNLOAD_URL} linkLabel="打开下载链接" />
-      </GuideStep>
-
-      <GuideStep number="2" title="打开生成的应用">
-        <p className="text-xs leading-relaxed text-muted">
-          打开 ExpoGo，把下面的外网预览地址粘贴到地址输入框中。
-        </p>
-        {previewUrl ? (
-          <CopyableUrl value={previewUrl} />
-        ) : (
-          <div className="mt-3 rounded-lg border border-border bg-black/15 px-3 py-3 text-xs text-muted">
-            {serve?.status === "failed"
-              ? `外网预览发布失败：${serve.error || "请检查 Expo Gateway 配置。"}`
-              : "外网预览地址正在发布，请稍候…"}
-          </div>
-        )}
-      </GuideStep>
+      <div className="space-y-2 text-sm leading-relaxed text-muted">
+        <p>1. 请使用鸿蒙 PC 的华为浏览器打开此页面。</p>
+        <p>2. 当前设备 ID 必须已经加入安装包 Profile 白名单。</p>
+      </div>
+      <a
+        href={artifacts.install_store_url}
+        className="inline-flex w-full items-center justify-center rounded-xl bg-accent px-4 py-3 text-sm font-semibold text-background transition-colors hover:bg-accent-soft"
+      >
+        一键安装到鸿蒙PC
+      </a>
     </div>
   )
 }
 
-function GuideStep({
-  number,
-  title,
-  children,
-}: {
-  number: string
-  title: string
-  children: React.ReactNode
-}) {
+function LegacyPcInstallContent({ artifacts, serve }: { artifacts: RunArtifacts; serve?: ExpoServeState }) {
+  const previewUrl = serve?.public_url || ""
+  return (
+    <div className="space-y-5">
+      {artifacts.install_store_url ? <GuideStep number="1" title="使用系统安装链接"><p className="text-xs leading-relaxed text-muted">在目标 HarmonyOS PC 的华为浏览器中点击旧版系统安装链接。</p><a href={artifacts.install_store_url} className="mt-3 inline-flex text-xs text-accent-soft underline">打开系统安装器</a>{artifacts.install_url ? <CopyableUrl value={artifacts.install_url} linkLabel="打开旧版安装页" /> : null}</GuideStep> : null}
+      <GuideStep number="2" title="下载 ExpoGo"><p className="text-xs leading-relaxed text-muted">在 HarmonyOS PC 上复制下面的链接，用浏览器打开并下载、安装 ExpoGo。</p><CopyableUrl value={EXPO_GO_PC_DOWNLOAD_URL} linkLabel="打开下载链接" /></GuideStep>
+      <GuideStep number="3" title="打开生成的应用"><p className="text-xs leading-relaxed text-muted">打开 ExpoGo，把下面的外网预览地址粘贴到地址输入框中。</p>{previewUrl ? <CopyableUrl value={previewUrl} /> : <div className="mt-3 rounded-lg border border-border bg-black/15 px-3 py-3 text-xs text-muted">{serve?.status === "failed" ? `外网预览发布失败：${serve.error || "请检查 Expo Gateway 配置。"}` : "外网预览地址正在发布，请稍候…"}</div>}</GuideStep>
+    </div>
+  )
+}
+
+function GuideStep({ number, title, children }: { number: string; title: string; children: React.ReactNode }) {
   return (
     <section className="flex gap-3 rounded-xl border border-border bg-surface-raised p-4">
-      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent/15 text-xs font-bold text-accent-soft">
-        {number}
-      </span>
-      <div className="min-w-0 flex-1">
-        <h3 className="text-sm font-semibold text-foreground">{title}</h3>
-        <div className="mt-1.5">{children}</div>
-      </div>
+      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent/15 text-xs font-bold text-accent-soft">{number}</span>
+      <div className="min-w-0 flex-1"><h3 className="text-sm font-semibold text-foreground">{title}</h3><div className="mt-1.5">{children}</div></div>
     </section>
   )
 }
 
 function CopyableUrl({ value, linkLabel }: { value: string; linkLabel?: string }) {
   const [copied, setCopied] = useState(false)
-
   const copy = async () => {
     try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(value)
-      } else {
-        const textarea = document.createElement("textarea")
-        textarea.value = value
-        textarea.style.position = "fixed"
-        textarea.style.opacity = "0"
-        document.body.appendChild(textarea)
-        textarea.select()
-        const copied = document.execCommand("copy")
-        textarea.remove()
-        if (!copied) throw new Error("copy is unavailable")
-      }
+      await navigator.clipboard.writeText(value)
       setCopied(true)
       window.setTimeout(() => setCopied(false), 1600)
     } catch {
       setCopied(false)
     }
   }
-
   return (
     <div className="mt-3 space-y-2">
-      <div className="flex items-stretch gap-2">
-        <code className="min-w-0 flex-1 break-all rounded-lg border border-border bg-black/20 px-3 py-2 text-[11px] leading-relaxed text-foreground">
-          {value}
-        </code>
-        <button
-          type="button"
-          onClick={copy}
-          className="shrink-0 rounded-lg border border-accent/30 bg-accent/10 px-3 text-xs font-semibold text-accent-soft transition-colors hover:bg-accent/20"
-        >
-          {copied ? "已复制" : "复制"}
-        </button>
-      </div>
-      {linkLabel ? (
-        <a
-          href={value}
-          target="_blank"
-          rel="noreferrer"
-          className="inline-flex text-xs text-accent-soft underline decoration-accent/40 underline-offset-4 hover:text-foreground"
-        >
-          {linkLabel}
-        </a>
-      ) : null}
+      <div className="flex items-stretch gap-2"><code className="min-w-0 flex-1 break-all rounded-lg border border-border bg-black/20 px-3 py-2 text-[11px] leading-relaxed text-foreground">{value}</code><button type="button" onClick={() => void copy()} className="shrink-0 rounded-lg border border-accent/30 bg-accent/10 px-3 text-xs font-semibold text-accent-soft">{copied ? "已复制" : "复制"}</button></div>
+      {linkLabel ? <a href={value} target="_blank" rel="noreferrer" className="inline-flex text-xs text-accent-soft underline">{linkLabel}</a> : null}
     </div>
   )
 }

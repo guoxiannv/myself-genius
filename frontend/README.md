@@ -1,6 +1,6 @@
 # Genius Frontend
 
-位于 `Genius/frontend` 的统一 Web 入口：Pro 任务分派到同级 `devkit_studio` 的 `tmux-runner`，Expo 任务分派到仓库内的 `Genius/runner`，并在网页中展示执行轨迹、运行预览与扫码安装结果。构建选项只保留 Pro 和 Expo。
+位于 `Genius/frontend` 的统一 Web 入口：Pro 任务分派到同级 `devkit_studio` 的 `tmux-runner`，Expo 任务分派到仓库内的 `Genius/runner`，并在网页中展示执行轨迹、运行预览与签名 HAP 安装结果。构建选项只保留 Pro 和 Expo。
 
 后端是标准库实现的纯 JSON API（不依赖 FastAPI、Flask 等第三方框架）；前端是位于 `web/` 的独立 **Vite + React + TypeScript + Tailwind CSS** 工程，通过 `/api` 与后端通信。前端单独调试方式见 [`web/README.md`](./web/README.md)。
 
@@ -22,7 +22,7 @@
 - 后端通过 `node /path/to/tmux-runner.cjs --cwd <workspace> --session <name> --variant <variant> "<prompt>"` 启动任务
 - 状态来自目标工作目录下的 `.arkpilot/state/...`
 - Expo 模式通过 `start-livetest.sh --project <workspace> --prompt-file <prompt.md> --session <name>` 启动，状态来自 `.expo-fast/state.json`；bundle 导出与 Harmony Go 验收完成后，Runner 会通过 SDK 固定 slot 池构建 unsigned HAP
-- Expo HAP 成功后可在详情页直接下载；当前不执行签名，也不提供扫码安装。HAP 失败不会阻止已经生成的 bundle.js 开启预览发布
+- Expo HAP 完成后会按 release 模式签名，并在详情页的「安装 → 安装到 PC」中默认提供签名 HAP 整包下载；旧版系统安装链接与 ExpoGo 预览入口仍保留但默认隐藏。HAP 失败不会阻止已经生成的 bundle.js 开启预览发布
 - Expo 详情页会增量读取 `agent-trace.jsonl` 与各轮 `agent-repair-trace*.jsonl`，以折叠分组实时展示经过脱敏的 Claude Action 和 Assistant Message
 
 ## 运行
@@ -236,9 +236,11 @@ scripts/restart_dev.sh --foreground
 
 **不要提交：** `deploy/server.env`、`deploy/profile-pool.json`、`deploy/signing/*`（除 `.gitkeep`）、`.env.local`
 
-## HPack 扫码安装
+## HPack HAP 安装
 
-项目支持通过 HPack release 打包、签名、发布安装页，并在详情页展示「扫码安装」二维码。0→1 首版本自动生成一次；后续每轮调整不会自动重签，只有用户点击详情页顶部的「更新安装包」才生成新安装页。通过 `deploy/server.env` 中 `HP_HPACK_ENABLED=1` 启用。
+项目通过 HPack release 打包、签名并发布 HAP。详情页默认暴露「安装 → 安装到 PC」，弹窗只提示必须使用华为浏览器、设备 ID 必须已经加入安装包 Profile 白名单，并提供「一键安装到鸿蒙PC」按钮。0→1 首版本自动生成一次；后续每轮调整不会自动重签，只有用户点击详情页顶部的「更新安装包」才生成新包。通过 `deploy/server.env` 中 `HP_HPACK_ENABLED=1` 启用。
+
+旧版安装方式没有删除：系统 `store://enterprise/manifest?...` 安装页和 ExpoGo + 外网预览入口仍会生成/保留，但默认不在界面显示。前端构建时设置 `VITE_SHOW_LEGACY_PC_INSTALL=true` 可临时显示旧入口，用于回滚或兼容性排查。
 
 **推荐**：使用 Profile 池（`deploy/profile-pool.json` 存在时自动启用），签名材料放在仓库内 gitignore 目录：
 
@@ -295,7 +297,7 @@ PORT=8090 python3 app.py
 4. 重新执行 `assembleHap`，确保签名源 HAP 对应 UI QA 后的最终工作区代码
 5. 执行 `hpack pr` 签名并生成安装包
 6. 把 `hpack/build/<product>/` 发布到 `HP_HPACK_STATIC_ROOT/<remote_dir>/`
-7. 详情页展示 `https://your-domain.com/static/hpack/<remote_dir>/index.html` 的安装二维码
+7. 详情页提供 `https://your-domain.com/static/hpack/<remote_dir>/index.html` 兼容安装页，同时返回签名 HAP 下载地址
 
 后续调整流程：
 
@@ -311,6 +313,8 @@ PORT=8090 python3 app.py
 
 - 当前跑通的是 `internaltesting` 指定设备分发，Profile 里没有的设备无法安装。
 - `bundleName` 必须和 Profile 一致。
+- HAP 必须是 release 构建，且模块 `deviceTypes` 同时包含 `phone` 和 `2in1`，否则不会进入分发流程。
+- HAP 整包安装仍受签名 Profile 的设备范围限制；“不需要 HDC”只针对用户安装动作，不代表绕过华为签名校验。
 - `HP_HPACK_STATIC_ROOT` 对应的公网 URL 必须支持 HTTPS、`HEAD`、`Content-Length`，最好支持 `Range`。
 - 证书、Profile、p12、密码和 tunnel token 不要提交到仓库。
 

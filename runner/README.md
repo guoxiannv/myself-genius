@@ -76,8 +76,8 @@ follow-up-control.sh
 
 一次完整运行依次完成：
 
-1. 从技术模板准备空工程，生成能力 catalog、SDK fingerprint 和紧凑能力索引。
-2. 固定 Harmony Go runtime 核心依赖，并从兼容缓存或 npm 安装基线依赖。
+1. 收到 prompt 后立即启动独立的 low-effort HTML 设计回合（默认 45 秒、硬上限 55 秒），同时准备技术模板、能力索引和依赖；失败或超时自动降级。
+2. 将合格设计稿保存为 `.expo-fast/design.html`，主实现读取它并转译为原生布局与本地 Lucide 路径图标。
 3. 运行主模型回合，只允许在目标工程边界内读写产品文件；`brief.json` 出现后，另一个独立模型进程并行生成应用图标。
 4. 解析并同步模型选择的精确能力依赖，执行 typecheck、trace-scope 和 source audit。
 5. 若确定性诊断失败，使用同一会话执行聚合 repair，再完整复验；单次运行最多执行 100 轮 repair，达到上限后保留最后诊断并终止。
@@ -116,6 +116,8 @@ Runner 只有一套执行策略，不再接受 `--candidate`，也不会根据�
   capability-selection.json
   module-cache.json
   brief.json
+  design.html
+  design-trace.jsonl
   app-icon/
     result.json
     background.svg

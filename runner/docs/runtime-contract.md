@@ -6,6 +6,13 @@ run. `scripts/fast-harmony.mjs` owns template preparation, catalog generation, a
 capability resolution; `scripts/dependencies.mjs` exclusively owns dependency seeding,
 synchronization, runtime pins, and Harmony Go export.
 
+As soon as an initial prompt arrives, the runner starts an independent, tool-less HTML
+design turn in parallel with scaffold preparation and dependency seeding. It uses low
+effort, disables thinking only for this turn, and has a hard deadline below one minute.
+Valid output is saved as `.expo-fast/design.html`; failure is a non-blocking fallback.
+The main implementation turn keeps its normal reasoning and translates the reference
+into native React Native layout and local Lucide path geometry.
+
 The runner has one execution policy. Main and repair model/effort values come from
 command options with `config/execution.json` as the fallback. Deterministic verification
 failures always resume the same model session for another repair, with no runner-owned
@@ -88,6 +95,11 @@ physical panel resolution or Harmony emulator pixel dimensions.
 | tablet `640–1279` | top horizontal navigation; one or two content columns according to available space |
 | desktop `>=1280` | fixed-width left sidebar and flexible main as siblings in one horizontal root; real multi-column dashboard/list content (typically wrapping cards near 48% basis) |
 
+Design references target logical canvases `390x844`, `1024x640`, and `1440x900`.
+Their CSS media queries remain the source of truth, while a tiny `matchMedia` monitor
+exposes `html[data-viewport]`, `data-logical-width`, and `data-logical-height` only for
+inspection. Native code reproduces those breakpoints without browser APIs.
+
 The desktop navigation must not precede or sit outside the horizontal root container,
 because that stacks the supposed sidebar above the content. Single-destination apps
 keep the responsive content behavior without inventing tabs.
@@ -116,6 +128,8 @@ Evidence written per run:
   sdk-fingerprint.json
   module-cache.json
   brief.json              # compact Spec → Plan → Code brief
+  design.html             # optional low-effort visual reference
+  design-trace.jsonl
   app-icon/
     result.json           # ready/fallback status, timing, model, source, asset paths
     background.svg

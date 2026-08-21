@@ -1778,7 +1778,7 @@ test('runner and starter encode the logical-width three-device contract', () => 
   assert.match(starter, /<View style=\{\[styles\.frame, isDesktop && styles\.desktopFrame\]\}>\{isDesktop && navigation\}<View style=\{styles\.main\}>/);
   assert.doesNotMatch(starter, /\{isDesktop && navigation\}<View style=\{styles\.frame\}>/);
   assert.match(starter, /desktopList: \{ flexDirection: 'row', flexWrap: 'wrap' \}/);
-  assert.match(starter, /desktopListCard: \{ flexBasis: '48%', flexGrow: 1 \}/);
+  assert.match(starter, /desktopListCard: \{ flexBasis: '48%', flexGrow: 0, maxWidth: '48%' \}/);
 });
 
 test('starter and model contract use Harmony-safe Path-only icon geometry', () => {
@@ -1987,8 +1987,8 @@ const styles = StyleSheet.create({ frame: { flex: 1, flexDirection: 'row' }, car
   assert.ok(failed.errors.some((error) => error.includes('before/outside the layout frame')));
 
   writeFileSync(join(project, 'App.tsx'), `import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
-export default function App(){ const { width } = useWindowDimensions(); const isDesktop = width >= 1280; const isTablet = width >= 640 && width < 1280; const navigation = <Text>导航</Text>; return <View style={[styles.frame, isDesktop && styles.desktopFrame]} testID="app-shell">{isDesktop && navigation}<View style={styles.main}>{isTablet && navigation}<View style={[styles.cards, isDesktop && styles.desktopCards]}><Text testID="summary">内容</Text></View>{!isDesktop && !isTablet && navigation}</View></View> }
-const styles = StyleSheet.create({ frame: { flex: 1 }, desktopFrame: { flexDirection: 'row' }, main: { flex: 1 }, cards: { flex: 1 }, desktopCards: { flexDirection: 'row', flexWrap: 'wrap' }, card: { flexBasis: '48%' } });`);
+export default function App(){ const { width } = useWindowDimensions(); const isDesktop = width >= 1280; const isTablet = width >= 640 && width < 1280; const navigation = <Text>导航</Text>; return <View onLayout={(event) => event.nativeEvent.layout.width} style={[styles.frame, isDesktop && styles.desktopFrame]} testID="app-shell">{isDesktop && navigation}<View style={styles.main}>{isTablet && navigation}<View style={[styles.cards, isDesktop && styles.desktopCards]}><Text testID="summary">内容</Text></View>{!isDesktop && !isTablet && navigation}</View></View> }
+const styles = StyleSheet.create({ frame: { flex: 1 }, desktopFrame: { flexDirection: 'row' }, main: { flex: 1 }, cards: { flex: 1 }, desktopCards: { flexDirection: 'row', flexWrap: 'wrap' }, card: { flexBasis: '48%', flexGrow: 0, maxWidth: '48%' } });`);
   assert.equal(auditProductSource(project).status, 'pass');
 });
 

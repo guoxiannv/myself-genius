@@ -24,6 +24,8 @@ const defaults = {
   deveco: '/Applications/DevEco-Studio.app',
   claude: 'claude',
   timeout: 0,
+  designModel: 'haiku',
+  designTimeoutSeconds: 45,
   repairTimeout: 0,
   hapWaitSeconds: 3600,
   firstPort: 3355,
@@ -59,6 +61,8 @@ Run:
   --session NAME         tmux session name; derived from project by default.
   --model MODEL          Override the main model, for example deepseek-v4-flash.
   --effort LEVEL         Override main effort: low, medium, high, or max.
+  --design-model MODEL   HTML design model; defaults to haiku at low effort.
+  --design-timeout SEC   HTML design deadline; defaults to 45, maximum 55.
   --repair-model MODEL   Override the repair model.
   --repair-effort LEVEL  Override repair effort.
   --timeout MINUTES      Main generation deadline; 0 disables it (default).
@@ -126,6 +130,7 @@ function parse(argv) {
     else if (arg === '--session') out.session = take(argv, i++, arg);
     else if (arg === '--model') out.model = take(argv, i++, arg);
     else if (arg === '--effort') out.effort = take(argv, i++, arg);
+    else if (arg === '--design-model') out.designModel = take(argv, i++, arg);
     else if (arg === '--repair-model' || arg === '--repairModel') out.repairModel = take(argv, i++, arg);
     else if (arg === '--repair-effort' || arg === '--repairEffort') out.repairEffort = take(argv, i++, arg);
     else if (arg === '--port') out.port = Number(take(argv, i++, arg));
@@ -138,6 +143,7 @@ function parse(argv) {
     else if (arg === '--phone-targets') out.phoneTargets = take(argv, i++, arg);
     else if (arg === '--gateway-origin') out.gatewayOrigin = take(argv, i++, arg);
     else if (arg === '--timeout') out.timeout = Number(take(argv, i++, arg));
+    else if (arg === '--design-timeout') out.designTimeoutSeconds = Number(take(argv, i++, arg));
     else if (arg === '--repair-timeout') out.repairTimeout = Number(take(argv, i++, arg));
     else if (arg === '--launch') out.launch = parseBoolean(take(argv, i++, arg), arg);
     else if (arg === '--hap') out.hap = parseBoolean(take(argv, i++, arg), arg);
@@ -247,6 +253,8 @@ function runnerArguments(plan) {
     '--claudeTimeoutMinutes', String(plan.timeout),
     '--repairTimeoutMinutes', String(plan.repairTimeout),
     '--repairLimit', String(plan.repairLimit),
+    '--designModel', plan.designModel,
+    '--designTimeoutSeconds', String(plan.designTimeoutSeconds),
     '--launch', String(plan.launch),
     '--hap', String(plan.hap),
     '--pool', plan.pool,
@@ -275,6 +283,7 @@ function printPlan(plan, tmuxId = '') {
   console.log(`  action  : ${plan.action}`);
   console.log(`  prompt  : ${plan.promptKind}${plan.promptSource ? ` (${plan.promptSource})` : ''}`);
   console.log(`  model   : ${plan.model}/${plan.effort}`);
+  console.log(`  design  : ${plan.designModel}/low · ${plan.designTimeoutSeconds}s hard limit`);
   console.log(`  repair  : ${plan.repairModel}/${plan.repairEffort} (max ${plan.repairLimit})`);
   console.log(`  launch  : ${plan.launch ? 'direct HAP on desktop emulator' : 'disabled'}`);
   console.log(`  HAP     : ${plan.hap ? `SDK pool ${plan.pool}` : 'disabled'}`);
@@ -305,6 +314,13 @@ async function main() {
   const projectName = basename(project);
   const session = raw.session || `expo-fast-${slug(projectName)}`;
   const timeout = checkOptionalTimeout(raw.timeout ?? defaults.timeout, 'timeout');
+  const designTimeoutSeconds = checkNumber(
+    raw.designTimeoutSeconds ?? Number(process.env.EXPO_FAST_DESIGN_TIMEOUT_SECONDS || defaults.designTimeoutSeconds),
+    'design timeout seconds',
+    1,
+    55,
+  );
+  const designModel = raw.designModel || process.env.EXPO_FAST_DESIGN_MODEL || defaults.designModel;
   const repairTimeout = checkOptionalTimeout(raw.repairTimeout ?? defaults.repairTimeout, 'repair timeout');
   const port = checkNumber(raw.port ?? defaults.firstPort, 'port', 1024, 65535);
   const hapWaitSeconds = checkNumber(
@@ -346,7 +362,7 @@ async function main() {
   const sessionLog = join(root, '.expo-fast/session-logs', `${slug(session)}.log`);
   const plan = {
     root, configFile: existsSync(localEnvFile) ? localEnvFile : '', project, requestPath, promptKind: prompt.kind, promptSource: prompt.path || '',
-    session, sessionLog, action, followUpPath, ...models, timeout, repairTimeout, port, hapWaitSeconds, pool,
+    session, sessionLog, action, followUpPath, ...models, designModel, designTimeoutSeconds, timeout, repairTimeout, port, hapWaitSeconds, pool,
     launch: raw.launch,
     hap: raw.launch || (raw.hap && enabledByEnvironment(process.env.EXPO_HARMONY_HAP_ENABLED)),
     resume: action !== 'initial',

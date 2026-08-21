@@ -72,7 +72,7 @@ export function auditImplementationTrace(projectDir, tracePath) {
         add('dependency-source-scan', call, rel);
       }
       if (call.name === 'Read') {
-        const allowedRead = ['AGENTS.md', 'package.json', 'app.json', 'index.js', 'tsconfig.json', 'App.tsx', '.expo-fast/model-capability-index.txt', '.expo-fast/sdk-fingerprint.json', '.expo-fast/verification-errors.txt', '.expo-fast/capability-selection.json', '.expo-fast/capability-resolution.log', '.expo-fast/typecheck.log', '.expo-fast/source-audit.json', '.expo-fast/source-audit.log', '.expo-fast/export.log', '.expo-fast/build-evidence.json'].includes(rel)
+        const allowedRead = ['AGENTS.md', 'package.json', 'app.json', 'index.js', 'tsconfig.json', 'App.tsx', '.expo-fast/brief.json', '.expo-fast/design.html', '.expo-fast/model-capability-index.txt', '.expo-fast/sdk-fingerprint.json', '.expo-fast/verification-errors.txt', '.expo-fast/capability-selection.json', '.expo-fast/capability-resolution.log', '.expo-fast/typecheck.log', '.expo-fast/source-audit.json', '.expo-fast/source-audit.log', '.expo-fast/export.log', '.expo-fast/build-evidence.json'].includes(rel)
           || rel.startsWith('src/');
         if (!allowedRead) add('non-whitelisted-read', call, rel);
       }

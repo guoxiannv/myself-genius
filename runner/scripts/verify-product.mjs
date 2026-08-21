@@ -162,9 +162,11 @@ export function auditProductSource(projectRoot, requestPath = join(projectRoot, 
   const multiDeviceRequested = /(?:手机|phone)[\s\S]*(?:平板|tablet)[\s\S]*(?:电脑|桌面|desktop|computer)|(?:平板|tablet)[\s\S]*(?:电脑|桌面|desktop|computer)/i.test(request);
   if (multiDeviceRequested) {
     if (!/useWindowDimensions\s*\(/.test(combined)) errors.push('Multi-device layout must use useWindowDimensions logical-width evidence.');
+    if (!/\bonLayout\s*=/.test(combined) || !/(?:nativeEvent\.)?layout\.width/.test(combined)) errors.push('Multi-device layout must stabilize its initial logical width from the root onLayout measurement.');
     if (!/\b640\b/.test(combined)) errors.push('Multi-device layout is missing the phone/tablet logical breakpoint 640.');
     if (!/\b1280\b/.test(combined)) errors.push('Multi-device layout is missing the tablet/desktop logical breakpoint 1280.');
     if (/(?:多栏|多列|multi[ -]?column)/i.test(request) && !/(?:flexWrap\s*:\s*['"]wrap|numColumns\s*=|(?:flexBasis|width)\s*:\s*['"](?:4[5-9]|50)%)/.test(combined)) errors.push('Requested desktop multi-column layout has no wrapping, column-count, or near-half-width card evidence.');
+    if (/(?:flexBasis|width)\s*:\s*['"](?:4[5-9]|50)%['"][^{}]{0,180}flexGrow\s*:\s*1|flexGrow\s*:\s*1[^{}]{0,180}(?:flexBasis|width)\s*:\s*['"](?:4[5-9]|50)%['"]/.test(combined)) errors.push('Half-width wrapping cards must not use flexGrow: 1 because a lone final-row item stretches to full width.');
     if (/\{\s*(?:isDesktop|desktop)\s*&&\s*(?:navigation|nav)\s*\}\s*<View\b[^>]*(?:frame|shell|container)/i.test(combined)) errors.push('Desktop navigation appears before/outside the layout frame; sidebar and main must be siblings inside the same horizontal root container.');
   }
   const evidence = { schemaVersion: 1, status: errors.length ? 'fail' : 'pass', auditedAt: new Date().toISOString(), productInputSha256: digestFiles([...files, join(project, 'app.json'), join(project, 'package.json')].filter(existsSync).sort(), project), files: files.map((path) => relative(project, path)), imports, namedImports, testIds: [...new Set(testIds)].sort(), errors, warnings };

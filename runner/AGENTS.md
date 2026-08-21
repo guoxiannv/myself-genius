@@ -2,7 +2,9 @@
 
 - Preserve the compact model-visible sequence brief → code. Capability resolution,
   dependency setup, typecheck, Harmony Go export/launch, and evidence are deterministic.
-- Do not add HTML design artifacts, ArkTS generation, native edits, subagents, or a
+- The orchestrator may generate `.expo-fast/design.html` in an independent low-effort
+  turn. Product agents read it as visual reference but never edit it, embed it, or use
+  browser APIs in native product code. Do not add ArkTS, native edits, subagents, or a
   controller DAG.
 - Every Expo import must be allowed by the selected devkit `harmony-support.json`.
 - Third-party React Native imports must be allowed by the selected devkit compatibility
@@ -20,6 +22,11 @@
   and one column; tablet layouts use top horizontal navigation; desktop layouts put a
   fixed-width left sidebar and flexible multi-column main content inside the same
   horizontal root container. Never derive breakpoints from physical device pixels.
+- Check responsive composition at `390x844`, `1024x640`, and `1440x900`. Treat
+  `1024x640` as a first-class compact PC target with balanced top navigation and one
+  or two columns, not stretched phone rows. Capture stable root width with `onLayout`
+  before mounting responsive content. React Native flex directions must be explicit;
+  half-width wrapping cards use a matching max width and `flexGrow: 0`.
 - For runtime QA, verify the resolved Harmony Go bundle name before and after the
   action. Resolve it from `EXPO_HARMONY_GO_BUNDLE_NAME`, then HAP metadata, with
   `com.example.myapplication1.ide` as the fallback; assert an app-specific

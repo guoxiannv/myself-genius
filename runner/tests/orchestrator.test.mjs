@@ -2027,3 +2027,83 @@ test('artifact evidence binds runtime, manifest, bundle hash, and source digest'
   writeFileSync(join(miniapp, 'bundle.js'), 'tampered');
   assert.equal(verifyHarmonyGoArtifacts(project, output).status, 'fail');
 });
+
+function poolSetupFixture(label) {
+  const workspace = mkdtempSync(join(tmpdir(), `expo-fast-pool-setup-${label}-`));
+  const bin = join(workspace, 'bin');
+  const sdk = join(workspace, 'sdk');
+  mkdirSync(join(sdk, 'tools/harmony'), { recursive: true });
+  mkdirSync(bin, { recursive: true });
+  // A Node copy whose directory holds no Corepack, so ${NODE_RUNTIME:h}/corepack misses.
+  writeFileSync(join(bin, 'node'), `#!/bin/sh\nexec ${process.execPath} "$@"\n`);
+  chmodSync(join(bin, 'node'), 0o755);
+  writeFileSync(join(sdk, 'package.json'), JSON.stringify({ name: '@expo/expo', packageManager: 'pnpm@10.33.0' }));
+  // The pool entrypoint must exist but does nothing; this test only covers bootstrapping.
+  writeFileSync(join(sdk, 'tools/harmony/full-profile-pool.mjs'), 'process.exit(0);\n');
+  const recorder = join(workspace, 'pnpm-invocation.txt');
+  const fakePnpm = join(bin, 'pnpm');
+  writeFileSync(fakePnpm, `#!/bin/sh\nprintf '%s\\n' "$0 $*" >> ${recorder}\nexit 0\n`);
+  chmodSync(fakePnpm, 0o755);
+  return { workspace, bin, sdk, recorder, fakePnpm };
+}
+
+function runPoolSetup(fixture, { path, extraEnv = {} } = {}) {
+  return spawnSync(join(root, 'setup-harmony-pool.sh'), ['--no-warm'], {
+    encoding: 'utf8',
+    env: {
+      HOME: fixture.workspace,
+      PATH: path ?? `${fixture.bin}:/usr/bin:/bin`,
+      EXPO_FAST_ENV_FILE: join(fixture.workspace, 'missing.env'),
+      EXPO_FAST_NODE: join(fixture.bin, 'node'),
+      EXPO_HARMONY_SDK_ROOT: fixture.sdk,
+      EXPO_HARMONY_POOL_ROOT: join(fixture.workspace, 'pool'),
+      EXPO_HARMONY_POOL_SIZE: '1',
+      ...extraEnv,
+    },
+  });
+}
+
+test('pool setup bootstraps SDK dependencies through a pnpm on PATH when Corepack is absent', { skip: !existsSync('/bin/zsh') }, () => {
+  const fixture = poolSetupFixture('path-pnpm');
+  try {
+    const result = runPoolSetup(fixture);
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stderr, /Corepack was not found beside Node/);
+    const invocation = readFileSync(fixture.recorder, 'utf8');
+    assert.match(invocation, /install --frozen-lockfile --ignore-scripts --filter @expo\/expo/);
+    assert.match(invocation, new RegExp(fixture.fakePnpm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  } finally {
+    rmSync(fixture.workspace, { recursive: true, force: true });
+  }
+});
+
+test('pool setup prefers an explicit EXPO_HARMONY_PNPM_BIN over PATH discovery', { skip: !existsSync('/bin/zsh') }, () => {
+  const fixture = poolSetupFixture('explicit-bin');
+  const override = join(fixture.workspace, 'custom-pnpm');
+  const overrideRecorder = join(fixture.workspace, 'override-invocation.txt');
+  writeFileSync(override, `#!/bin/sh\nprintf '%s\\n' "$0 $*" >> ${overrideRecorder}\nexit 0\n`);
+  chmodSync(override, 0o755);
+  try {
+    const result = runPoolSetup(fixture, { extraEnv: { EXPO_HARMONY_PNPM_BIN: override } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(existsSync(overrideRecorder), true, 'the override was not used');
+    assert.equal(existsSync(fixture.recorder), false, 'the PATH pnpm should not run');
+    assert.match(readFileSync(overrideRecorder, 'utf8'), /install --frozen-lockfile --ignore-scripts --filter @expo\/expo/);
+  } finally {
+    rmSync(fixture.workspace, { recursive: true, force: true });
+  }
+});
+
+test('pool setup reports every supported pnpm source when none is available', { skip: !existsSync('/bin/zsh') }, () => {
+  const fixture = poolSetupFixture('no-runner');
+  rmSync(fixture.fakePnpm, { force: true });
+  try {
+    // An empty PATH leaves no corepack, pnpm, or npm to fall back to.
+    const result = runPoolSetup(fixture, { path: join(fixture.workspace, 'empty') });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /no pnpm runner was found/);
+    assert.match(result.stderr, /EXPO_HARMONY_PNPM_BIN/);
+  } finally {
+    rmSync(fixture.workspace, { recursive: true, force: true });
+  }
+});

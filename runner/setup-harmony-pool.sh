@@ -55,17 +55,56 @@ if [[ ! -f "$POOL_SCRIPT" ]]; then
   exit 1
 fi
 
+# Corepack is not bundled with every Node installation, so resolve a pnpm runner
+# the same way sdk/tools/harmony/prepare-app.mjs does: an explicit override, then
+# Corepack beside Node, then Corepack on PATH, then pnpm on PATH, and finally
+# npm's on-demand runner for the SDK's pinned package manager.
+resolve_pnpm_command() {
+  local node_dir=${NODE_RUNTIME:h}
+  local candidate
+  if [[ -n "${EXPO_HARMONY_PNPM_BIN:-}" ]]; then
+    if [[ ! -x "$EXPO_HARMONY_PNPM_BIN" ]]; then
+      print -u2 "EXPO_HARMONY_PNPM_BIN is not executable: $EXPO_HARMONY_PNPM_BIN"
+      return 1
+    fi
+    PNPM_COMMAND=("$EXPO_HARMONY_PNPM_BIN")
+    return 0
+  fi
+  if [[ -x "$node_dir/corepack" ]]; then
+    PNPM_COMMAND=("$node_dir/corepack" pnpm)
+    return 0
+  fi
+  candidate=$(command -v corepack 2>/dev/null || true)
+  if [[ -n "$candidate" ]]; then
+    PNPM_COMMAND=("$candidate" pnpm)
+    return 0
+  fi
+  candidate=$(command -v pnpm 2>/dev/null || true)
+  if [[ -n "$candidate" ]]; then
+    PNPM_COMMAND=("$candidate")
+    return 0
+  fi
+  candidate=$(command -v npm 2>/dev/null || true)
+  if [[ -n "$candidate" ]]; then
+    local pinned
+    pinned=$("$NODE_RUNTIME" -e "process.stdout.write(require(process.argv[1] + '/package.json').packageManager || 'pnpm')" "$SDK_ROOT" 2>/dev/null || print -r -- pnpm)
+    PNPM_COMMAND=("$candidate" exec --yes "--package=${pinned:-pnpm}" -- pnpm)
+    return 0
+  fi
+  return 1
+}
+
 if ! "$NODE_RUNTIME" -e "require.resolve('typescript', { paths: [process.argv[1]] })" "$SDK_ROOT" >/dev/null 2>&1; then
-  COREPACK_RUNTIME="${NODE_RUNTIME:h}/corepack"
-  if [[ ! -x "$COREPACK_RUNTIME" ]]; then
-    print -u2 "SDK dependencies are missing and Corepack was not found beside Node: $COREPACK_RUNTIME"
-    print -u2 "Install the SDK workspace dependencies before initializing the Harmony pool."
+  typeset -a PNPM_COMMAND
+  if ! resolve_pnpm_command; then
+    print -u2 "SDK dependencies are missing and no pnpm runner was found."
+    print -u2 "Install pnpm, provide Corepack, set EXPO_HARMONY_PNPM_BIN, or install the SDK workspace dependencies manually."
     exit 1
   fi
-  print "Installing the minimal SDK workspace dependencies required by Harmony pool preparation"
+  print "Installing the minimal SDK workspace dependencies required by Harmony pool preparation via ${PNPM_COMMAND[1]}"
   (
     cd "$SDK_ROOT"
-    PATH="${NODE_RUNTIME:h}:$PATH" "$COREPACK_RUNTIME" pnpm install \
+    PATH="${NODE_RUNTIME:h}:$PATH" "${PNPM_COMMAND[@]}" install \
       --frozen-lockfile \
       --ignore-scripts \
       --filter @expo/expo

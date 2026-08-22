@@ -53,7 +53,20 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || { [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] && [
   exit 78
 fi
 
-# 7) The real Claude Code executable. CLAUDE_BIN already points at this launcher,
+# 7) Report the models this endpoint serves, so that scripts/preflight-models.mjs
+# can cache them without ever seeing the credentials. Deliberately out of band:
+# the fetch costs seconds, so no run path may call it. Refresh it with
+# ./start-livetest.sh --refresh-models or ./setup-harmony-pool.sh.
+if [ "${1:-}" = "--genius-list-models" ]; then
+  if [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+    exec curl -fsS --max-time 30 "$ANTHROPIC_BASE_URL/v1/models" \
+      -H "anthropic-version: 2023-06-01" -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN"
+  fi
+  exec curl -fsS --max-time 30 "$ANTHROPIC_BASE_URL/v1/models" \
+    -H "anthropic-version: 2023-06-01" -H "x-api-key: $ANTHROPIC_API_KEY"
+fi
+
+# 8) The real Claude Code executable. CLAUDE_BIN already points at this launcher,
 # so the underlying binary needs its own name. Set GENIUS_CLAUDE_REAL_BIN in
 # runner/.env when claude is not on PATH.
 REAL_CLAUDE="${GENIUS_CLAUDE_REAL_BIN:-$(command -v claude 2>/dev/null || true)}"

@@ -8,6 +8,7 @@ import { createInterface } from 'node:readline/promises';
 import { HDC_SESSION_TIMEOUT_MS, configuredHdcTarget, hdcTimeoutMessage, parseHdcTargets } from './hdc-target.mjs';
 import { configuredPreviewPools } from './preview-device-pool.mjs';
 import { resolveExecution, resolveRole, roleOwnedEnvironmentKeys } from './execution-policy.mjs';
+import { refreshModelCache, verifyConfiguredModels } from './preflight-models.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const resolveRunnerPath = (value) => isAbsolute(value) ? resolve(value) : resolve(root, value);
@@ -88,6 +89,8 @@ Run:
   --attach               Attach to tmux immediately after starting.
   --smoke-agent          Legacy Harmony Go smoke only; unsupported by direct-HAP preview.
   --dry-run              Print the resolved run without creating files or tmux.
+  --refresh-models       Ask the endpoint which models it serves and cache the
+                         answer, then exit. Runs never fetch it themselves.
   -h, --help             Show this help.
 
 Examples:
@@ -116,6 +119,7 @@ function parse(argv) {
     else if (arg === '--attach') out.attach = true;
     else if (arg === '--smoke-agent') out.smokeAgent = true;
     else if (arg === '--dry-run') out.dryRun = true;
+    else if (arg === '--refresh-models') out.refreshModels = true;
     else if (arg === '--resume') out.resume = true;
     else if (arg === '--rebuild') out.rebuild = true;
     else if (arg === '--preview-only') out.previewOnly = true;
@@ -308,8 +312,10 @@ function printPlan(plan, tmuxId = '') {
 // shell also declares it, which is a second configuration surface for something
 // config/execution.json owns. Reject it here rather than let the two disagree.
 function rejectRoleOwnedEnvironment(env = process.env) {
-  for (const key of roleOwnedEnvironmentKeys) {
-    if (!String(env[key] ?? '').trim()) continue;
+  // Iterate the environment rather than index it by name, so the textual scan
+  // in tests/orchestrator.test.mjs stays a complete account of what is read.
+  for (const [key, value] of Object.entries(env)) {
+    if (!roleOwnedEnvironmentKeys.includes(key) || !String(value ?? '').trim()) continue;
     throw new Error(
       `${key} is set in the environment, but config/execution.json owns it.\n`
       + '  Remove it from runner/.env and from the calling shell.\n'
@@ -322,6 +328,11 @@ async function main() {
   rejectRoleOwnedEnvironment();
   const raw = parse(process.argv.slice(2));
   if (raw.help) { console.log(usage()); return; }
+  if (raw.refreshModels) {
+    const cache = refreshModelCache(commandOrPath(process.env.CLAUDE_BIN || defaults.claude));
+    console.log(`cached ${cache.models.length} models: ${cache.models.join(', ')}`);
+    return;
+  }
   const requestedActions = Number(Boolean(raw.followUpFile)) + Number(Boolean(raw.rebuild || raw.resume)) + Number(Boolean(raw.previewOnly));
   if (requestedActions > 1) throw new Error('choose only one of --follow-up-file, --rebuild/--resume, or --preview-only');
   const action = raw.followUpFile ? 'follow-up' : raw.previewOnly ? 'preview' : raw.rebuild || raw.resume ? 'rebuild' : 'initial';
@@ -390,8 +401,12 @@ async function main() {
     smokeAgent: Boolean(raw.smokeAgent), node, sdk, deveco, claude, moduleCache, hdcTarget, hdcPreviewTargets, hdcPreviewPools, previewGatewayOrigin,
   };
 
+  // Cache-only, so this never reaches the network on a run path.
+  const preflight = verifyConfiguredModels(raw);
+  if (!preflight.verified && !raw.dryRun) console.log(`preflight: ${preflight.notice}`);
+
   if (raw.dryRun) {
-    console.log(JSON.stringify({ ...plan, promptBytes: Buffer.byteLength(prompt.text) }, null, 2));
+    console.log(JSON.stringify({ ...plan, promptBytes: Buffer.byteLength(prompt.text), preflight }, null, 2));
     return;
   }
 

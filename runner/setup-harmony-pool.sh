@@ -120,3 +120,11 @@ if (( WARM )); then
   "$NODE_RUNTIME" "$POOL_SCRIPT" "${warm_args[@]}"
 fi
 "$NODE_RUNTIME" "$POOL_SCRIPT" status --pool "$POOL_ROOT" --json
+
+# Cache the endpoint's model list while we are already doing slow work. Runs
+# only ever read this cache, so refreshing it here keeps their startup free of
+# the network round trip. A missing endpoint is not a pool problem.
+if ! "$ORCH_ROOT/start-livetest.sh" --refresh-models; then
+  print -u2 "Model list not cached; runs will start unverified until you run:"
+  print -u2 "  ./start-livetest.sh --refresh-models"
+fi

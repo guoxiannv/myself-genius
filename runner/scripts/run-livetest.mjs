@@ -261,8 +261,10 @@ async function designTurn(prompt, timeoutSeconds, role) {
   const args = ['-p', '--permission-mode', 'dontAsk', '--model', role.model, '--effort', role.effort, '--mcp-config', JSON.stringify({ mcpServers: {} }), '--strict-mcp-config', '--tools', '', '--output-format', 'stream-json', '--verbose', '--session-id', randomUUID(), prompt];
   const started = Date.now(); let trace = '';
   const outcome = await new Promise((resolveOutcome, rejectOutcome) => {
-    const customHeaders = [process.env.ANTHROPIC_CUSTOM_HEADERS, 'X-Genius-Disable-Thinking: 1'].filter(Boolean).join('\n');
-    const child = spawn(claude, args, { cwd: root, env: { ...process.env, ...roleEnv(role), ANTHROPIC_CUSTOM_HEADERS: customHeaders, CLAUDE_CODE_ATTRIBUTION_HEADER: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    // Thinking is requested in the request body, not through a header, so the
+    // former X-Genius-Disable-Thinking hint could never reach a relay. The
+    // design role's disableAdaptiveThinking now carries that intent.
+    const child = spawn(claude, args, { cwd: root, env: { ...process.env, ...roleEnv(role), CLAUDE_CODE_ATTRIBUTION_HEADER: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
     const liveState = { pending: '' }; let timedOut = false; let settled = false; let killTimer;
     const settle = (fn, value) => { if (settled) return; settled = true; clearTimeout(timer); clearTimeout(killTimer); fn(value); };
     const timer = setTimeout(() => { timedOut = true; child.kill('SIGINT'); killTimer = setTimeout(() => child.kill('SIGKILL'), 750); }, timeoutSeconds * 1000);

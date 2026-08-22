@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -29,6 +29,7 @@ import {
   roleOwnedEnvironmentKeys,
   validateExecutionConfig,
 } from '../scripts/execution-policy.mjs';
+import { readModelCache, verifyConfiguredModels } from '../scripts/preflight-models.mjs';
 import { repairArtifactName } from '../scripts/repair-artifact.mjs';
 import { assertDependencyRuntime, installProjectDependencies, pinRuntimeDependencies, stageHarmonyCli } from '../scripts/dependencies.mjs';
 import { HAP_DEVICE_TYPES, runHapPoolBuild } from '../scripts/hap-build.mjs';
@@ -1969,7 +1970,123 @@ test('role environment carries model window and thinking, and no model name surv
   // configuration files are covered.
   const starter = readFileSync(join(root, 'scripts/start-livetest.mjs'), 'utf8');
   assert.match(starter, /rejectRoleOwnedEnvironment\(\);/);
-  assert.match(starter, /for \(const key of roleOwnedEnvironmentKeys\)/);
+  assert.match(starter, /roleOwnedEnvironmentKeys\.includes\(key\)/);
+});
+
+// Exempt by name rather than by prefix, so that adding a variable forces a
+// deliberate decision about which of the three configuration files owns it.
+const ENV_OWNED_ELSEWHERE = [
+  // .local/llm.env owns the endpoint and its credentials.
+  'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL',
+  'ANTHROPIC_CUSTOM_HEADERS', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
+  // config/execution.json owns these; the launcher and starter both reject them.
+  'CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING',
+  // Supplied by the operating system.
+  'PATH', 'HOME', 'PWD', 'SHELL', 'TERM', 'TMPDIR', 'USER',
+];
+
+function environmentNamesReadByRunner() {
+  const names = new Set();
+  for (const file of readdirSync(join(root, 'scripts')).filter((name) => name.endsWith('.mjs'))) {
+    const source = readFileSync(join(root, 'scripts', file), 'utf8');
+    // Both spellings are in use: run-livetest reads process.env.X while
+    // hdc-target destructures and reads env.X throughout.
+    for (const [, name] of source.matchAll(/(?:process\.env|env)\.([A-Z_][A-Z0-9_]*)/g)) names.add(name);
+  }
+  // Several settings are read only by shell: setup-harmony-pool.sh resolves the
+  // pool, and claude-isolated resolves the real executable.
+  const shellFiles = [
+    ...readdirSync(root).filter((name) => name.endsWith('.sh')).map((name) => join(root, name)),
+    join(root, '.local/claude-isolated'),
+  ];
+  for (const path of shellFiles) {
+    const source = readFileSync(path, 'utf8');
+    const local = new Set([
+      ...[...source.matchAll(/^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)=/gm)].map((match) => match[1]),
+      ...[...source.matchAll(/^\s*for ([A-Za-z_][A-Za-z0-9_]*) in/gm)].map((match) => match[1]),
+    ]);
+    for (const [, name] of source.matchAll(/\$\{?([A-Z_][A-Z0-9_]*)[:}\s"]/g)) {
+      if (!local.has(name)) names.add(name);
+    }
+  }
+  return names;
+}
+
+test('model preflight reads only a local cache and never the network', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'expo-fast-preflight-'));
+  const llmEnvPath = join(dir, 'llm.env');
+  const cachePath = join(dir, 'models-cache.json');
+  const paths = { llmEnvPath, cachePath };
+  writeFileSync(llmEnvPath, 'export ANTHROPIC_BASE_URL="https://relay.example"\n');
+  const { mtimeMs, size } = statSync(llmEnvPath);
+  const llmEnvMtimeMs = Math.trunc(mtimeMs);
+  const llmEnvSize = size;
+  const served = [executionConfig.roles.main.model, executionConfig.roles.design.model, 'other-model'];
+
+  // No cache is the first-run state. It must not fail and must not fetch.
+  assert.equal(readModelCache(paths).status, 'absent');
+  assert.deepEqual(verifyConfiguredModels({}, paths).verified, false);
+  assert.match(verifyConfiguredModels({}, paths).notice, /no model cache/);
+
+  writeFileSync(cachePath, JSON.stringify({ schemaVersion: 1, llmEnvMtimeMs, llmEnvSize, fetchedAt: '2026-08-22T00:00:00.000Z', models: served }));
+  assert.equal(readModelCache(paths).status, 'fresh');
+  assert.equal(verifyConfiguredModels({}, paths).verified, true);
+
+  // A model the endpoint does not serve is the error this exists to catch.
+  assert.throws(
+    () => verifyConfiguredModels({ model: 'absent-model' }, paths),
+    /names models this endpoint does not serve: main=absent-model/,
+  );
+
+  // Editing llm.env may have changed the endpoint, so the cache can no longer
+  // be trusted. Report it and continue; do not fetch and do not fail. Rewriting
+  // within the same millisecond leaves mtime unchanged, which is why the
+  // fingerprint carries size too.
+  writeFileSync(llmEnvPath, 'export ANTHROPIC_BASE_URL="https://a-different-relay.example"\n');
+  const stale = verifyConfiguredModels({}, paths);
+  assert.equal(stale.verified, false);
+  assert.match(stale.notice, /llm\.env changed/);
+
+  // Corrupt or foreign cache content degrades the same way.
+  writeFileSync(cachePath, 'not json');
+  assert.equal(readModelCache(paths).status, 'unreadable');
+  rmSync(dir, { recursive: true, force: true });
+
+  // The budget for starting a run is a few milliseconds and one round trip to
+  // this relay measured 1.5-2.0s, so the read path must contain no network
+  // call at all. Fetching happens only through the launcher, out of band.
+  const preflight = readFileSync(join(root, 'scripts/preflight-models.mjs'), 'utf8');
+  const readPath = preflight.slice(
+    preflight.indexOf('function fingerprintLlmEnv'),
+    preflight.indexOf('// Fetch through the launcher'),
+  );
+  assert.ok(readPath.includes('export function verifyConfiguredModels'), 'read path located');
+  assert.doesNotMatch(readPath, /fetch\(|https?:\/\/|spawnSync|execSync|curl/);
+  assert.match(preflight, /spawnSync\(claudeBin, \['--genius-list-models'\]/);
+  assert.match(readFileSync(join(root, '.local/claude-isolated'), 'utf8'), /--genius-list-models/);
+});
+
+test('.env.example documents exactly the machine settings the runner reads', () => {
+  const documented = new Set(
+    [...readFileSync(join(root, '.env.example'), 'utf8').matchAll(/^#?\s*([A-Z_][A-Z0-9_]*)=/gm)].map((match) => match[1]),
+  );
+  const read = environmentNamesReadByRunner();
+  const exempt = new Set(ENV_OWNED_ELSEWHERE);
+
+  const undocumented = [...read].filter((name) => !documented.has(name) && !exempt.has(name)).sort();
+  assert.deepEqual(undocumented, [], 'read by the runner but absent from .env.example');
+
+  // The reverse direction catches a setting that was documented and then
+  // disconnected, which advertises a knob that silently does nothing.
+  const unread = [...documented].filter((name) => !read.has(name)).sort();
+  assert.deepEqual(unread, [], 'documented in .env.example but never read');
+
+  // The scan above is textual, so it is complete only while every read uses a
+  // literal name. Fail if a dynamic lookup appears and invalidates that.
+  for (const file of readdirSync(join(root, 'scripts')).filter((name) => name.endsWith('.mjs'))) {
+    const source = readFileSync(join(root, 'scripts', file), 'utf8');
+    assert.doesNotMatch(source, /(?:process\.env|[^A-Za-z_]env)\[/, `${file} reads the environment dynamically`);
+  }
 });
 
 test('repair artifacts give every retry separate evidence', () => {

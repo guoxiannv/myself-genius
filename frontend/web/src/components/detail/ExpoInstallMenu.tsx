@@ -23,6 +23,19 @@ export function ExpoInstallMenu({
   const [packageRequestPending, setPackageRequestPending] = useState(false)
   const [packageRequestError, setPackageRequestError] = useState("")
   const menuRef = useRef<HTMLDivElement>(null)
+  const packageUpdating = Boolean(
+    artifacts.package_outdated && !artifacts.install_ready,
+  )
+  const packageBuilding = packageRequestPending || ["building", "packaging"].includes(
+    artifacts.distribution_status,
+  )
+  const installButtonLabel = packageBuilding
+    ? packageUpdating
+      ? "正在更新安装包"
+      : "正在生成安装包"
+    : packageUpdating
+      ? "更新安装包"
+      : "安装"
 
   useEffect(() => {
     if (!menuOpen) return
@@ -66,7 +79,7 @@ export function ExpoInstallMenu({
           className="inline-flex h-8 items-center gap-1.5 rounded-full border border-accent/35 bg-accent/15 px-3 text-xs font-semibold text-accent-soft shadow-lg shadow-black/20 transition-colors hover:border-accent/55 hover:bg-accent/25 hover:text-foreground"
         >
           <InstallIcon />
-          安装
+          {installButtonLabel}
           <ChevronIcon open={menuOpen} />
         </button>
 

@@ -2346,6 +2346,23 @@ def find_first_screenshot(run_id: str) -> Path | None:
     return None
 
 
+def find_history_thumbnail(record: RunRecord) -> Path | None:
+    """Return the desktop-oriented thumbnail used by the application history.
+
+    Expo previews persist a PC screenshot separately from the legacy phone-sized
+    capture. Prefer that image for the history card, while retaining fallbacks
+    for older runs and non-Expo runtimes.
+    """
+    desktop_capture = MEDIA_DIR / record.run_id / "preview-desktop.jpeg"
+    if desktop_capture.is_file():
+        return desktop_capture
+    if record.runtime == "expo":
+        desktop_preview = expo_preview_media_path(Path(record.workspace), "desktop")
+        if desktop_preview:
+            return desktop_preview
+    return find_first_screenshot(record.run_id)
+
+
 def state_root(workspace: Path) -> Path:
     return workspace / ".arkpilot" / "state"
 
@@ -5139,7 +5156,7 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             except Exception:
                 media_path = None
             try:
-                screenshot_path = find_first_screenshot(record.run_id)
+                screenshot_path = find_history_thumbnail(record)
             except Exception:
                 screenshot_path = None
             media_type = media_path.suffix.lower().lstrip(".") if media_path else ""
@@ -6051,7 +6068,7 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         record = self.load_accessible_run(run_id, allow_share=True)
         if not record:
             return
-        screenshot_path = find_first_screenshot(record.run_id)
+        screenshot_path = find_history_thumbnail(record)
         if not screenshot_path:
             self.send_error(HTTPStatus.NOT_FOUND, "Thumbnail not found")
             return

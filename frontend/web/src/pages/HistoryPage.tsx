@@ -6,8 +6,8 @@ import { StatusBadge, statusToTone } from "@/components/ui/StatusBadge"
 import { api, withCacheBust } from "@/lib/api"
 import { cn, formatDateTime } from "@/lib/format"
 import type { RunSummary } from "@/lib/types"
-import generatedFailedImage from "@/assets/images/generated-failed.jpeg"
-import generatingImage from "@/assets/images/generating.jpeg"
+import generatedFailedImage from "@/assets/images/generated-failed-pc.jpeg"
+import generatingImage from "@/assets/images/generating-pc.jpeg"
 
 type StatusFilter = "all" | "running" | "succeeded" | "failed" | "waiting"
 type SortOrder = "newest" | "oldest"
@@ -217,7 +217,7 @@ export function HistoryPage() {
           ) : filtered.length === 0 ? (
             <EmptyState hasRuns={runs.length > 0} />
           ) : view === "grid" ? (
-            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+            <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
               {filtered.map((run) => (
                 <RunCard key={run.run_id} run={run} />
               ))}
@@ -305,11 +305,11 @@ function RunCard({ run }: { run: RunSummary }) {
       to={run.detail_url || `/runs/${run.run_id}`}
       className="group flex flex-col overflow-hidden rounded-2xl border border-border bg-surface/50 transition-all hover:border-accent/40 hover:bg-surface"
     >
-      <div className="relative aspect-[9/16] overflow-hidden bg-background">
+      <div className="relative aspect-[3/2] overflow-hidden bg-background">
         <img
           src={imgSrc}
           alt={useShot ? "应用首页截图" : bucket === "failed" ? "生成失败" : "生成中"}
-          className="h-full w-full object-cover object-top transition-transform duration-300 group-hover:scale-[1.03]"
+          className="h-full w-full object-contain transition-transform duration-300 group-hover:scale-[1.03]"
           loading="lazy"
         />
       </div>

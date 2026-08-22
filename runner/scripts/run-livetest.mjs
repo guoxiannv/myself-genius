@@ -172,7 +172,7 @@ function buildDesignPrompt(request) {
   return `Create a polished visual design reference for the Expo React Native app below. Do not analyze, reason, explain, or plan: immediately emit the finished HTML. Make one decisive design, not a generic dashboard template.\n\nUSER REQUEST:\n${request.trim()}\n\nYour first output character must be <. Return exactly one self-contained HTML document and then stop. Do not call tools and do not write files. Keep the complete document around 4-6 KB so it finishes quickly. Use semantic HTML and embedded CSS to show the primary screen plus compact representations of other requested destinations/states. Make the composition feel specific to this product: derive its visual metaphor, information hierarchy, density, palette, typography scale, spacing, radii, surfaces, and navigation from the request. Avoid the familiar purple-gradient SaaS dashboard, interchangeable KPI-card grids, repeated KPI summaries, decorative clutter, and phone list rows merely stretched across a PC window. Include realistic copy and populated states. Put reusable visual values in :root CSS custom properties so another model can translate them to React Native.\n\nDesign and mentally check these exact logical viewport canvases: phone 390x844, compact PC/tablet 1024x640, and wide desktop 1440x900. CSS media queries are the layout source of truth: phone is width <640, tablet/compact PC is 640-1279, and wide desktop is >=1280. The 1024x640 composition is a primary PC preview target, not an afterthought: use a top horizontal navigation and a balanced one- or two-column content composition without large accidental blank regions. At >=1280 use a fixed-width left sidebar and a flexible genuinely multi-column main area. At <640 use bottom navigation and one content column when there are multiple destinations. Make flex directions, wrapping, maximum content widths, and card widths explicit at every breakpoint; never use a 900px desktop breakpoint, fixed full-screen content height, or vertical stretching merely to fill the viewport.\n\nInclude one tiny inline script marked data-genius-viewport-monitor that observes matchMedia('(max-width: 639px)') and matchMedia('(min-width: 1280px)'), listens for media/resize changes, and updates document.documentElement.dataset.viewport to phone, tablet, or desktop plus dataset.logicalWidth and dataset.logicalHeight. The script only exposes the active viewport for inspection; do not use it to imperatively restyle elements or duplicate the CSS breakpoint logic.\n\nFor icons, use recognizable Lucide icon names via elements such as <i data-lucide="plus"></i>; load exactly https://unpkg.com/lucide@0.468.0/dist/umd/lucide.js and call lucide.createIcons() instead of drawing bespoke SVG. Use no raster assets and no other external dependency. Return only the HTML, with no Markdown fences, explanation, or additional text.`;
 }
 function buildFollowUpPrompt(text) {
-  return `The user wants to modify the existing product in this same project and conversation. Preserve working behavior that is not part of the request, and do not recreate the app from scratch.\n\nUSER FOLLOW-UP:\n${text.trim()}\n\nImplement the requested change completely in the current App.tsx/src/** and permitted product files. Use only catalog-supported exact dependency versions. After meaningful edits, call expo_fast.check and fix every diagnostic. When the change is complete, call expo_fast.build once and fix any remaining failure before stopping. Do not use arbitrary shell commands or inspect paths outside the product whitelist.`;
+  return `The user wants to modify the existing product in this same project and conversation. Preserve working behavior that is not part of the request, and do not recreate the app from scratch.\n\nUSER FOLLOW-UP:\n${text.trim()}\n\nImplement the requested change completely in the current App.tsx/src/** and permitted product files. Use only catalog-supported exact dependency versions. Read only the explicitly whitelisted product and diagnostic paths; do not read .expo-fast/capability-catalog.json or any other unlisted path. After meaningful edits, call expo_fast.check and fix every diagnostic. When the change is complete, call expo_fast.build once and fix any remaining failure before stopping. Do not use arbitrary shell commands or inspect paths outside the product whitelist.`;
 }
 function ensureInitialRevision(metrics) {
   metrics.revisions ||= [];
@@ -278,7 +278,6 @@ async function designTurn(prompt, timeoutSeconds, model) {
 }
 
 async function claudeTurn(project, trace, prompt, sessionId, resume = false, timeoutMinutes = 0, acceptDeadline = false, effort = executionDefaults.effort, model = executionDefaults.model, selfVerify = false) {
-  const sessionArgs = resume ? ['--resume', sessionId] : ['--session-id', sessionId];
   const allowedTools = [
     'Read(./AGENTS.md)', 'Read(./package.json)', 'Read(./app.json)', 'Read(./index.js)', 'Read(./tsconfig.json)', 'Read(./App.tsx)', 'Read(./src/**)',
     'Read(./.expo-fast/design.html)',
@@ -295,28 +294,46 @@ async function claudeTurn(project, trace, prompt, sessionId, resume = false, tim
     expo_fast: { command: node22, args: [agentToolsServer, '--project', project] },
   } : {} });
   const tools = selfVerify ? 'Read,Write,Edit,mcp__expo_fast__check,mcp__expo_fast__build' : 'Read,Write,Edit';
-  const args = ['-p', '--permission-mode', 'dontAsk', '--model', model, '--effort', effort, '--mcp-config', mcpConfig, '--strict-mcp-config', '--tools', tools, '--allowedTools', allowedTools.join(','), '--output-format', 'stream-json', '--verbose', ...sessionArgs, prompt];
   if (!Number.isFinite(timeoutMinutes) || timeoutMinutes < 0) throw new Error(`invalid Claude timeout: ${timeoutMinutes}`);
-  const started = Date.now();
-  const outcome = await new Promise((ok, fail) => {
-    const child = spawn(claude, args, { cwd: project, env: { ...process.env, CLAUDE_CODE_ATTRIBUTION_HEADER: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
-    const output = createWriteStream(trace, { flags: 'w' });
-    const liveState = { pending: '' };
-    child.stdout.on('data', (chunk) => { output.write(chunk); if (liveClaude) displayClaudeChunk(chunk, liveState); });
-    child.stderr.on('data', (chunk) => { output.write(chunk); if (liveClaude) process.stderr.write(`[expo-fast Claude stderr] ${chunk}`); });
-    let timedOut = false;
-    const timer = timeoutMinutes > 0 ? setTimeout(() => { timedOut = true; child.kill('SIGINT'); }, timeoutMinutes * 60_000) : null;
-    child.on('error', (error) => { if (timer) clearTimeout(timer); output.end(); fail(error); });
-    child.on('exit', (code) => {
-      if (timer) clearTimeout(timer); output.end(() => {
-        if (timedOut && acceptDeadline) ok({ deadlineReached: true, exitCode: code });
-        else if (timedOut) fail(new Error(`claude exceeded ${timeoutMinutes} minute limit; partial trace saved to ${trace}`));
-        else if (code === 0) ok({ deadlineReached: false, exitCode: code });
-        else fail(new Error(`claude exited ${code}; partial trace saved to ${trace}`));
+  const runTurn = (turnSessionId, turnResume, turnPrompt, appendTrace = false) => {
+    const sessionArgs = turnResume ? ['--resume', turnSessionId] : ['--session-id', turnSessionId];
+    const args = ['-p', '--permission-mode', 'dontAsk', '--model', model, '--effort', effort, '--mcp-config', mcpConfig, '--strict-mcp-config', '--tools', tools, '--allowedTools', allowedTools.join(','), '--output-format', 'stream-json', '--verbose', ...sessionArgs, turnPrompt];
+    const started = Date.now();
+    return new Promise((ok, fail) => {
+      const child = spawn(claude, args, { cwd: project, env: { ...process.env, CLAUDE_CODE_ATTRIBUTION_HEADER: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
+      const output = createWriteStream(trace, { flags: appendTrace ? 'a' : 'w' });
+      const liveState = { pending: '' };
+      let stderrText = '';
+      child.stdout.on('data', (chunk) => { output.write(chunk); if (liveClaude) displayClaudeChunk(chunk, liveState); });
+      child.stderr.on('data', (chunk) => { stderrText += chunk.toString(); output.write(chunk); if (liveClaude) process.stderr.write(`[expo-fast Claude stderr] ${chunk}`); });
+      let timedOut = false;
+      const timer = timeoutMinutes > 0 ? setTimeout(() => { timedOut = true; child.kill('SIGINT'); }, timeoutMinutes * 60_000) : null;
+      child.on('error', (error) => { if (timer) clearTimeout(timer); output.end(); fail(error); });
+      child.on('exit', (code) => {
+        if (timer) clearTimeout(timer); output.end(() => {
+          if (timedOut && acceptDeadline) ok({ deadlineReached: true, exitCode: code, stderrText, ms: Date.now() - started });
+          else if (timedOut) fail(new Error(`claude exceeded ${timeoutMinutes} minute limit; partial trace saved to ${trace}`));
+          else ok({ deadlineReached: false, exitCode: code, stderrText, ms: Date.now() - started });
+        });
       });
     });
-  });
-  return { ms: Date.now() - started, ...outcome };
+  };
+
+  const first = await runTurn(sessionId, resume, prompt);
+  if (first.exitCode !== 0 && resume && /No conversation found with session ID/i.test(first.stderrText || '')) {
+    const freshSessionId = randomUUID();
+    progress(`resume session unavailable; starting fresh follow-up session=${freshSessionId}`);
+    const fallbackPrompt = `The previous Claude conversation is unavailable. Treat the current project files as the source of truth and continue this follow-up in a fresh session. Do not recreate working features or discard unrelated changes.\n\n${prompt}`;
+    const fallback = await runTurn(freshSessionId, false, fallbackPrompt, true);
+    if (fallback.exitCode !== 0 && !(fallback.deadlineReached && acceptDeadline)) {
+      throw new Error(`claude exited ${fallback.exitCode}; partial trace saved to ${trace}`);
+    }
+    return { ms: first.ms + fallback.ms, sessionId: freshSessionId, resumed: false, resumeFallback: true, ...fallback };
+  }
+  if (first.exitCode !== 0 && !(first.deadlineReached && acceptDeadline)) {
+    throw new Error(`claude exited ${first.exitCode}; partial trace saved to ${trace}`);
+  }
+  return { ...first, sessionId, resumed: resume, ms: first.ms };
 }
 function hdcRun(args) {
   const r = spawnSync(hdc, args, { encoding: 'utf8' });
@@ -867,6 +884,11 @@ async function main() {
     setRunState('generating_code', 'follow_up', { ...stateContext, revision: currentRevision.number, sessionId });
     progress(`follow-up turn · revision=${currentRevision.number} · session=${sessionId} · model=${model} · effort=${effort}`);
     const followUpTurn = await claudeTurn(project, implementationTrace, buildFollowUpPrompt(followUpText), sessionId, true, Number(o.claudeTimeoutMinutes || 0), false, effort, model, true);
+    if (followUpTurn.sessionId && followUpTurn.sessionId !== sessionId) {
+      sessionId = followUpTurn.sessionId;
+      metrics.sessionId = sessionId;
+      progress(`follow-up session rotated · session=${sessionId}`);
+    }
     currentRevision.agentMs = followUpTurn.ms;
     currentRevision.usage = traceUsage(implementationTrace);
     progress(`follow-up turn finished · ${followUpTurn.ms}ms`);

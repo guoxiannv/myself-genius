@@ -510,7 +510,9 @@ class ExpoFastRuntimeTests(unittest.TestCase):
             )
         )
         record.status = "running"
-        self.assertFalse(
+        # The runtime state passed as ``completed`` is authoritative after a
+        # launcher restart; a stale persisted status must not block packaging.
+        self.assertTrue(
             remote_ui_app.expo_package_operation_ready(
                 record,
                 "completed",
@@ -674,6 +676,20 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(completed["event_count"], 4)
         self.assertEqual(completed["events"][-1]["summary"], "Genius 会话完成 · 4 轮 · 12 秒")
+
+        # A retry may append another failed result before the final successful
+        # result in the same trace. The detail timeline should show only the
+        # final outcome.
+        retry_rows = [
+            {"type": "result", "subtype": "error", "num_turns": 0, "duration_ms": 0, "is_error": True},
+            {"type": "result", "subtype": "success", "num_turns": 5, "duration_ms": 2_000, "is_error": False},
+        ]
+        with trace_path.open("a", encoding="utf-8") as stream:
+            stream.write("".join(json.dumps(row) + "\n" for row in retry_rows))
+        recovered = remote_ui_app.load_expo_claude_trace_groups(workspace, state)[0]
+        result_events = [event for event in recovered["events"] if event["kind"] == "result"]
+        self.assertEqual(len(result_events), 1)
+        self.assertEqual(result_events[0]["status"], "completed")
 
         repair_path = trace_dir / "agent-repair-trace.jsonl"
         repair_rows = [

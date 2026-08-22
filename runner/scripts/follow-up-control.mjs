@@ -255,6 +255,7 @@ async function runWorker(project, runName) {
       state.active_command = null;
       state.interrupt_command = null;
       state.active_pid = null;
+      state.session_id = resultSession(project) || state.session_id;
       state.transcript_path = latestRevisionTrace(project) || state.transcript_path;
       state.last_error = active.error || '';
       state.status = state.queue.length ? 'starting' : 'idle';

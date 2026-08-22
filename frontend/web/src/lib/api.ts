@@ -53,6 +53,12 @@ function safeParse(text: string): unknown {
   }
 }
 
+function withShareToken(path: string, shareToken = ""): string {
+  if (!shareToken) return path
+  const separator = path.includes("?") ? "&" : "?"
+  return `${path}${separator}share=${encodeURIComponent(shareToken)}`
+}
+
 export const api = {
   createRun: (body: CreateRunRequest) =>
     request<CreateRunResponse>("/api/runs", {
@@ -60,7 +66,10 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  getRun: (runId: string) => request<RunProgress>(`/api/runs/${runId}`),
+  getRun: (runId: string, shareToken = "") =>
+    request<RunProgress>(
+      `/api/runs/${runId}${shareToken ? `?share=${encodeURIComponent(shareToken)}` : ""}`,
+    ),
 
   getRuns: () => request<RunListResponse>("/api/runs"),
 
@@ -99,24 +108,32 @@ export const api = {
       body: "{}",
     }),
 
-  startPreview: (runId: string, kind: PreviewKind) =>
+  startPreview: (runId: string, kind: PreviewKind, viewerId = "legacy", shareToken = "") =>
     request<{
       ok: boolean
       accepted: boolean
       run_id: string
       status: string
       preview?: RunPreviewSession
-    }>(`/api/runs/${runId}/previews/${kind}/start`, {
+    }>(withShareToken(`/api/runs/${runId}/previews/${kind}/start`, shareToken), {
       method: "POST",
-      body: "{}",
+      body: JSON.stringify({ viewer_id: viewerId }),
     }),
 
-  heartbeatPreview: (runId: string, kind: PreviewKind, visible: boolean, keepalive = false) =>
-    request<{ ok: boolean; run_id: string; kind: PreviewKind; visible: boolean }>(
-      `/api/runs/${runId}/previews/${kind}/heartbeat`,
+  heartbeatPreview: (
+    runId: string,
+    kind: PreviewKind,
+    visible: boolean,
+    keepalive = false,
+    viewerId = "legacy",
+    shareToken = "",
+    leaving = false,
+  ) =>
+    request<{ ok: boolean; run_id: string; kind: PreviewKind; visible: boolean; viewer_count?: number }>(
+      withShareToken(`/api/runs/${runId}/previews/${kind}/heartbeat`, shareToken),
       {
         method: "POST",
-        body: JSON.stringify({ visible }),
+        body: JSON.stringify({ visible, viewer_id: viewerId, leaving }),
         keepalive,
       },
     ),
@@ -148,7 +165,7 @@ export const api = {
       method: "DELETE",
     }),
 
-  sendLiveInput: (runId: string, preview: string, body: LivePreviewInput) =>
+  sendLiveInput: (runId: string, preview: string, body: LivePreviewInput, shareToken = "") =>
     request<{
       ok: boolean
       frame_seq: number
@@ -156,7 +173,10 @@ export const api = {
       refresh_queued: boolean
       timings: Record<string, number>
     }>(
-      `/api/runs/${runId}/live/input${preview ? `?preview=${encodeURIComponent(preview)}` : ""}`,
+      withShareToken(
+        `/api/runs/${runId}/live/input${preview ? `?preview=${encodeURIComponent(preview)}` : ""}`,
+        shareToken,
+      ),
       {
         method: "POST",
         body: JSON.stringify(body),
@@ -164,14 +184,17 @@ export const api = {
       },
     ),
 
-  getLiveWebRTCConfig: (runId: string, preview = "") =>
+  getLiveWebRTCConfig: (runId: string, preview = "", shareToken = "") =>
     request<{
       available: boolean
       ice_servers: RTCIceServer[]
       connect_timeout_ms: number
       transport: string
       offer_path: string
-    }>(`/api/runs/${runId}/live/webrtc/config${preview ? `?preview=${encodeURIComponent(preview)}` : ""}`),
+    }>(withShareToken(
+      `/api/runs/${runId}/live/webrtc/config${preview ? `?preview=${encodeURIComponent(preview)}` : ""}`,
+      shareToken,
+    )),
 
   createLiveWebRTCAnswer: (
     offerPath: string,

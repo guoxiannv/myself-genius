@@ -47,13 +47,15 @@ const COMPLETE_RUN_STATUSES = new Set(["complete", "completed", "done", "succeed
 export function DetailPage() {
   const { runId } = useParams()
   const [searchParams] = useSearchParams()
-  const { data, error, finished } = useRunStream(runId)
+  const shareToken = searchParams.get("share") || ""
+  const { data, error, finished } = useRunStream(runId, shareToken)
 
   const isDemo = searchParams.get("ask") === "demo"
   const isFollowUpDemo = searchParams.get("followup") === "demo"
   // 本地联调专用：绕过真实的签名和二维码生成，仅用于续跑交互模拟。
   const isFollowUpHapDemo = searchParams.get("followup") === "hap-demo"
   const isExpo = String(data?.runtime || data?.run.runtime || "").toLowerCase() === "expo"
+  const canWrite = data?.access?.can_write !== false
   const runStatus = String(data?.status || "").trim().toLowerCase()
   // ArkPilot 的主任务终态实际为 complete；续跑控制器存在也说明首版本已完成并进入交互阶段。
   const followUpEstablished = Boolean(data?.follow_up?.run_name || data?.follow_up?.session_id)
@@ -82,8 +84,8 @@ export function DetailPage() {
         left={<BackLink />}
         right={
           <div className="flex items-center gap-1.5 sm:gap-2">
-            {!isExpo && <PackageButton compact runId={runId} artifacts={data?.artifacts} />}
-            {isExpo && data && (mainBuildComplete || Boolean(data.artifacts.hap_found)) && (
+            {canWrite && !isExpo && <PackageButton compact runId={runId} artifacts={data?.artifacts} />}
+            {canWrite && isExpo && data && (mainBuildComplete || Boolean(data.artifacts.hap_found)) && (
               <ExpoInstallMenu runId={data.run.run_id} artifacts={data.artifacts} serve={data.expo?.serve} />
             )}
             <AuthControl compact />
@@ -131,7 +133,7 @@ export function DetailPage() {
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(360px,0.8fr)_minmax(0,1.2fr)] xl:grid-cols-[minmax(420px,0.75fr)_minmax(0,1.35fr)]">
           {/* 左：进度概览 + 统一 Agent 构建会话 */}
           <div className="flex min-w-0 flex-col gap-3.5">
-            {pendingQuestions.length ? (
+            {canWrite && pendingQuestions.length ? (
               <QuestionPanel runId={runId} pending={pendingQuestions} mock={isDemo && !data?.questions?.pending?.length} />
             ) : null}
 
@@ -151,6 +153,7 @@ export function DetailPage() {
                 trace={data?.follow_up_trace}
                 expo={isExpo ? data?.expo : undefined}
                 expoHapReady={Boolean(data?.artifacts.hap_download_path)}
+                readOnly={!canWrite}
                 mock={isFollowUpDemo || isFollowUpHapDemo}
               />
             ) : null}
@@ -168,6 +171,7 @@ export function DetailPage() {
                 runtime={data?.runtime || data?.run.runtime || "arkpilot"}
                 previewPolicy={data?.preview_policy}
                 previewSessions={data?.preview_sessions}
+                shareToken={shareToken}
               />
             </section>
           </div>

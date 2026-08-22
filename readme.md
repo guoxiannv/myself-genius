@@ -109,8 +109,9 @@ frontend/scripts/restart_local.sh --tmux
 ```
 
 浏览器打开 `http://127.0.0.1:8180`，选择 `Expo`，输入“生成一个简单番茄闹钟APP”并提交。
-任务完成后，Runner 会把生成的 HAP 直接安装到 PC 模拟器进行预览；只要 HAP 可用，即使模拟器
-预览失败，详情页仍应显示原有的安装入口。对应本地产物位于：
+任务完成后不会自动占用 PC 模拟器。HAP 可用时，详情页显示“在 PC 模拟器中预览”按钮；用户点击后
+才进入共享设备池的 FIFO 队列并完成安装、启动和最大化。模拟器预览失败不影响原有安装入口。
+对应本地产物位于：
 
 ```text
 expo-app/remote-ui-<run_id>/dist/harmony-go/bundle.js

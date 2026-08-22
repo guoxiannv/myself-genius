@@ -152,7 +152,7 @@ class ExpoFastRuntimeTests(unittest.TestCase):
                 "--hap",
                 "true",
                 "--launch",
-                "true",
+                "false",
             ],
         )
         self.assertEqual(

@@ -8,6 +8,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scan_install.live_preview import Frame, LiveInputRateLimitError, parse_live_input
 
@@ -97,6 +98,7 @@ class LivePreviewApiTests(unittest.TestCase):
         remote_ui_app.LIVE_PREVIEW_LATENCY_LOG_PATH = Path(self.temp_dir.name) / "latency.jsonl"
         self.run_id = "c" * 32
         self.owner_id = "o" * 32
+        self.share_token = "shared-preview-token"
         remote_ui_app.save_run(
             remote_ui_app.RunRecord(
                 run_id=self.run_id,
@@ -107,6 +109,7 @@ class LivePreviewApiTests(unittest.TestCase):
                 created_at=remote_ui_app.to_iso(),
                 updated_at=remote_ui_app.to_iso(),
                 owner_id=self.owner_id,
+                share_token=self.share_token,
                 capture_status="complete",
             )
         )
@@ -238,6 +241,65 @@ class LivePreviewApiTests(unittest.TestCase):
             body={"type": "offer", "sdp": "offer-sdp", "signaling_id": "signal-test"},
         )
         self.assertEqual(status, 404)
+
+    def test_share_visitor_can_watch_control_and_negotiate_live_preview(self) -> None:
+        share = f"share={self.share_token}"
+        status, _, data = self.request(
+            "GET",
+            f"/api/runs/{self.run_id}/live/frame?{share}",
+            owner=False,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(data, b"fake-jpeg")
+
+        status, _, data = self.request(
+            "POST",
+            f"/api/runs/{self.run_id}/live/input?{share}",
+            owner=False,
+            body={"type": "tap", "point": {"x": 0.5, "y": 0.5}},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(data)["ok"])
+
+        status, _, data = self.request(
+            "GET",
+            f"/api/runs/{self.run_id}/live/webrtc/config?{share}",
+            owner=False,
+        )
+        self.assertEqual(status, 200)
+        config = json.loads(data)
+        self.assertIn(f"share={self.share_token}", config["offer_path"])
+
+        status, _, data = self.request(
+            "POST",
+            config["offer_path"],
+            owner=False,
+            body={"type": "offer", "sdp": "offer-sdp", "signaling_id": "shared-signal"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(data)["type"], "answer")
+
+    def test_share_visitor_can_release_preview_lease(self) -> None:
+        record = remote_ui_app.load_run(self.run_id)
+        assert record is not None
+        record.preview_sessions = {
+            "phone": {
+                "status": "ready",
+                "target": "phone-1",
+                "lease_id": "lease-1",
+                "live_available": True,
+            }
+        }
+        remote_ui_app.save_run(record)
+        with patch.object(remote_ui_app, "release_preview_lease", side_effect=lambda record, kind, **_: record):
+            status, _, data = self.request(
+                "POST",
+                f"/api/runs/{self.run_id}/previews/phone/release?share={self.share_token}",
+                owner=False,
+            )
+
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(data)["ok"])
 
     def test_invalid_input_is_rejected_before_reaching_the_device(self) -> None:
         status, _, data = self.request(

@@ -1,6 +1,11 @@
 import { ApiError, api } from "./api"
 import type { LivePreviewInput } from "./types"
 
+function createRequestId(prefix: string) {
+  return globalThis.crypto?.randomUUID?.()
+    || `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
 export interface WebRTCFrameMetadata {
   sequence: number
   width: number
@@ -14,6 +19,7 @@ export interface WebRTCFrameMetadata {
 type WebRTCPreviewOptions = {
   runId: string
   preview?: string
+  shareToken?: string
   onOpen: () => void
   onFallback: (reason: string) => void
   onInputError: (reason: string) => void
@@ -43,7 +49,11 @@ export class LivePreviewWebRTC {
   async connect(): Promise<void> {
     try {
       const config = await retrySignaling(
-        () => api.getLiveWebRTCConfig(this.options.runId, this.options.preview),
+        () => api.getLiveWebRTCConfig(
+          this.options.runId,
+          this.options.preview,
+          this.options.shareToken,
+        ),
         () => this.closed,
       )
       if (!config.available) throw new Error("服务端 WebRTC 不可用")
@@ -76,7 +86,7 @@ export class LivePreviewWebRTC {
       await waitForIceGathering(pc, 5_000)
       if (this.closed) return
       if (!pc.localDescription) throw new Error("浏览器未生成 WebRTC offer")
-      const signalingId = crypto.randomUUID()
+      const signalingId = createRequestId("signal")
       const answer = await retrySignaling(
         () => api.createLiveWebRTCAnswer(
           config.offer_path,
@@ -100,7 +110,7 @@ export class LivePreviewWebRTC {
   sendInput(payload: LivePreviewInput): boolean {
     const channel = this.channel
     if (!channel || channel.readyState !== "open" || this.closed) return false
-    const requestId = crypto.randomUUID()
+    const requestId = createRequestId("input")
     this.inputStartedAt.set(requestId, performance.now())
     channel.send(JSON.stringify({ type: "input", request_id: requestId, payload }))
     return true

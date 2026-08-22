@@ -8,7 +8,7 @@ interface RunStreamState {
   data: RunProgress | null
   error: string | null
   transport: Transport
-  /** 主构建是否进入终态；详情页仍会为续跑和手动签名保持同步。 */
+  /** 主构建是否进入终态；详情页仍持续同步预览租约与队列状态。 */
   finished: boolean
 }
 
@@ -31,7 +31,7 @@ const DEFAULT_POLL_MS = 3000
  * 优先尝试 SSE（GET /api/runs/:id/events），后端暂未实现时自动降级为轮询。
  * 后端补上 SSE 端点后，本 hook 无需改动即可启用推送。
  */
-export function useRunStream(runId: string | undefined): RunStreamState {
+export function useRunStream(runId: string | undefined, shareToken = ""): RunStreamState {
   const [data, setData] = useState<RunProgress | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [transport, setTransport] = useState<Transport>("connecting")
@@ -65,10 +65,9 @@ export function useRunStream(runId: string | undefined): RunStreamState {
 
     const applyProgress = (progress: RunProgress) => {
       if (cancelled) return
-      // unsigned HAP 出现后页面进入交互阶段：续跑与手动签名都需要持续同步。
-      interactiveRef.current = Boolean(
-        progress.runtime === "expo" || progress.follow_up?.run_name || progress.artifacts?.hap_found,
-      )
+      // 详情页本身就是预览控制面。即使主构建已经结束、访问者没有代码
+      // 写权限，也必须继续同步模拟器排队、连接和释放状态。
+      interactiveRef.current = true
       progressRef.current = progress
       setData(progress)
       setError(null)
@@ -78,7 +77,7 @@ export function useRunStream(runId: string | undefined): RunStreamState {
     const poll = async () => {
       if (cancelled || (finishedRef.current && !interactiveRef.current)) return
       try {
-        const progress = await api.getRun(runId)
+        const progress = await api.getRun(runId, shareToken)
         if (cancelled) return
         applyProgress(progress)
         setTransport((prev) => (prev === "sse" ? prev : "polling"))
@@ -109,7 +108,8 @@ export function useRunStream(runId: string | undefined): RunStreamState {
       }
 
       try {
-        eventSource = new EventSource(`/api/runs/${runId}/events`)
+        const query = shareToken ? `?share=${encodeURIComponent(shareToken)}` : ""
+        eventSource = new EventSource(`/api/runs/${runId}/events${query}`)
       } catch {
         startPolling()
         return
@@ -136,7 +136,7 @@ export function useRunStream(runId: string | undefined): RunStreamState {
 
     // 先抓一次初始状态，保证首屏立刻有数据，再建立流。
     void api
-      .getRun(runId)
+      .getRun(runId, shareToken)
       .then((progress) => {
         applyProgress(progress)
         if (!finishedRef.current || interactiveRef.current) startSse()
@@ -153,7 +153,7 @@ export function useRunStream(runId: string | undefined): RunStreamState {
       eventSource?.close()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runId])
+  }, [runId, shareToken])
 
   return { data, error, transport, finished }
 }

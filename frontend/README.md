@@ -17,8 +17,9 @@
 ## 功能
 
 - 首页一句话输入框，提交后进入详情页
-- 详情页左侧实时显示生成进度与简化执行轨迹（SSE 推送，自动降级轮询），续跑、进度和安装包规则见 [`docs/FOLLOW_UP_AND_INSTALL.md`](./docs/FOLLOW_UP_AND_INSTALL.md)，右侧设备预览检测到 GIF/视频后自动切换
-- 0→1 首版本在 QA、unsigned HAP 和预览就绪后自动签名并生成二维码；后续调整只刷新代码、HAP 和预览，停在 80%，由用户点击「更新安装包」后才生成最新二维码
+- 详情页左侧实时显示生成进度与简化执行轨迹（SSE 推送，自动降级轮询）；右侧模拟器默认不占用设备，用户点击后进入共享设备池 FIFO
+- 任何能打开详情页的人都可以启动、观看和操作模拟器；共享访问不会获得续跑、问题回答、发布或打包等代码写权限
+- 0→1 首版本在 QA 与 unsigned HAP 就绪后自动签名并生成二维码；后续调整由用户点击「更新安装包」后才生成最新二维码，模拟器租约不作为签名门槛
 - 后端通过 `node /path/to/tmux-runner.cjs --cwd <workspace> --session <name> --variant <variant> "<prompt>"` 启动任务
 - 状态来自目标工作目录下的 `.arkpilot/state/...`
 - Expo 模式通过 `start-livetest.sh --project <workspace> --prompt-file <prompt.md> --session <name>` 启动，状态来自 `.expo-fast/state.json`；bundle 导出与 Harmony Go 验收完成后，Runner 会通过 SDK 固定 slot 池构建 unsigned HAP
@@ -302,8 +303,8 @@ PORT=8090 python3 app.py
 后续调整流程：
 
 1. 提交调整后，当前安装包立即标记为旧版，步骤条切换为 5 个离散阶段
-2. Agent 只重新生成代码和 unsigned HAP，并刷新真机预览；不重复执行首版本 QA
-3. 代码、HAP 和预览完成后进度停在 80%，首版本二维码仍可单独查看
+2. Agent 只重新生成代码和 unsigned HAP；不自动申请模拟器，也不重复执行首版本 QA
+3. 代码和 HAP 完成后可继续调整或按需预览，首版本二维码仍可单独查看
 4. 用户点击「更新安装包」后才重新编译、签名和发布
 5. 最新二维码生成成功后进度到 100%，同时保留首版本二维码入口
 
@@ -340,6 +341,8 @@ data/artifacts/videos/<run_id>/demo.mp4
 `scripts/hdc_runtime_capture.py`
 
 详情页右侧模拟器使用独立的实时交互链路：WebRTC 可用时优先通过点对点 DataChannel 传输压缩 JPEG 和输入；建连失败时继续使用 REST 长轮询及归一化点击、滑动和滚轮操作。后端通过 HDC 控制设备，输入接口以 `Server-Timing` 暴露排队和 HDC 操作耗时。完整架构、限流参数、失败回退和测试口径见 [docs/LOCAL_INTERACTIVE_PREVIEW.md](docs/LOCAL_INTERACTIVE_PREVIEW.md)。
+
+模拟器按任务而不是按用户分配：不同任务只能按 FIFO 等待，不能抢占正在使用的设备；同一任务打开多个详情页时共享同一租约。每个页面使用独立 viewer ID 发心跳，隐藏标签页只暂停抓帧、不释放资源；最后一个页面离开时释放，浏览器崩溃或断网则由 120 秒心跳超时兜底。
 
 点击分段耗时记录在 `data/logs/live-preview-latency.jsonl`，日志达到大小上限后会保留一个轮转文件。WebRTC 候选类型、连接状态和点击到解码完成时延也写入该日志。
 

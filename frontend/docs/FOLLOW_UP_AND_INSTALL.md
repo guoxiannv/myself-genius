@@ -6,7 +6,7 @@
 
 本次实现包含两个相互独立、但在任务详情页协同展示的能力：
 
-1. **首版本自动、后续按需生成安装包**：0→1 首版本在 QA、unsigned HAP 和预览就绪后自动签名并到 100%；后续调整不重复 QA，代码和预览就绪后停在 80%，只有用户点击后才重新编译、签名并生成最新二维码。
+1. **首版本自动、后续按需生成安装包**：0→1 首版本在 QA 与 unsigned HAP 就绪后自动签名；模拟器预览由详情页访问者按需申请，不阻塞签名。后续调整不重复 QA，只有用户点击后才重新编译、签名并生成最新二维码。
 2. **生成后续跑（follow-up）**：Harmony Pilot 或 Expo Runner 的 0→1 工作流完成后，用户可以继续对同一工作区提出增量修改。Remote UI 只负责鉴权、展示与调用各 Runtime 自己的受控控制器。
 
 本文描述当前已实现的前后端交互设计。Harmony Pilot 的控制契约来源于：
@@ -253,18 +253,18 @@ Expo 状态保存在生成工程内：
 
 这部分与 follow-up 的状态机独立：
 
-1. 0→1 首版本在 QA、unsigned HAP 和预览稳定后自动执行一次 hpack；成功后把安装 URL、商店 URL、manifest URL 与时间写回 `RunRecord.first_*` 字段。
+1. 0→1 首版本在 QA 与 unsigned HAP 就绪后自动执行一次 hpack；模拟器预览不参与签名放行。成功后把安装 URL、商店 URL、manifest URL 与时间写回 `RunRecord.first_*` 字段。
 2. 提交 follow-up 消息后，服务端持久化最近调整时间，并结合 active、queue、history 与 manifest 时间立即把当前安装包标记为过期；签名任务同时快照其对应的调整版本，防止签名期间新提交的调整被误判为已打包。
-3. 后续调整不会自动调用 HPack，也不重复执行首版本 QA。ArkPilot 可维护 unsigned HAP 与预览；Expo 默认只重建并验证 Bundle，完成后由详情页轮询发布，不用设备等待阻塞 follow-up FIFO。
-4. 最新预览就绪、主运行状态为 `completed` 且 follow-up 明确空闲后，顶部才显示可用的“更新安装包”按钮。
+3. 后续调整不会自动调用 HPack，也不重复执行首版本 QA。Expo 默认只重建并验证 Bundle/HAP，不自动申请模拟器；设备等待不会阻塞 follow-up FIFO。
+4. 最新代码和 HAP 就绪、主运行状态为 `completed` 且 follow-up 明确空闲后，顶部才显示可用的“更新安装包”按钮。
 5. Expo 的 follow-up enqueue、HAP rebuild 与 HPack 启动共享 per-run 操作锁；任一构建/签名操作启动后，新的调整请求返回 `control_busy`，反向也不会在 active follow-up 期间启动 rebuild 或签名。
 6. 用户点击 `POST /api/runs/{id}/package` 后，按钮在整个编译、签名和二维码生成期间不可重复点击；Expo 若尚无当前 revision 的 HAP，会先执行无模型的 `--rebuild --hap true --launch false`，强制 SDK pool 生成新 HAP，并拒绝把旧 ready 结果标记为当前版本。
 7. 生成成功后进度从 80% 变为 100%，右下角自动展开最新二维码；再次开始调整后进度退回 80%。
 8. `GET /api/runs/{id}/install-qr?version=first` 专门返回首版本二维码。
 
-### 7.1 续跑后的预览刷新
+### 7.1 续跑后的按需预览
 
-ArkPilot 续跑 Agent 重新构建并覆盖 unsigned HAP 后，Remote UI 会比较 HAP 修改时间与 `RunRecord.capture_hap_mtime`。Expo 的 follow-up 由 Runner 自己完成 Bundle 发布与桌面预览刷新，不经过这一 HAP 采集路径：
+ArkPilot 仍可维护原有媒体采集。Expo follow-up 完成后只发布最新 Bundle/HAP，不自动占用桌面模拟器；用户点击详情页预览按钮时，再将当前 HAP 安装到 FIFO 分配的设备：
 
 1. 发现更晚的 HAP 后，重置预览采集为等待状态并启动新的采集 monitor。
 2. 采集命令优先使用配置 Python；配置路径不存在时回退到当前运行 Python。

@@ -79,8 +79,8 @@ from scan_install.config import (
     MEDIA_DIR,
     PROFILE_POOL_ISOLATE_WORKSPACE,
     PREVIEW_DEVICE_POOL_ROOT,
-    PREVIEW_HIDDEN_GRACE_SECONDS,
     PREVIEW_IDLE_SECONDS,
+    PREVIEW_LEAVE_GRACE_SECONDS,
     PREVIEW_LEASE_SECONDS,
     PREVIEW_MAX_SESSION_SECONDS,
     PREVIEW_WAIT_SECONDS,
@@ -789,7 +789,7 @@ PHONE_PREVIEW_MONITORS_IN_FLIGHT: set[str] = set()
 DESKTOP_PREVIEW_IN_FLIGHT: set[str] = set()
 DESKTOP_PREVIEW_LOCK = threading.Lock()
 DESKTOP_PREVIEW_CANCELLED: set[str] = set()
-PREVIEW_VIEWERS: dict[str, dict[str, float]] = {}
+PREVIEW_VIEWERS: dict[str, dict[str, Any]] = {}
 PREVIEW_VIEWERS_LOCK = threading.Lock()
 PREVIEW_DEVICE_PROBE_TIMEOUT_SEC = 3
 
@@ -802,14 +802,14 @@ def preview_policy(record: RunRecord) -> dict[str, Any]:
                 # PC and phone previews both install the generated HAP.  The
                 # install links in the distribution panel are independent of
                 # this policy and remain unchanged.
-                "desktop": {"enabled": True, "transport": "hap_install", "start_mode": "automatic"},
+                "desktop": {"enabled": True, "transport": "hap_install", "start_mode": "on_demand"},
                 "phone": {"enabled": True, "transport": "hap_install", "start_mode": "on_demand"},
             },
         }
     return {
         "default_kind": "phone",
         "previews": {
-            "phone": {"enabled": True, "transport": "hap_install", "start_mode": "automatic"},
+            "phone": {"enabled": True, "transport": "hap_install", "start_mode": "on_demand"},
         },
     }
 
@@ -829,6 +829,9 @@ def preview_session_defaults(record: RunRecord, kind: str) -> dict[str, Any]:
         "ability_name": "EntryAbility",
         "screenshot_path": "",
         "live_available": False,
+        "last_heartbeat_at": "",
+        "released_at": "",
+        "release_reason": "",
         "error": "",
         "updated_at": getattr(record, "updated_at", getattr(record, "created_at", "")),
     }
@@ -858,9 +861,11 @@ def preview_sessions_payload(record: RunRecord) -> dict[str, dict[str, Any]]:
         ):
             result[kind]["status"] = "released"
             result[kind]["live_available"] = False
+            result[kind]["release_reason"] = "lease_lost"
         if result[kind]["status"] == "ready" and result[kind].get("live_available") and not lease_current:
             result[kind]["status"] = "released"
             result[kind]["live_available"] = False
+            result[kind]["release_reason"] = "lease_lost"
     return result
 
 
@@ -874,6 +879,17 @@ def preview_sessions_api_payload(record: RunRecord) -> dict[str, dict[str, Any]]
         else ""
     )
     for kind, session in sessions.items():
+        viewer_snapshot = preview_viewer_snapshot(record.run_id, kind)
+        session["viewer_count"] = viewer_snapshot["viewer_count"]
+        session["last_heartbeat_at"] = (
+            viewer_snapshot["last_heartbeat_at"]
+            or str(session.get("last_heartbeat_at") or "")
+        )
+        session["queue_position"] = (
+            preview_queue_position(record.run_id, kind)
+            if str(session.get("status") or "") in {"queued", "allocating"}
+            else 0
+        )
         installed_digest = str(session.get("artifact_digest") or "")
         installed_outdated = bool(installed_digest and current_digest and installed_digest != current_digest)
         session["outdated"] = bool(source_outdated or installed_outdated)
@@ -889,6 +905,41 @@ def preview_sessions_api_payload(record: RunRecord) -> dict[str, dict[str, Any]]
         session["screenshot_path"] = session["screenshot_url"]
         session["artifact_path"] = ""
     return sessions
+
+
+def reconcile_preview_lease_state(record: RunRecord) -> RunRecord:
+    """Persist a lease-loss transition observed while reading a run.
+
+    Lease files are intentionally ephemeral. Without this reconciliation a
+    service restart could keep returning a stale ``ready`` record even though
+    the allocator has already lost the device lease.
+    """
+    stored = dict(record.preview_sessions or {})
+    changed = False
+    targets = dict(record.preview_targets or {})
+    for kind, session in preview_sessions_payload(record).items():
+        if str(session.get("release_reason") or "") != "lease_lost":
+            continue
+        previous = {**preview_session_defaults(record, kind), **stored.get(kind, {})}
+        if str(previous.get("status") or "") == "released" and not previous.get("lease_id"):
+            continue
+        stored[kind] = {
+            **previous,
+            "status": "released",
+            "lease_id": "",
+            "target": "",
+            "live_available": False,
+            "released_at": str(previous.get("released_at") or to_iso()),
+            "release_reason": "lease_lost",
+            "error": "",
+        }
+        targets.pop(kind, None)
+        changed = True
+    if not changed:
+        return record
+    record.preview_sessions = stored
+    record.preview_targets = targets
+    return save_run(record)
 
 
 def update_preview_session(record: RunRecord, kind: str, **changes: Any) -> RunRecord:
@@ -964,18 +1015,67 @@ def preview_viewer_key(run_id: str, kind: str) -> str:
     return f"{run_id}:{kind}"
 
 
-def mark_preview_viewer(run_id: str, kind: str, *, visible: bool) -> None:
+class PreviewRequestCancelled(LivePreviewError):
+    """The requesting browser stopped viewing before a device was assigned."""
+
+
+def preview_viewer_snapshot(
+    run_id: str,
+    kind: str,
+    *,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Return a lock-safe snapshot containing only viewers with a live heartbeat."""
+    checked_at = time.monotonic() if now is None else now
+    key = preview_viewer_key(run_id, kind)
+    with PREVIEW_VIEWERS_LOCK:
+        state = PREVIEW_VIEWERS.get(key) or {}
+        viewers = {
+            viewer_id: dict(value)
+            for viewer_id, value in (state.get("viewers") or {}).items()
+        }
+        lease_started_at = float(state.get("lease_started_at") or 0.0)
+        empty_since = float(state.get("empty_since") or 0.0)
+    active = {
+        viewer_id: value
+        for viewer_id, value in viewers.items()
+        if float(value.get("last_seen_at") or 0.0) > 0
+        and checked_at - float(value.get("last_seen_at") or 0.0) < PREVIEW_IDLE_SECONDS
+    }
+    last_heartbeat_at = max(
+        (str(value.get("last_seen_wall") or "") for value in active.values()),
+        default="",
+    )
+    return {
+        "viewer_count": len(active),
+        "viewers": active,
+        "all_viewers": viewers,
+        "lease_started_at": lease_started_at,
+        "empty_since": empty_since,
+        "last_heartbeat_at": last_heartbeat_at,
+    }
+
+
+def preview_has_viewer_state(run_id: str, kind: str) -> bool:
+    return bool(preview_viewer_snapshot(run_id, kind)["viewer_count"])
+
+
+def mark_preview_viewer(run_id: str, kind: str, *, visible: bool = True, viewer_id: str = "legacy") -> None:
+    """Register or refresh one detail-page viewer.
+
+    ``visible`` is accepted for compatibility, but tab visibility no longer
+    controls the lease. A hidden detail page still owns its viewer membership.
+    """
     now = time.monotonic()
     key = preview_viewer_key(run_id, kind)
     with PREVIEW_VIEWERS_LOCK:
         state = PREVIEW_VIEWERS.setdefault(key, {})
-        if visible:
-            state["last_seen_at"] = now
-            state["hidden_since"] = 0.0
-        else:
-            state.setdefault("last_seen_at", now)
-            if not state.get("hidden_since"):
-                state["hidden_since"] = now
+        viewers = state.setdefault("viewers", {})
+        viewer = viewers.setdefault(viewer_id or "legacy", {})
+        viewer["last_seen_at"] = now
+        viewer["last_seen_wall"] = to_iso()
+        viewer["visible"] = bool(visible)
+        state["empty_since"] = 0.0
 
 
 def start_preview_viewer_session(run_id: str, kind: str) -> None:
@@ -983,22 +1083,23 @@ def start_preview_viewer_session(run_id: str, kind: str) -> None:
     key = preview_viewer_key(run_id, kind)
     with PREVIEW_VIEWERS_LOCK:
         state = PREVIEW_VIEWERS.setdefault(key, {})
-        state.setdefault("last_seen_at", now)
+        state.setdefault("viewers", {})
         state["lease_started_at"] = now
 
 
 def preview_viewer_release_reason(run_id: str, kind: str, *, now: float | None = None) -> str:
     checked_at = time.monotonic() if now is None else now
-    key = preview_viewer_key(run_id, kind)
-    with PREVIEW_VIEWERS_LOCK:
-        state = dict(PREVIEW_VIEWERS.get(key) or {})
-    lease_started_at = float(state.get("lease_started_at") or 0.0)
-    hidden_since = float(state.get("hidden_since") or 0.0)
-    last_seen_at = float(state.get("last_seen_at") or lease_started_at or 0.0)
-    if lease_started_at and checked_at - lease_started_at >= PREVIEW_MAX_SESSION_SECONDS:
+    snapshot = preview_viewer_snapshot(run_id, kind, now=checked_at)
+    if snapshot["lease_started_at"] and checked_at - snapshot["lease_started_at"] >= PREVIEW_MAX_SESSION_SECONDS:
         return "max_session"
-    if hidden_since and checked_at - hidden_since >= PREVIEW_HIDDEN_GRACE_SECONDS:
-        return "hidden"
+    if snapshot["viewer_count"]:
+        return ""
+    last_seen_at = max(
+        (float(value.get("last_seen_at") or 0.0) for value in snapshot["all_viewers"].values()),
+        default=0.0,
+    )
+    if snapshot["empty_since"] and checked_at - snapshot["empty_since"] >= PREVIEW_LEAVE_GRACE_SECONDS:
+        return "last_viewer_left"
     if last_seen_at and checked_at - last_seen_at >= PREVIEW_IDLE_SECONDS:
         return "viewer_timeout"
     return ""
@@ -1007,6 +1108,19 @@ def preview_viewer_release_reason(run_id: str, kind: str, *, now: float | None =
 def clear_preview_viewer(run_id: str, kind: str) -> None:
     with PREVIEW_VIEWERS_LOCK:
         PREVIEW_VIEWERS.pop(preview_viewer_key(run_id, kind), None)
+
+
+def clear_preview_viewer_id(run_id: str, kind: str, viewer_id: str) -> int:
+    key = preview_viewer_key(run_id, kind)
+    with PREVIEW_VIEWERS_LOCK:
+        state = PREVIEW_VIEWERS.get(key)
+        if not state:
+            return 0
+        viewers = state.get("viewers") or {}
+        viewers.pop(viewer_id or "legacy", None)
+        if not viewers:
+            state["empty_since"] = time.monotonic()
+        return len(viewers)
 
 
 def safe_preview_target(target: str) -> str:
@@ -1047,6 +1161,27 @@ def preview_queue_names(kind: str, *, priority: str) -> list[str]:
     return sorted(names)
 
 
+def preview_queue_position(run_id: str, kind: str) -> int:
+    """Return the live preview queue position for a run, or zero when absent."""
+    queue_root = PREVIEW_DEVICE_POOL_ROOT / "queue"
+    entries: list[tuple[str, str, dict[str, Any]]] = []
+    now = datetime.now(timezone.utc)
+    for path in queue_root.glob("*.json"):
+        ticket = read_json(path)
+        if not ticket or str(ticket.get("kind") or "") != kind or str(ticket.get("priority") or "") != "live":
+            continue
+        expires_at = parse_iso(str(ticket.get("expires_at") or ""))
+        if not preview_process_alive(ticket.get("pid")) or (expires_at and expires_at <= now):
+            path.unlink(missing_ok=True)
+            continue
+        entries.append((str(ticket.get("queued_at") or ""), path.name, ticket))
+    entries.sort(key=lambda item: (item[0], item[1]))
+    for index, (_queued_at, _name, ticket) in enumerate(entries, start=1):
+        if str(ticket.get("run_id") or "") == run_id:
+            return index
+    return 0
+
+
 def create_live_preview_ticket(run_id: str, kind: str, wait_seconds: int) -> Path:
     now = datetime.now(timezone.utc)
     name = f"live-{time.time_ns():020d}-{os.getpid():010d}-{run_id}-{uuid4().hex}.json"
@@ -1061,6 +1196,17 @@ def create_live_preview_ticket(run_id: str, kind: str, wait_seconds: int) -> Pat
         "expires_at": (now + timedelta(seconds=max(1, wait_seconds) + 30)).isoformat(),
     })
     return path
+
+
+def refresh_live_preview_ticket(path: Path, wait_seconds: int) -> None:
+    payload = read_json(path)
+    if not payload:
+        return
+    now = datetime.now(timezone.utc)
+    payload["expires_at"] = (
+        now + timedelta(seconds=max(60, wait_seconds + 30))
+    ).isoformat()
+    write_json_atomic(path, payload)
 
 
 def preview_lease_valid(payload: dict[str, Any] | None) -> bool:
@@ -1145,10 +1291,20 @@ def discover_preview_targets(kind: str) -> list[str]:
 
 
 def acquire_preview_lease(run_id: str, kind: str, *, wait_seconds: int = PREVIEW_WAIT_SECONDS) -> dict[str, Any]:
-    deadline = time.monotonic() + max(1, wait_seconds)
+    # Browser-triggered requests remain in the FIFO while their viewer keeps
+    # sending heartbeats. ``wait_seconds`` is retained only as a fallback for
+    # internal callers that did not register viewer state.
+    deadline = None if preview_has_viewer_state(run_id, kind) else time.monotonic() + max(1, wait_seconds)
     ticket_path = create_live_preview_ticket(run_id, kind, wait_seconds)
+    refresh_ticket_at = 0.0
     try:
-        while time.monotonic() < deadline:
+        while deadline is None or time.monotonic() < deadline:
+            release_reason = preview_viewer_release_reason(run_id, kind)
+            if release_reason:
+                raise PreviewRequestCancelled("预览页面已离开，已取消模拟器排队。")
+            if time.monotonic() >= refresh_ticket_at:
+                refresh_live_preview_ticket(ticket_path, wait_seconds)
+                refresh_ticket_at = time.monotonic() + 15
             candidates = discover_preview_targets(kind)
 
             def allocate() -> dict[str, Any] | None:
@@ -1206,7 +1362,7 @@ def start_preview_lease_heartbeat(record_id: str, kind: str, lease_id: str, targ
     def heartbeat() -> None:
         refresh_interval = max(5.0, PREVIEW_LEASE_SECONDS / 3)
         next_refresh_at = time.monotonic() + refresh_interval
-        while not stop.wait(5):
+        while not stop.wait(1):
             try:
                 record = load_run(record_id)
                 session = (record.preview_sessions or {}).get(kind, {}) if record else {}
@@ -1214,7 +1370,7 @@ def start_preview_lease_heartbeat(record_id: str, kind: str, lease_id: str, targ
                 if record and session.get("status") in {
                     "installing", "loading_bundle", "launching", "ready"
                 } and release_reason:
-                    release_preview_lease(record, kind)
+                    release_preview_lease(record, kind, reason=release_reason)
                     return
             except (OSError, LivePreviewError):
                 pass
@@ -1243,7 +1399,19 @@ def start_preview_lease_heartbeat(record_id: str, kind: str, lease_id: str, targ
     threading.Thread(target=heartbeat, name=f"preview-lease-{record_id[:8]}-{kind}", daemon=True).start()
 
 
-def release_preview_lease(record: RunRecord, kind: str) -> RunRecord:
+def ensure_preview_lease_heartbeat(record: RunRecord, kind: str) -> None:
+    """Resume the in-process lease refresher after a backend restart."""
+    session = preview_sessions_payload(record).get(kind, {})
+    lease_id = str(session.get("lease_id") or "")
+    target = str(session.get("target") or "")
+    if not lease_id or not target:
+        return
+    key = f"{record.run_id}:{kind}"
+    if PHONE_PREVIEW_HEARTBEATS.get(key) is None:
+        start_preview_lease_heartbeat(record.run_id, kind, lease_id, target)
+
+
+def release_preview_lease(record: RunRecord, kind: str, *, reason: str = "manual") -> RunRecord:
     if kind == "phone":
         PHONE_PREVIEW_CANCELLED.add(record.run_id)
     elif kind == "desktop":
@@ -1251,6 +1419,11 @@ def release_preview_lease(record: RunRecord, kind: str) -> RunRecord:
     session = preview_sessions_payload(record).get(kind, {})
     lease_id = str(session.get("lease_id") or "")
     target = str(session.get("target") or "")
+    viewer_snapshot = preview_viewer_snapshot(record.run_id, kind)
+    last_heartbeat_at = (
+        viewer_snapshot["last_heartbeat_at"]
+        or str(session.get("last_heartbeat_at") or "")
+    )
     stop = PHONE_PREVIEW_HEARTBEATS.pop(f"{record.run_id}:{kind}", None)
     if stop:
         stop.set()
@@ -1275,27 +1448,11 @@ def release_preview_lease(record: RunRecord, kind: str) -> RunRecord:
         lease_id="",
         target="",
         live_available=False,
+        last_heartbeat_at=last_heartbeat_at,
+        released_at=to_iso(),
+        release_reason=reason,
         error="",
     )
-
-
-def preempt_owner_preview_leases(record: RunRecord, kind: str) -> list[str]:
-    owner_id = str(record.owner_id or "").strip()
-    if not owner_id:
-        return []
-    released: list[str] = []
-    active_statuses = {"queued", "allocating", "installing", "loading_bundle", "launching", "ready"}
-    for candidate in iter_run_records():
-        if candidate.run_id == record.run_id or candidate.owner_id != owner_id:
-            continue
-        session = preview_sessions_payload(candidate).get(kind, {})
-        if str(session.get("status") or "") not in active_statuses and not (
-            session.get("target") or session.get("lease_id")
-        ):
-            continue
-        release_preview_lease(candidate, kind)
-        released.append(candidate.run_id)
-    return released
 
 
 def preview_hap_artifact(record: RunRecord) -> Path | None:
@@ -1347,15 +1504,17 @@ def run_phone_preview(record_id: str) -> None:
         bundle_name, ability_name = preview_hap_metadata(record, hap_path)
         record = update_preview_session(
             record, "phone", requested=True, status="allocating", artifact_path=str(hap_path),
-            artifact_digest=digest, bundle_name=bundle_name, ability_name=ability_name, error="",
+            artifact_digest=digest, bundle_name=bundle_name, ability_name=ability_name,
+            last_heartbeat_at="", released_at="", release_reason="", error="",
         )
         lease = acquire_preview_lease(record.run_id, "phone")
         record = load_run(record_id) or record
         record = update_preview_session(
-            record, "phone", status="installing", target=lease["target"], lease_id=lease["lease_id"]
+            record, "phone", status="installing", target=lease["target"], lease_id=lease["lease_id"],
+            last_heartbeat_at="", released_at="", release_reason="",
         )
         if record_id in PHONE_PREVIEW_CANCELLED:
-            release_preview_lease(record, "phone")
+            release_preview_lease(record, "phone", reason="cancelled")
             return
         start_preview_lease_heartbeat(record.run_id, "phone", lease["lease_id"], lease["target"])
         session_id = live_preview_session_id(record, "phone")
@@ -1365,7 +1524,7 @@ def run_phone_preview(record_id: str) -> None:
         )
         if record_id in PHONE_PREVIEW_CANCELLED:
             record = load_run(record_id) or record
-            release_preview_lease(record, "phone")
+            release_preview_lease(record, "phone", reason="cancelled")
             return
         screenshot_path = MEDIA_DIR / record.run_id / "preview-phone.jpeg"
         screenshot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1373,13 +1532,17 @@ def run_phone_preview(record_id: str) -> None:
         record = load_run(record_id) or record
         update_preview_session(
             record, "phone", status="ready", screenshot_path=str(screenshot_path),
-            live_available=True, error="",
+            live_available=True, last_heartbeat_at="", released_at="", release_reason="", error="",
         )
+    except PreviewRequestCancelled:
+        record = load_run(record_id)
+        if record:
+            release_preview_lease(record, "phone", reason="last_viewer_left")
     except Exception as exc:
         record = load_run(record_id)
         if record:
             if lease:
-                record = release_preview_lease(record, "phone")
+                record = release_preview_lease(record, "phone", reason="startup_failed")
             update_preview_session(record, "phone", status="failed", live_available=False, error=str(exc))
     finally:
         with PHONE_PREVIEW_LOCK:
@@ -1407,7 +1570,16 @@ def start_phone_preview(record: RunRecord, *, automatic: bool = False) -> tuple[
             return record, False
         PHONE_PREVIEW_CANCELLED.discard(record.run_id)
         PHONE_PREVIEW_IN_FLIGHT.add(record.run_id)
-    record = update_preview_session(record, "phone", requested=True, status="queued", error="")
+    record = update_preview_session(
+        record,
+        "phone",
+        requested=True,
+        status="queued",
+        last_heartbeat_at="",
+        released_at="",
+        release_reason="",
+        error="",
+    )
     threading.Thread(target=run_phone_preview, args=(record.run_id,), daemon=True).start()
     return record, True
 
@@ -1432,6 +1604,9 @@ def run_desktop_preview(record_id: str) -> None:
             artifact_digest=digest,
             bundle_name=bundle_name,
             ability_name=ability_name,
+            last_heartbeat_at="",
+            released_at="",
+            release_reason="",
             error="",
         )
         lease = acquire_preview_lease(record.run_id, "desktop")
@@ -1442,9 +1617,12 @@ def run_desktop_preview(record_id: str) -> None:
             status="installing",
             target=lease["target"],
             lease_id=lease["lease_id"],
+            last_heartbeat_at="",
+            released_at="",
+            release_reason="",
         )
         if record_id in DESKTOP_PREVIEW_CANCELLED:
-            release_preview_lease(record, "desktop")
+            release_preview_lease(record, "desktop", reason="cancelled")
             return
         start_preview_lease_heartbeat(record.run_id, "desktop", lease["lease_id"], lease["target"])
         session_id = live_preview_session_id(record, "desktop")
@@ -1454,10 +1632,11 @@ def run_desktop_preview(record_id: str) -> None:
             hap_path=hap_path,
             bundle_name=bundle_name,
             ability_name=ability_name,
+            maximize=True,
         )
         if record_id in DESKTOP_PREVIEW_CANCELLED:
             record = load_run(record_id) or record
-            release_preview_lease(record, "desktop")
+            release_preview_lease(record, "desktop", reason="cancelled")
             return
         screenshot_path = MEDIA_DIR / record.run_id / "preview-desktop.jpeg"
         screenshot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1470,17 +1649,24 @@ def run_desktop_preview(record_id: str) -> None:
             artifact_digest=digest,
             screenshot_path=str(screenshot_path),
             live_available=True,
+            last_heartbeat_at="",
+            released_at="",
+            release_reason="",
             error="",
         )
+    except PreviewRequestCancelled:
+        record = load_run(record_id)
+        if record:
+            release_preview_lease(record, "desktop", reason="last_viewer_left")
     except Exception as exc:
         record = load_run(record_id)
         if record:
             if record_id in DESKTOP_PREVIEW_CANCELLED:
                 if lease:
-                    release_preview_lease(record, "desktop")
+                    release_preview_lease(record, "desktop", reason="cancelled")
                 return
             if lease:
-                record = release_preview_lease(record, "desktop")
+                record = release_preview_lease(record, "desktop", reason="startup_failed")
             update_preview_session(
                 record,
                 "desktop",
@@ -1521,6 +1707,9 @@ def start_desktop_preview(record: RunRecord, *, automatic: bool = False) -> tupl
                     target="",
                     lease_id="",
                     live_available=False,
+                    last_heartbeat_at="",
+                    released_at="",
+                    release_reason="",
                     error="桌面预览会话已失联，正在重新连接。",
                 )
             else:
@@ -1537,24 +1726,30 @@ def start_desktop_preview(record: RunRecord, *, automatic: bool = False) -> tupl
     if current.get("status") == "ready" and current.get("artifact_digest") == digest and current.get("live_available"):
         return record, False
     if current.get("lease_id") or current.get("target"):
-        record = release_preview_lease(record, "desktop")
+        record = release_preview_lease(record, "desktop", reason="restart")
     with DESKTOP_PREVIEW_LOCK:
         if record.run_id in DESKTOP_PREVIEW_IN_FLIGHT:
             return record, False
         DESKTOP_PREVIEW_CANCELLED.discard(record.run_id)
         DESKTOP_PREVIEW_IN_FLIGHT.add(record.run_id)
-    record = update_preview_session(record, "desktop", requested=True, status="queued", error="")
+    record = update_preview_session(
+        record,
+        "desktop",
+        requested=True,
+        status="queued",
+        last_heartbeat_at="",
+        released_at="",
+        release_reason="",
+        error="",
+    )
     threading.Thread(target=run_desktop_preview, args=(record.run_id,), daemon=True).start()
     return record, True
 
 
 def maybe_refresh_desktop_preview(record: RunRecord, run_status: str) -> tuple[RunRecord, bool]:
-    if record.runtime != "expo" or run_status != "completed":
-        return record, False
-    current = preview_sessions_payload(record)["desktop"]
-    if not (current.get("requested") or current.get("screenshot_path")):
-        return record, False
-    return start_desktop_preview(record, automatic=True)
+    # Preview devices are user-triggered only. A completed build must never
+    # silently acquire a shared emulator or replace another session's app.
+    return record, False
 
 
 def monitor_hap_for_phone_preview(record_id: str) -> None:
@@ -1563,6 +1758,8 @@ def monitor_hap_for_phone_preview(record_id: str) -> None:
         while time.monotonic() - started_at < CAPTURE_WAIT_TIMEOUT_SEC:
             record = load_run(record_id)
             if not record:
+                return
+            if preview_policy(record)["previews"].get("phone", {}).get("start_mode") != "automatic":
                 return
             if preview_sessions_payload(record)["phone"].get("status") != "idle":
                 return
@@ -1615,7 +1812,9 @@ def build_expo_fast_command(
         return []
     if action not in {"initial", "rebuild", "preview"}:
         raise ValueError(f"unsupported Expo Fast action: {action}")
-    launch_enabled = True if launch is None else launch
+    # Initial generation produces the HAP without occupying an emulator. Live
+    # preview is acquired only after the user clicks the preview button.
+    launch_enabled = action != "initial" if launch is None else launch
     hap_enabled = action != "preview" if hap is None else hap
     command = [
         str(EXPO_FAST_LAUNCHER),
@@ -4019,7 +4218,7 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         if re.fullmatch(r"/runs/[a-f0-9]+", path):
-            if not self.load_accessible_run(path.rsplit("/", 1)[-1]):
+            if not self.load_accessible_run(path.rsplit("/", 1)[-1], allow_share=True):
                 return
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -4032,7 +4231,7 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         if re.fullmatch(r"/api/runs/[a-f0-9]+/hap", path):
             return self.handle_get_hap(path.split("/")[-2], head_only=True)
         if re.fullmatch(r"/api/runs/[a-f0-9]+/(hap-qr|install-qr)", path):
-            if not self.load_accessible_run(path.split("/")[-2]):
+            if not self.load_accessible_run(path.split("/")[-2], allow_share=True):
                 return
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "image/png")
@@ -4216,19 +4415,102 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         return root_session_is_valid(self.cookie_value(ROOT_SESSION_COOKIE_NAME))
 
     def load_accessible_run(self, run_id: str, *, allow_share: bool = False) -> RunRecord | None:
+        self._run_access_mode = ""
         record = load_run(run_id)
         if not record:
             self.send_error(HTTPStatus.NOT_FOUND, "Run not found")
             return None
         if self.is_root():
+            self._run_access_mode = "root"
             return record
         if record.owner_id and hmac.compare_digest(record.owner_id, self.visitor_id()):
+            self._run_access_mode = "owner"
             return record
         share_token = (parse_qs(urlparse(self.path).query).get("share") or [""])[0]
         if allow_share and record.share_token and hmac.compare_digest(record.share_token, share_token):
+            self._run_access_mode = "share"
             return record
         self.send_error(HTTPStatus.NOT_FOUND, "Run not found")
         return None
+
+    def prepare_run_progress(self, payload: dict[str, Any], record: RunRecord) -> dict[str, Any]:
+        """Attach access capabilities and preserve share authorization in read-only URLs."""
+        access_mode = getattr(self, "_run_access_mode", "")
+        can_write = access_mode in {"owner", "root"}
+        payload["access"] = {
+            "mode": access_mode,
+            "can_write": can_write,
+            "can_preview": True,
+            "share_url": f"/runs/{record.run_id}?share={quote(record.share_token)}" if can_write else "",
+        }
+        if access_mode != "share":
+            return payload
+
+        run_payload = payload.get("run")
+        if isinstance(run_payload, dict):
+            public_run_fields = {
+                "run_id", "prompt", "status", "runtime", "variant", "interactive_questions",
+                "created_at", "updated_at", "notes",
+            }
+            payload["run"] = {
+                key: value for key, value in run_payload.items() if key in public_run_fields
+            }
+        workspace_payload = payload.get("workspace")
+        if isinstance(workspace_payload, dict):
+            workspace_payload["path"] = ""
+        tmux_payload = payload.get("tmux")
+        if isinstance(tmux_payload, dict):
+            tmux_payload["session_name"] = ""
+        artifacts_payload = payload.get("artifacts")
+        if isinstance(artifacts_payload, dict):
+            artifacts_payload["hap_path"] = str(artifacts_payload.get("hap_display_path") or "")
+            for key in ("signed_hap_path", "media_source_path"):
+                artifacts_payload.pop(key, None)
+            for preview in (artifacts_payload.get("previews") or {}).values():
+                if isinstance(preview, dict):
+                    for key in ("artifact_path", "media_source_path"):
+                        preview.pop(key, None)
+        capture_payload = payload.get("capture")
+        if isinstance(capture_payload, dict):
+            payload["capture"] = {"status": str(capture_payload.get("status") or "")}
+        distribution_payload = payload.get("distribution")
+        if isinstance(distribution_payload, dict):
+            payload["distribution"] = {
+                "enabled": bool(distribution_payload.get("enabled")),
+                "status": str(distribution_payload.get("status") or ""),
+            }
+        payload["signing"] = {}
+        expo_payload = payload.get("expo")
+        if isinstance(expo_payload, dict):
+            expo_state = expo_payload.get("state")
+            if isinstance(expo_state, dict):
+                for key in ("project", "pid", "context"):
+                    expo_state.pop(key, None)
+            expo_package = expo_payload.get("package")
+            if isinstance(expo_package, dict):
+                expo_package.pop("slot_id", None)
+            for group in expo_payload.get("trace_groups") or []:
+                if isinstance(group, dict):
+                    group.pop("trace_file", None)
+        preview_sessions = payload.get("preview_sessions")
+        if isinstance(preview_sessions, dict):
+            for session in preview_sessions.values():
+                if isinstance(session, dict):
+                    session.pop("artifact_path", None)
+
+        api_prefix = f"/api/runs/{record.run_id}/"
+
+        def authorize_read_urls(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {key: authorize_read_urls(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [authorize_read_urls(item) for item in value]
+            if isinstance(value, str) and value.startswith(api_prefix) and "share=" not in value:
+                separator = "&" if "?" in value else "?"
+                return f"{value}{separator}share={quote(record.share_token)}"
+            return value
+
+        return authorize_read_urls(payload)
 
     def read_body_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
@@ -4423,13 +4705,21 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         self.send_html(html)
 
     def handle_detail(self, run_id: str) -> None:
-        record = self.load_accessible_run(run_id)
+        record = self.load_accessible_run(run_id, allow_share=True)
         if not record:
             return
+        run_payload = asdict(record)
+        if getattr(self, "_run_access_mode", "") == "share":
+            run_payload = {
+                "run_id": record.run_id,
+                "prompt": record.prompt,
+                "session_name": "",
+                "workspace": "",
+            }
         html = render_template(
             "detail.html",
             {
-                "run": asdict(record),
+                "run": run_payload,
                 "poll_interval_ms": DEFAULT_POLL_INTERVAL_MS,
                 "static_asset_version": int(time.time()),
             },
@@ -4811,16 +5101,17 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         self.send_json({"runs": summaries, "total": len(summaries), "counts": counts})
 
     def handle_get_run(self, run_id: str) -> None:
-        if not self.load_accessible_run(run_id):
+        record = self.load_accessible_run(run_id, allow_share=True)
+        if not record:
             return
         latest = self._compute_run_progress(run_id)
         if latest is None:
             self.send_error(HTTPStatus.NOT_FOUND, "Run not found")
             return
-        self.send_json(latest)
+        self.send_json(self.prepare_run_progress(latest, record))
 
     def handle_get_previews(self, run_id: str) -> None:
-        record = self.load_accessible_run(run_id)
+        record = self.load_accessible_run(run_id, allow_share=True)
         if not record:
             return
         self.send_json({
@@ -4830,7 +5121,7 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         })
 
     def handle_start_preview(self, run_id: str, kind: str) -> None:
-        record = self.load_accessible_run(run_id)
+        record = self.load_accessible_run(run_id, allow_share=True)
         if not record:
             return
         config = preview_policy(record)["previews"].get(kind)
@@ -4838,16 +5129,18 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "error": "当前模式不支持该预览类型。"}, status=HTTPStatus.CONFLICT)
             return
         try:
-            preempted_run_ids = preempt_owner_preview_leases(record, kind)
-            mark_preview_viewer(record.run_id, kind, visible=True)
+            payload = self.read_body_json()
+            viewer_id = str(payload.get("viewer_id") or "legacy").strip()[:120] or "legacy"
+            mark_preview_viewer(record.run_id, kind, visible=True, viewer_id=viewer_id)
             if kind == "phone" and config.get("transport") == "hap_install":
                 record, accepted = start_phone_preview(record)
             elif kind == "desktop" and config.get("transport") == "hap_install":
                 record, accepted = start_desktop_preview(record)
             else:
                 raise LivePreviewError("当前预览类型的启动方式无效。")
+            ensure_preview_lease_heartbeat(record, kind)
         except LivePreviewError as exc:
-            clear_preview_viewer(record.run_id, kind)
+            clear_preview_viewer_id(record.run_id, kind, viewer_id)
             self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.CONFLICT)
             return
         self.send_json(
@@ -4857,19 +5150,22 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
                 "run_id": record.run_id,
                 "status": str(preview_sessions_payload(record)[kind].get("status") or "idle"),
                 "preview": preview_sessions_api_payload(record)[kind],
-                "preempted_run_ids": preempted_run_ids,
+                "preempted_run_ids": [],
             },
             status=HTTPStatus.ACCEPTED if accepted else HTTPStatus.OK,
         )
 
     def handle_release_preview(self, run_id: str, kind: str) -> None:
-        record = self.load_accessible_run(run_id)
+        # Preview control is available to every detail-page viewer, including
+        # a visitor using the run's share token. Code/build writes remain
+        # owner/root-only in their respective handlers.
+        record = self.load_accessible_run(run_id, allow_share=True)
         if not record:
             return
         if kind not in preview_policy(record)["previews"]:
             self.send_json({"ok": False, "error": "当前模式不支持该预览类型。"}, status=HTTPStatus.CONFLICT)
             return
-        record = release_preview_lease(record, kind)
+        record = release_preview_lease(record, kind, reason="manual")
         self.send_json(
             {
                 "ok": True,
@@ -4880,22 +5176,36 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         )
 
     def handle_preview_heartbeat(self, run_id: str, kind: str) -> None:
-        record = self.load_accessible_run(run_id)
+        record = self.load_accessible_run(run_id, allow_share=True)
         if not record:
             return
         if kind not in preview_policy(record)["previews"]:
             self.send_json({"ok": False, "error": "当前模式不支持该预览类型。"}, status=HTTPStatus.CONFLICT)
             return
         payload = self.read_body_json()
+        leaving = payload.get("leaving") is True
         visible = payload.get("visible") is True
+        viewer_id = str(payload.get("viewer_id") or "legacy").strip()[:120] or "legacy"
         session = preview_sessions_payload(record).get(kind, {})
+        if leaving:
+            remaining = clear_preview_viewer_id(record.run_id, kind, viewer_id)
+            self.send_json({
+                "ok": True,
+                "run_id": run_id,
+                "kind": kind,
+                "visible": False,
+                "leaving": True,
+                "viewer_count": remaining,
+            })
+            return
         if str(session.get("status") or "") not in {
             "queued", "allocating", "installing", "loading_bundle", "launching", "ready"
         }:
-            clear_preview_viewer(record.run_id, kind)
+            clear_preview_viewer_id(record.run_id, kind, viewer_id)
             self.send_json({"ok": True, "run_id": run_id, "kind": kind, "visible": False})
             return
-        mark_preview_viewer(record.run_id, kind, visible=visible)
+        mark_preview_viewer(record.run_id, kind, visible=visible, viewer_id=viewer_id)
+        ensure_preview_lease_heartbeat(record, kind)
         self.send_json({"ok": True, "run_id": run_id, "kind": kind, "visible": visible})
 
     def handle_retry_expo_preview(self, run_id: str) -> None:
@@ -5112,7 +5422,7 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         )
 
     def handle_get_run_questions(self, run_id: str) -> None:
-        record = self.load_accessible_run(run_id)
+        record = self.load_accessible_run(run_id, allow_share=True)
         if not record:
             return
         self.send_json(load_ask_user_questions(Path(record.workspace)))
@@ -5166,7 +5476,7 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         self.send_json({"ok": False, "error": str(exc), "code": exc.code, "details": exc.details}, status=status)
 
     def handle_get_follow_up(self, run_id: str) -> None:
-        record = self.load_accessible_run(run_id)
+        record = self.load_accessible_run(run_id, allow_share=True)
         if not record:
             return
         try:
@@ -5260,6 +5570,7 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         if not record:
             return None
         maybe_release_signing_slot(record)
+        record = reconcile_preview_lease_state(load_run(run_id) or record)
         latest = build_progress_payload(record)
         if latest["status"] != record.status:
             record.status = str(latest["status"])
@@ -5272,9 +5583,10 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
 
         每个请求由 ThreadingHTTPServer 分配独立线程，可安全地保持长连接。
         仅在进度内容变化时推送数据帧，其余周期发送注释心跳维持连接，
-        进入终态（succeeded / failed）后关闭流。
+        主构建进入终态后仍保持流，以同步按需模拟器的排队和租约变化。
         """
-        if not self.load_accessible_run(run_id):
+        record = self.load_accessible_run(run_id, allow_share=True)
+        if not record:
             return
         initial = self._compute_run_progress(run_id)
         if initial is None:
@@ -5312,25 +5624,22 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError, ValueError):
                 return False
 
+        initial = self.prepare_run_progress(initial, record)
         last_serialized = json.dumps(initial, ensure_ascii=False, sort_keys=True)
         if not write_event(initial):
             return
-        if str(initial.get("status")) in {"succeeded", "failed"}:
-            return
-
         idle_ticks = 0
         while True:
             time.sleep(poll_interval)
             latest = self._compute_run_progress(run_id)
             if latest is None:
                 break
+            latest = self.prepare_run_progress(latest, record)
             serialized = json.dumps(latest, ensure_ascii=False, sort_keys=True)
             if serialized != last_serialized:
                 last_serialized = serialized
                 idle_ticks = 0
                 if not write_event(latest):
-                    break
-                if str(latest.get("status")) in {"succeeded", "failed"}:
                     break
             else:
                 idle_ticks += 1
@@ -5346,7 +5655,7 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         head_only: bool = False,
         query: dict[str, list[str]] | None = None,
     ) -> None:
-        record = self.load_accessible_run(run_id)
+        record = self.load_accessible_run(run_id, allow_share=True)
         if not record:
             return
         preview_kind = normalize_preview_kind(record, ((query or {}).get("preview") or [""])[0])
@@ -5380,7 +5689,7 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         *,
         query: dict[str, list[str]] | None = None,
     ) -> None:
-        record = self.load_accessible_run(run_id)
+        record = self.load_accessible_run(run_id, allow_share=True)
         if not record:
             return
         query = query or {}
@@ -5457,7 +5766,7 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         query: dict[str, list[str]] | None = None,
     ) -> None:
         request_started_at = time.monotonic()
-        record = self.load_accessible_run(run_id)
+        record = self.load_accessible_run(run_id, allow_share=True)
         if not record:
             return
         preview_kind = normalize_preview_kind(record, ((query or {}).get("preview") or [""])[0])
@@ -5523,7 +5832,7 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         *,
         query: dict[str, list[str]] | None = None,
     ) -> None:
-        record = self.load_accessible_run(run_id)
+        record = self.load_accessible_run(run_id, allow_share=True)
         if not record:
             return
         preview_kind = normalize_preview_kind(record, ((query or {}).get("preview") or [""])[0])
@@ -5537,7 +5846,12 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             )
             return
         bind_live_preview_target(record, preview_kind)
-        query_suffix = f"?preview={preview_kind}" if len(preview_targets_for_record(record)) > 1 else ""
+        query_parts = []
+        if len(preview_targets_for_record(record)) > 1:
+            query_parts.append(f"preview={quote(preview_kind)}")
+        if getattr(self, "_run_access_mode", "") == "share":
+            query_parts.append(f"share={quote(record.share_token)}")
+        query_suffix = f"?{'&'.join(query_parts)}" if query_parts else ""
         self.send_json(
             {
                 **WEBRTC_PREVIEW.config_payload(),
@@ -5552,7 +5866,7 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         query: dict[str, list[str]] | None = None,
     ) -> None:
         request_started_at = time.monotonic()
-        record = self.load_accessible_run(run_id)
+        record = self.load_accessible_run(run_id, allow_share=True)
         if not record:
             return
         preview_kind = normalize_preview_kind(record, ((query or {}).get("preview") or [""])[0])
@@ -5603,7 +5917,7 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         self.send_json(answer)
 
     def handle_get_thumbnail(self, run_id: str, *, head_only: bool = False) -> None:
-        record = self.load_accessible_run(run_id)
+        record = self.load_accessible_run(run_id, allow_share=True)
         if not record:
             return
         screenshot_path = find_first_screenshot(record.run_id)
@@ -5634,7 +5948,7 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             self.send_file(hap_path, download_name=hap_path.name)
 
     def handle_get_hap_qr(self, run_id: str) -> None:
-        record = self.load_accessible_run(run_id)
+        record = self.load_accessible_run(run_id, allow_share=True)
         if not record:
             return
         workspace = Path(record.workspace)
@@ -5656,7 +5970,7 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
         self.send_bytes(qr_bytes, "image/png")
 
     def handle_get_install_qr(self, run_id: str, *, version: str = "latest") -> None:
-        record = self.load_accessible_run(run_id)
+        record = self.load_accessible_run(run_id, allow_share=True)
         if not record:
             return
         if version == "first" and record.first_install_url:

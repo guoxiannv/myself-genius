@@ -17,6 +17,11 @@ const STALE_FRAME_RETRY_DELAY_MS = 500
 const FRAME_ERROR_RETRY_DELAY_MS = 1000
 const WEBRTC_FIRST_FRAME_TIMEOUT_MS = 5_000
 
+function createViewerId() {
+  return globalThis.crypto?.randomUUID?.()
+    || `viewer-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
 export function DevicePreview({
   artifacts,
   waitingMessage,
@@ -24,6 +29,7 @@ export function DevicePreview({
   runtime,
   previewPolicy,
   previewSessions,
+  shareToken = "",
 }: {
   artifacts: RunArtifacts
   waitingMessage: string
@@ -31,20 +37,21 @@ export function DevicePreview({
   runtime: RunRuntime | string
   previewPolicy?: RunPreviewPolicy
   previewSessions?: Partial<Record<PreviewKind, RunPreviewSession>>
+  shareToken?: string
 }) {
   const isExpo = String(runtime).toLowerCase() === "expo"
   const defaultPolicy: RunPreviewPolicy = isExpo
     ? {
         default_kind: "desktop",
         previews: {
-          desktop: { enabled: true, transport: "hap_install", start_mode: "automatic" },
+          desktop: { enabled: true, transport: "hap_install", start_mode: "on_demand" },
           phone: { enabled: true, transport: "hap_install", start_mode: "on_demand" },
         },
       }
     : {
         default_kind: "phone",
         previews: {
-          phone: { enabled: true, transport: "hap_install", start_mode: "automatic" },
+          phone: { enabled: true, transport: "hap_install", start_mode: "on_demand" },
         },
       }
   const resolvedPolicy = previewPolicy || defaultPolicy
@@ -58,11 +65,12 @@ export function DevicePreview({
   const activeSession = previewSessions?.[activePreview]
   const activeArtifacts = artifacts.previews?.[activePreview] || artifacts
   const sessionStatus = String(activeSession?.status || ("status" in activeArtifacts ? activeArtifacts.status : "") || "").toLowerCase()
-  const captureStatus = String("capture_status" in activeArtifacts ? activeArtifacts.capture_status : "").toLowerCase()
-  const previewFailed = sessionStatus === "failed" || captureStatus === "failed"
+  // Build-time capture failures are separate from the user-triggered preview.
+  const previewFailed = Boolean(activeSession?.requested && sessionStatus === "failed")
   const previewInactive = sessionStatus === "idle" || sessionStatus === "released"
   const previewStarting = ["queued", "allocating", "installing", "loading_bundle", "launching"].includes(sessionStatus)
   const previewInitiallyIdle = sessionStatus === "idle" && !activeSession?.requested
+  const queuePosition = Number(activeSession?.queue_position || 0)
   const phoneNeedsRequest = activePreview === "phone" && isExpo && (
     !activeSession?.requested || previewInactive
   )
@@ -72,7 +80,7 @@ export function DevicePreview({
     ? activeSession?.outdated && ["queued", "building"].includes(String(activeSession.refresh_status || ""))
       ? "正在为最新修改构建 HAP…"
       : previewStarting
-        ? desktopPreviewRefreshMessage(sessionStatus)
+        ? desktopPreviewRefreshMessage(sessionStatus, queuePosition)
         : ""
     : ""
   const sessionScreenshot = activeSession?.screenshot_url || activeSession?.screenshot_path || ""
@@ -89,6 +97,7 @@ export function DevicePreview({
     activeArtifacts.live_webrtc_config_path ? "connecting" : "rest",
   )
   const [pageVisible, setPageVisible] = useState(() => document.visibilityState === "visible")
+  const viewerIdRef = useRef(createViewerId())
   const pointerStart = useRef<{ x: number; y: number; at: number } | null>(null)
   const lastWheelAt = useRef(0)
   const frameObjectUrlRef = useRef("")
@@ -109,7 +118,7 @@ export function DevicePreview({
   }, [activePreview, availablePreviews.join("|"), defaultPreview])
 
   useEffect(() => {
-    if (sessionStatus === "ready" || previewFailed) {
+    if (["idle", "ready", "failed", "released"].includes(sessionStatus)) {
       setRetryingPreview(false)
       if (!previewFailed) setRetryPreviewError("")
     }
@@ -131,11 +140,13 @@ export function DevicePreview({
     automaticStartAttemptRef.current = attemptKey
     setRetryingPreview(true)
     setRetryPreviewError("")
-    void api.startPreview(runId, activePreview).catch((error) => {
-      setRetryingPreview(false)
-      setRetryPreviewError(error instanceof Error ? error.message : "自动连接模拟器失败")
-    })
-  }, [activePreview, activeSession?.updated_at, pageVisible, previewInitiallyIdle, resolvedPolicy.previews, retryingPreview, runId])
+    void api.startPreview(runId, activePreview, viewerIdRef.current, shareToken)
+      .then(() => setRetryingPreview(false))
+      .catch((error) => {
+        setRetryingPreview(false)
+        setRetryPreviewError(error instanceof Error ? error.message : "自动连接模拟器失败")
+      })
+  }, [activePreview, activeSession?.updated_at, pageVisible, previewInitiallyIdle, resolvedPolicy.previews, retryingPreview, runId, shareToken])
 
   useEffect(() => {
     latestFrameSequenceRef.current = 0
@@ -158,27 +169,58 @@ export function DevicePreview({
   }, [])
 
   useEffect(() => {
-    if (!runId || (!previewStarting && sessionStatus !== "ready")) return
+    if (!runId) return
 
     let timer = 0
-    const reportVisibility = (visible: boolean, keepalive = false) => {
-      void api.heartbeatPreview(runId, activePreview, visible, keepalive).catch(() => undefined)
+    const reportHeartbeat = (keepalive = false, leaving = false) => {
+      void api.heartbeatPreview(
+        runId,
+        activePreview,
+        document.visibilityState === "visible",
+        keepalive,
+        viewerIdRef.current,
+        shareToken,
+        leaving,
+      ).catch(() => undefined)
     }
-    const handlePageHide = () => reportVisibility(false, true)
+    const handlePageHide = (event: PageTransitionEvent) => {
+      // A BFCache transition is not a real departure; keep the viewer and
+      // resume its heartbeat when the page is shown again.
+      if (!event.persisted) reportHeartbeat(true, true)
+    }
+    const handlePageShow = () => reportHeartbeat(true, false)
 
-    if (pageVisible) {
-      reportVisibility(true)
-      timer = window.setInterval(() => reportVisibility(true), 15_000)
-    } else {
-      reportVisibility(false, true)
-    }
+    reportHeartbeat()
+    timer = window.setInterval(() => reportHeartbeat(), 15_000)
     window.addEventListener("pagehide", handlePageHide)
+    window.addEventListener("pageshow", handlePageShow)
     return () => {
       window.clearInterval(timer)
       window.removeEventListener("pagehide", handlePageHide)
-      reportVisibility(false, true)
+      window.removeEventListener("pageshow", handlePageShow)
+      reportHeartbeat(true, true)
     }
-  }, [activePreview, pageVisible, previewStarting, runId, sessionStatus])
+  }, [activePreview, runId, shareToken])
+
+  // The component can mount before the first run snapshot arrives. The
+  // initial heartbeat is then correctly ignored while the session is idle,
+  // but without this status-triggered refresh a page opened onto an already
+  // queued/ready preview would not register its viewer until the next 15s
+  // interval. Register immediately whenever the live preview becomes active.
+  useEffect(() => {
+    if (!runId || !["queued", "allocating", "installing", "loading_bundle", "launching", "ready"].includes(sessionStatus)) {
+      return
+    }
+    void api.heartbeatPreview(
+      runId,
+      activePreview,
+      document.visibilityState === "visible",
+      false,
+      viewerIdRef.current,
+      shareToken,
+      false,
+    ).catch(() => undefined)
+  }, [activePreview, runId, sessionStatus, shareToken])
 
   useEffect(() => {
     setFullscreenSupported(Boolean(document.fullscreenEnabled && previewContainerRef.current?.requestFullscreen))
@@ -281,6 +323,7 @@ export function DevicePreview({
     client = new LivePreviewWebRTC({
       runId,
       preview: artifacts.previews ? activePreview : "",
+      shareToken,
       onOpen: () => {
         if (!disposed) {
           setLiveError("")
@@ -344,7 +387,7 @@ export function DevicePreview({
       client.close()
       if (webRTCRef.current === client) webRTCRef.current = null
     }
-  }, [activeArtifacts.live_webrtc_config_path, activePreview, liveEnabled, pageVisible, runId])
+  }, [activeArtifacts.live_webrtc_config_path, activePreview, liveEnabled, pageVisible, runId, shareToken])
 
   useEffect(() => () => {
     if (frameObjectUrlRef.current) URL.revokeObjectURL(frameObjectUrlRef.current)
@@ -376,7 +419,7 @@ export function DevicePreview({
     }
     try {
       setLiveError("")
-      await api.sendLiveInput(runId, artifacts.previews ? activePreview : "", body)
+      await api.sendLiveInput(runId, artifacts.previews ? activePreview : "", body, shareToken)
     } catch (error) {
       setLiveError(error instanceof Error ? error.message : "模拟器操作失败")
     }
@@ -452,7 +495,8 @@ export function DevicePreview({
     setRetryingPreview(true)
     setRetryPreviewError("")
     try {
-      await api.startPreview(runId, activePreview)
+      await api.startPreview(runId, activePreview, viewerIdRef.current, shareToken)
+      setRetryingPreview(false)
     } catch (error) {
       setRetryingPreview(false)
       setRetryPreviewError(error instanceof Error ? error.message : "重新预览失败")
@@ -472,7 +516,11 @@ export function DevicePreview({
             : "border-accent/60 bg-accent/15 text-accent-soft shadow-accent/15 hover:-translate-y-0.5 hover:border-accent hover:bg-accent/25 hover:text-foreground"
       }`}
     >
-      {previewFailed ? <RetryIcon /> : <PreviewPlayIcon />}
+      {retryingPreview || previewStarting
+        ? <PreviewLoadingIcon />
+        : previewFailed
+          ? <RetryIcon />
+          : <PreviewPlayIcon />}
       {retryingPreview || previewStarting
         ? "正在排队…"
         : phoneRefreshAvailable
@@ -481,7 +529,7 @@ export function DevicePreview({
             ? `重新预览${activePreview === "phone" ? "手机" : "PC"}`
             : activePreview === "phone"
               ? "在手机模拟器上预览"
-              : "在 PC 模拟器上预览"}
+              : "在 PC 模拟器中预览"}
     </button>
   ) : null
 
@@ -521,19 +569,17 @@ export function DevicePreview({
     <WaitingState
       message={
         retryingPreview || previewStarting
-          ? previewStatusMessage(sessionStatus, activePreview)
-          : phonePreviewOutdated && !phoneRefreshAvailable
+          ? previewStatusMessage(sessionStatus, activePreview, queuePosition)
+            : phonePreviewOutdated && !phoneRefreshAvailable
             ? activeSession?.refresh_status === "failed"
               ? activeSession?.refresh_error || "最新预览 HAP 构建失败。"
               : "正在为最新修改构建 HAP…"
-            : previewFailed
+              : previewFailed
               ? activeSession?.error || ("error" in activeArtifacts ? activeArtifacts.error : "") || "设备预览失败，生成产物仍然可用。"
               : phoneNeedsRequest || previewInactive
                 ? hasMedia
                   ? "当前显示最后一次预览画面；模拟器会话已释放。"
-                  : activePreview === "phone"
-                    ? "手机预览将在你点击后申请模拟器并安装 HAP。"
-                    : waitingMessage
+                  : ""
                 : waitingMessage
       }
       failed={previewFailed}
@@ -654,10 +700,6 @@ export function DevicePreview({
               ? "正在尝试 WebRTC 直连，当前由 REST 保持画面"
               : "REST 回退链路"}
         </p>
-      ) : !liveEnabled ? (
-        <p className="mt-3 max-w-[260px] text-center text-xs leading-relaxed text-subtle">
-          {hasMedia ? "已切换为真机运行效果" : "构建完成后这里会显示真机运行画面"}
-        </p>
       ) : null}
     </div>
   )
@@ -692,10 +734,22 @@ function RetryIcon() {
   )
 }
 
-function previewStatusMessage(status: string, kind: PreviewKind) {
+function PreviewLoadingIcon() {
+  return (
+    <span
+      className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-current/30 border-t-current"
+      aria-hidden="true"
+    />
+  )
+}
+
+function previewStatusMessage(status: string, kind: PreviewKind, queuePosition = 0) {
   switch (status) {
+    case "queued":
     case "allocating":
-      return "正在申请空闲模拟器…"
+      return queuePosition > 0
+        ? `正在排队，当前第 ${queuePosition} 位`
+        : "正在排队…"
     case "installing":
       return `正在安装 HAP 到${kind === "phone" ? "手机" : "PC"}模拟器…`
     case "loading_bundle":
@@ -703,14 +757,17 @@ function previewStatusMessage(status: string, kind: PreviewKind) {
     case "launching":
       return "应用已安装，正在等待首帧…"
     default:
-      return "已进入设备队列，正在等待空闲模拟器…"
+      return "正在排队…"
   }
 }
 
-function desktopPreviewRefreshMessage(status: string) {
+function desktopPreviewRefreshMessage(status: string, queuePosition = 0) {
   switch (status) {
+    case "queued":
     case "allocating":
-      return "正在申请 PC 模拟器…"
+      return queuePosition > 0
+        ? `正在排队，当前第 ${queuePosition} 位`
+        : "正在排队…"
     case "installing":
       return "正在安装最新 HAP 到 PC 模拟器…"
     case "loading_bundle":
@@ -744,7 +801,7 @@ function WaitingState({
 }) {
   return (
     <div className="flex h-full w-full flex-col items-center justify-center gap-5 px-6 text-center">
-      <div className="relative flex h-16 w-16 items-center justify-center">
+      {(failed || !action) && <div className="relative flex h-16 w-16 items-center justify-center">
         <span className={`absolute inset-0 rounded-2xl ${failed ? "bg-warning/15" : "bg-accent/15"}`} />
         {failed ? (
           <svg className="text-warning" viewBox="0 0 24 24" width="30" height="30" fill="none" aria-hidden="true">
@@ -757,8 +814,8 @@ function WaitingState({
             <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
           </svg>
         )}
-      </div>
-      <p className="text-sm leading-relaxed text-muted">{message}</p>
+      </div>}
+      {message ? <p className="text-sm leading-relaxed text-muted">{message}</p> : null}
       {action}
       {error ? <p className="max-w-[300px] text-xs leading-relaxed text-warning">{error}</p> : null}
     </div>

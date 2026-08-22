@@ -36,7 +36,7 @@ class EffectiveCaptureStatusTests(unittest.TestCase):
 
         self.assertEqual(pro_policy["default_kind"], "phone")
         self.assertEqual(set(pro_policy["previews"]), {"phone"})
-        self.assertEqual(pro_policy["previews"]["phone"]["start_mode"], "automatic")
+        self.assertEqual(pro_policy["previews"]["phone"]["start_mode"], "on_demand")
         self.assertEqual(expo_policy["default_kind"], "desktop")
         self.assertEqual(expo_policy["previews"]["desktop"]["transport"], "hap_install")
 
@@ -72,6 +72,63 @@ class EffectiveCaptureStatusTests(unittest.TestCase):
             call.kwargs["timeout"] == remote_ui_app.PREVIEW_DEVICE_PROBE_TIMEOUT_SEC
             for call in runner.call_args_list
         ))
+
+    def test_preview_queue_position_follows_live_ticket_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            remote_ui_app, "PREVIEW_DEVICE_POOL_ROOT", Path(directory)
+        ), patch.object(remote_ui_app, "preview_process_alive", return_value=True):
+            queue = Path(directory) / "queue"
+            queue.mkdir()
+            tickets = [
+                ("live-2.json", "second-run", "2026-08-21T01:00:02+00:00"),
+                ("live-1.json", "first-run", "2026-08-21T01:00:01+00:00"),
+            ]
+            for name, run_id, queued_at in tickets:
+                (queue / name).write_text(json.dumps({
+                    "run_id": run_id,
+                    "pid": 123,
+                    "kind": "desktop",
+                    "priority": "live",
+                    "queued_at": queued_at,
+                    "expires_at": "2099-01-01T00:00:00+00:00",
+                }), encoding="utf-8")
+
+            self.assertEqual(remote_ui_app.preview_queue_position("first-run", "desktop"), 1)
+            self.assertEqual(remote_ui_app.preview_queue_position("second-run", "desktop"), 2)
+            self.assertEqual(remote_ui_app.preview_queue_position("missing", "desktop"), 0)
+
+    def test_active_viewer_keeps_waiting_past_fixed_queue_timeout(self) -> None:
+        run_id = "q" * 32
+        kind = "desktop"
+        remote_ui_app.mark_preview_viewer(run_id, kind, visible=True, viewer_id="tab-a")
+        try:
+            with tempfile.TemporaryDirectory() as directory, patch.object(
+                remote_ui_app, "PREVIEW_DEVICE_POOL_ROOT", Path(directory)
+            ), patch.object(
+                remote_ui_app,
+                "discover_preview_targets",
+                side_effect=[[], ["desktop-ready"]],
+            ):
+                lease = remote_ui_app.acquire_preview_lease(run_id, kind, wait_seconds=1)
+
+            self.assertEqual(lease["target"], "desktop-ready")
+        finally:
+            remote_ui_app.clear_preview_viewer(run_id, kind)
+
+    def test_last_viewer_leave_cancels_queue_without_preview_failure(self) -> None:
+        run_id = "h" * 32
+        kind = "desktop"
+        remote_ui_app.mark_preview_viewer(run_id, kind, visible=True, viewer_id="tab-a")
+        remote_ui_app.clear_preview_viewer_id(run_id, kind, "tab-a")
+        try:
+            with tempfile.TemporaryDirectory() as directory, patch.object(
+                remote_ui_app, "PREVIEW_DEVICE_POOL_ROOT", Path(directory)
+            ), patch.object(
+                remote_ui_app, "PREVIEW_LEAVE_GRACE_SECONDS", 0
+            ), self.assertRaises(remote_ui_app.PreviewRequestCancelled):
+                remote_ui_app.acquire_preview_lease(run_id, kind, wait_seconds=1)
+        finally:
+            remote_ui_app.clear_preview_viewer(run_id, kind)
 
     def test_start_phone_preview_is_idempotent_while_queued(self) -> None:
         record = remote_ui_app.RunRecord(
@@ -198,7 +255,7 @@ class EffectiveCaptureStatusTests(unittest.TestCase):
         self.assertTrue(accepted)
         thread.assert_called_once()
 
-    def test_completed_follow_up_refreshes_an_existing_desktop_preview(self) -> None:
+    def test_completed_follow_up_does_not_acquire_a_preview_device(self) -> None:
         record = remote_ui_app.RunRecord(
             run_id="f" * 32,
             session_name="desktop-preview-follow-up",
@@ -215,16 +272,12 @@ class EffectiveCaptureStatusTests(unittest.TestCase):
                 "screenshot_path": "/tmp/old.jpeg",
             }},
         )
-        with patch.object(
-            remote_ui_app,
-            "start_desktop_preview",
-            return_value=(record, True),
-        ) as starter:
+        with patch.object(remote_ui_app, "start_desktop_preview") as starter:
             latest, accepted = remote_ui_app.maybe_refresh_desktop_preview(record, "completed")
 
         self.assertIs(latest, record)
-        self.assertTrue(accepted)
-        starter.assert_called_once_with(record, automatic=True)
+        self.assertFalse(accepted)
+        starter.assert_not_called()
 
         with patch.object(remote_ui_app, "start_desktop_preview") as starter:
             _, accepted = remote_ui_app.maybe_refresh_desktop_preview(record, "running")
@@ -335,27 +388,25 @@ class EffectiveCaptureStatusTests(unittest.TestCase):
             self.assertEqual(result["previewSourceAdjustmentAt"], adjustment_at)
             self.assertEqual(result["hapPath"], str(hap_path))
 
-    def test_viewer_state_releases_hidden_idle_and_long_sessions(self) -> None:
+    def test_viewer_state_ignores_visibility_and_releases_stale_viewers(self) -> None:
         run_id = "v" * 32
         kind = "desktop"
         key = remote_ui_app.preview_viewer_key(run_id, kind)
         try:
-            with patch.object(remote_ui_app, "PREVIEW_HIDDEN_GRACE_SECONDS", 30), patch.object(
-                remote_ui_app, "PREVIEW_IDLE_SECONDS", 90
-            ), patch.object(remote_ui_app, "PREVIEW_MAX_SESSION_SECONDS", 600):
+            with patch.object(remote_ui_app, "PREVIEW_IDLE_SECONDS", 90), patch.object(
+                remote_ui_app, "PREVIEW_LEAVE_GRACE_SECONDS", 0
+            ):
                 remote_ui_app.PREVIEW_VIEWERS[key] = {
                     "lease_started_at": 100,
-                    "last_seen_at": 190,
-                    "hidden_since": 200,
+                    "viewers": {"tab-a": {"last_seen_at": 230, "visible": False}},
                 }
                 self.assertEqual(
                     remote_ui_app.preview_viewer_release_reason(run_id, kind, now=231),
-                    "hidden",
+                    "",
                 )
                 remote_ui_app.PREVIEW_VIEWERS[key] = {
                     "lease_started_at": 100,
-                    "last_seen_at": 200,
-                    "hidden_since": 0,
+                    "viewers": {"tab-a": {"last_seen_at": 200, "visible": True}},
                 }
                 self.assertEqual(
                     remote_ui_app.preview_viewer_release_reason(run_id, kind, now=291),
@@ -363,58 +414,81 @@ class EffectiveCaptureStatusTests(unittest.TestCase):
                 )
                 remote_ui_app.PREVIEW_VIEWERS[key] = {
                     "lease_started_at": 100,
-                    "last_seen_at": 699,
-                    "hidden_since": 0,
+                    "viewers": {"tab-a": {"last_seen_at": 699, "visible": True}},
                 }
+                with patch.object(remote_ui_app, "PREVIEW_MAX_SESSION_SECONDS", 600):
+                    self.assertEqual(
+                        remote_ui_app.preview_viewer_release_reason(run_id, kind, now=700),
+                        "max_session",
+                    )
+        finally:
+            remote_ui_app.clear_preview_viewer(run_id, kind)
+
+    def test_viewer_state_keeps_lease_when_any_viewer_is_active(self) -> None:
+        run_id = "w" * 32
+        kind = "desktop"
+        key = remote_ui_app.preview_viewer_key(run_id, kind)
+        with patch.object(remote_ui_app, "PREVIEW_IDLE_SECONDS", 90):
+            remote_ui_app.PREVIEW_VIEWERS[key] = {
+                "lease_started_at": 100,
+                "viewers": {
+                    "tab-a": {"last_seen_at": 200, "visible": False},
+                    "tab-b": {"last_seen_at": 290, "visible": True},
+                },
+            }
+            try:
+                self.assertEqual(remote_ui_app.preview_viewer_release_reason(run_id, kind, now=300), "")
+            finally:
+                remote_ui_app.clear_preview_viewer(run_id, kind)
+
+    def test_only_last_viewer_leave_makes_session_releasable(self) -> None:
+        run_id = "m" * 32
+        kind = "desktop"
+        remote_ui_app.mark_preview_viewer(run_id, kind, viewer_id="tab-a")
+        remote_ui_app.mark_preview_viewer(run_id, kind, viewer_id="tab-b")
+        try:
+            self.assertEqual(remote_ui_app.clear_preview_viewer_id(run_id, kind, "tab-a"), 1)
+            self.assertEqual(remote_ui_app.preview_viewer_release_reason(run_id, kind), "")
+            self.assertEqual(remote_ui_app.clear_preview_viewer_id(run_id, kind, "tab-b"), 0)
+            with patch.object(remote_ui_app, "PREVIEW_LEAVE_GRACE_SECONDS", 0):
                 self.assertEqual(
-                    remote_ui_app.preview_viewer_release_reason(run_id, kind, now=700),
-                    "max_session",
+                    remote_ui_app.preview_viewer_release_reason(run_id, kind),
+                    "last_viewer_left",
                 )
         finally:
             remote_ui_app.clear_preview_viewer(run_id, kind)
 
-    def test_new_owner_preview_preempts_the_same_owners_old_session(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            runs_dir = Path(directory)
-            base = dict(
-                session_name="owner-preview",
+    def test_release_reason_and_last_heartbeat_are_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            remote_ui_app, "RUNS_DIR", Path(directory) / "runs"
+        ), patch.object(
+            remote_ui_app.LIVE_PREVIEW, "release_session", return_value=None
+        ):
+            remote_ui_app.RUNS_DIR.mkdir()
+            record = remote_ui_app.RunRecord(
+                run_id="p" * 32,
+                session_name="release-reason",
                 prompt="test",
                 workspace=directory,
                 variant="expo-fast",
                 created_at=remote_ui_app.to_iso(),
                 updated_at=remote_ui_app.to_iso(),
                 runtime="expo",
-                owner_id="same-owner",
+                preview_sessions={"desktop": {"status": "ready", "live_available": True}},
             )
-            old = remote_ui_app.RunRecord(
-                **base,
-                run_id="o" * 32,
-                preview_sessions={
-                    "desktop": {
-                        "status": "ready",
-                        "target": "desktop-1",
-                        "lease_id": "old-lease",
-                        "live_available": True,
-                    }
-                },
-            )
-            current = remote_ui_app.RunRecord(**base, run_id="n" * 32)
-            with patch.object(remote_ui_app, "RUNS_DIR", runs_dir):
-                remote_ui_app.save_run(old)
-                remote_ui_app.save_run(current)
-                with patch.object(
-                    remote_ui_app,
-                    "preview_sessions_payload",
-                    side_effect=lambda value: value.preview_sessions,
-                ), patch.object(
-                    remote_ui_app,
-                    "release_preview_lease",
-                    side_effect=lambda value, _kind: value,
-                ) as release:
-                    released = remote_ui_app.preempt_owner_preview_leases(current, "desktop")
+            remote_ui_app.save_run(record)
+            remote_ui_app.mark_preview_viewer(record.run_id, "desktop", viewer_id="tab-a")
 
-            self.assertEqual(released, [old.run_id])
-            release.assert_called_once_with(old, "desktop")
+            released = remote_ui_app.release_preview_lease(
+                record,
+                "desktop",
+                reason="viewer_timeout",
+            )
+
+            session = released.preview_sessions["desktop"]
+            self.assertEqual(session["release_reason"], "viewer_timeout")
+            self.assertTrue(session["released_at"])
+            self.assertTrue(session["last_heartbeat_at"])
 
     def test_ready_desktop_session_without_live_lease_is_released(self) -> None:
         record = remote_ui_app.RunRecord(
@@ -523,7 +597,7 @@ class EffectiveCaptureStatusTests(unittest.TestCase):
             self.assertEqual(payload["preview_policy"]["previews"]["phone"]["start_mode"], "on_demand")
             starter.assert_not_called()
 
-    def test_pro_policy_defaults_to_automatic_phone_hap_preview(self) -> None:
+    def test_pro_policy_defaults_to_on_demand_phone_hap_preview(self) -> None:
         record = remote_ui_app.RunRecord(
             run_id="q" * 32,
             session_name="pro-preview",
@@ -538,7 +612,7 @@ class EffectiveCaptureStatusTests(unittest.TestCase):
 
         self.assertEqual(policy["default_kind"], "phone")
         self.assertEqual(policy["previews"]["phone"]["transport"], "hap_install")
-        self.assertEqual(policy["previews"]["phone"]["start_mode"], "automatic")
+        self.assertEqual(policy["previews"]["phone"]["start_mode"], "on_demand")
         self.assertNotIn("desktop", policy["previews"])
 
     def test_preview_session_state_is_persisted_per_kind(self) -> None:

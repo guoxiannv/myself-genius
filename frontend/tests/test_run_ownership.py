@@ -8,6 +8,7 @@ import threading
 import unittest
 from pathlib import Path
 from typing import Optional
+from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "app.py"
@@ -131,6 +132,8 @@ class RunOwnershipTests(unittest.TestCase):
         status, _, progress = self.request("GET", f"/api/runs/{run_id}", cookie=cookie)
         self.assertEqual(status, 200)
         self.assertEqual(progress["run"]["run_id"], run_id)
+        self.assertTrue(progress["access"]["can_write"])
+        self.assertIn(f"/runs/{run_id}?share=", progress["access"]["share_url"])
 
         status, root_headers, auth = self.request("POST", "/api/auth/login", body={"password": "root-password"})
         self.assertEqual(status, 200)
@@ -156,6 +159,60 @@ class RunOwnershipTests(unittest.TestCase):
 
         status, _, _ = self.request("GET", f"/api/runs/{run_id}/hap?share={record.share_token}")
         self.assertEqual(status, 200)
+
+        status, _, _ = self.request("GET", f"/api/runs/{run_id}?share=incorrect-token")
+        self.assertEqual(status, 404)
+
+        status, _, shared = self.request("GET", f"/api/runs/{run_id}?share={record.share_token}")
+        self.assertEqual(status, 200)
+        self.assertFalse(shared["access"]["can_write"])
+        self.assertTrue(shared["access"]["can_preview"])
+        self.assertEqual(shared["access"]["mode"], "share")
+        self.assertNotIn("owner_id", shared["run"])
+        self.assertNotIn("share_token", shared["run"])
+        self.assertNotIn("command", shared["distribution"])
+        self.assertNotIn("manifest", shared["distribution"])
+        self.assertIn(f"share={record.share_token}", shared["artifacts"]["hap_download_path"])
+
+        with patch.object(
+            remote_ui_app,
+            "start_phone_preview",
+            return_value=(record, False),
+        ):
+            status, _, preview = self.request(
+                "POST",
+                f"/api/runs/{run_id}/previews/phone/start?share={record.share_token}",
+                body={"viewer_id": "shared-tab"},
+            )
+        self.assertEqual(status, 200)
+        self.assertTrue(preview["ok"])
+        self.assertEqual(
+            remote_ui_app.preview_viewer_snapshot(run_id, "phone")["viewer_count"],
+            1,
+        )
+
+        status, _, heartbeat = self.request(
+            "POST",
+            f"/api/runs/{run_id}/previews/phone/heartbeat?share={record.share_token}",
+            body={"viewer_id": "shared-tab", "visible": True},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(heartbeat["ok"])
+
+        status, _, left = self.request(
+            "POST",
+            f"/api/runs/{run_id}/previews/phone/heartbeat?share={record.share_token}",
+            body={"viewer_id": "shared-tab", "leaving": True},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(left["viewer_count"], 0)
+
+        status, _, _ = self.request(
+            "POST",
+            f"/api/runs/{run_id}/package?share={record.share_token}",
+            body={},
+        )
+        self.assertEqual(status, 404)
 
     def test_create_run_starts_first_package_monitor(self) -> None:
         status, _, created = self.request("POST", "/api/runs", body={"prompt": "生成一个应用"})

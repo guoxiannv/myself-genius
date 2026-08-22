@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -41,6 +42,10 @@ PREVIEW_MAX_WIDTH = 660
 PREVIEW_JPEG_QUALITY = 75
 DESKTOP_PREVIEW_MAX_WIDTH = 3120
 DESKTOP_PREVIEW_JPEG_QUALITY = 90
+DESKTOP_WINDOW_WAIT_ATTEMPTS = 20
+DESKTOP_WINDOW_RETRY_INTERVAL_SEC = 0.25
+DESKTOP_MAXIMIZE_VERIFY_ATTEMPTS = 8
+DESKTOP_MAXIMIZE_CLICK_ATTEMPTS = 3
 
 
 def parse_open_bundle_names(ability_dump: str) -> list[str]:
@@ -53,6 +58,103 @@ def parse_open_bundle_names(ability_dump: str) -> list[str]:
     mission_dump = ability_dump[start:end if end >= 0 else len(ability_dump)]
     bundles = re.findall(r"^\s*bundle name \[([^\]]+)]\s*$", mission_dump, re.MULTILINE)
     return list(dict.fromkeys(bundle.strip() for bundle in bundles if bundle.strip()))
+
+
+def parse_bundle_pid(ability_dump: str, bundle_name: str) -> str:
+    """Find the foreground application pid reported by ``aa dump``."""
+    lines = ability_dump.splitlines()
+    marker = f"process name [{bundle_name}]"
+    for index, line in enumerate(lines):
+        if marker not in line:
+            continue
+        for candidate in lines[index + 1:index + 5]:
+            match = re.search(r"pid\s+#(\d+)", candidate)
+            if match:
+                return match.group(1)
+    return ""
+
+
+def parse_window_bounds(window_dump: str, pid: str) -> tuple[int, int, int, int] | None:
+    """Return x, y, width and height for an application window."""
+    if not pid:
+        return None
+    pattern = re.compile(
+        rf"^\s*\S+\s+\d+\s+{re.escape(pid)}\s+\d+\s+\d+\s+\d+\s+\d+\s+[-\d]+\s+\d+\s+"
+        r"\[\s*(-?\d+)\s+(-?\d+)\s+(\d+)\s+(\d+)\s+\]",
+        re.MULTILINE,
+    )
+    match = pattern.search(window_dump)
+    if not match:
+        return None
+    return tuple(int(value) for value in match.groups())  # type: ignore[return-value]
+
+
+def parse_render_resolution(render_dump: str) -> tuple[int, int] | None:
+    """Read the active display resolution from RenderService output."""
+    match = re.search(r"render resolution=(\d+)x(\d+)", render_dump)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def parse_layout_control_bounds(
+    layout_dump: str,
+    bundle_name: str,
+    control_id: str,
+) -> tuple[int, int, int, int] | None:
+    """Find one system-decor control inside the requested app window."""
+    try:
+        root = json.loads(layout_dump)
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+    def find_bundle(node: dict[str, Any]) -> dict[str, Any] | None:
+        attributes = node.get("attributes") or {}
+        if str(attributes.get("bundleName") or "") == bundle_name:
+            return node
+        for child in node.get("children") or []:
+            if isinstance(child, dict):
+                match = find_bundle(child)
+                if match:
+                    return match
+        return None
+
+    def find_control(node: dict[str, Any]) -> tuple[int, int, int, int] | None:
+        attributes = node.get("attributes") or {}
+        if str(attributes.get("id") or attributes.get("key") or "") == control_id:
+            match = re.fullmatch(
+                r"\[\s*(-?\d+)\s*,\s*(-?\d+)\s*]\[\s*(-?\d+)\s*,\s*(-?\d+)\s*]",
+                str(attributes.get("bounds") or ""),
+            )
+            if match:
+                left, top, right, bottom = (int(value) for value in match.groups())
+                return left, top, max(0, right - left), max(0, bottom - top)
+        for child in node.get("children") or []:
+            if isinstance(child, dict):
+                match = find_control(child)
+                if match:
+                    return match
+        return None
+
+    # The title-bar controls live in the system decor sibling of the app node,
+    # not below the app's bundle root. Confirm the requested bundle exists,
+    # then search the complete layout tree for the stable control id.
+    if not find_bundle(root):
+        return None
+    return find_control(root)
+
+
+def window_is_maximized(
+    bounds: tuple[int, int, int, int],
+    display_size: tuple[int, int] | None,
+) -> bool:
+    """Whether an app window fills the HarmonyOS PC working area."""
+    if not display_size:
+        return False
+    _x, _y, width, height = bounds
+    display_width, display_height = display_size
+    # The PC dock occupies a small strip at the bottom of the display.
+    return width >= round(display_width * 0.95) and height >= round(display_height * 0.9)
 
 
 class LivePreviewError(RuntimeError):
@@ -297,6 +399,7 @@ class LocalLivePreview:
         hap_path: Path,
         bundle_name: str,
         ability_name: str = "EntryAbility",
+        maximize: bool = False,
     ) -> Frame:
         """Install one HAP on the bound device, launch it, and return its first frame."""
         if not hap_path.is_file():
@@ -307,50 +410,153 @@ class LocalLivePreview:
         with session.lock:
             target = self._resolve_target(session)
         with self._target_access(target, input_priority=True), session.lock:
-            self._close_open_apps(target, bundle_name)
+            # Do not terminate unrelated user/system applications on a shared
+            # preview device. Only replace the bundle owned by this preview.
+            self._run(target, "shell", "aa", "force-stop", bundle_name, check=False)
             self._run(target, "shell", "bm", "uninstall", "-n", bundle_name, check=False)
             self._run(target, "install", "-r", str(hap_path))
-            self._wake_and_unlock(target, session)
-            try:
-                self._run(
-                    target,
-                    "shell",
-                    "aa",
-                    "start",
+            self._wake_device(target)
+
+            def launch_ability() -> None:
+                common_args = (
                     "-b",
                     bundle_name,
                     "-a",
                     ability_name or "EntryAbility",
                 )
+                self._run(target, "shell", "aa", "start", *common_args)
+
+            try:
+                launch_ability()
             except LivePreviewError as exc:
                 if not _screen_is_locked_error(exc):
                     raise
-                self._wake_and_unlock(target, session)
-                self._run(
-                    target,
-                    "shell",
-                    "aa",
-                    "start",
-                    "-b",
-                    bundle_name,
-                    "-a",
-                    ability_name or "EntryAbility",
-                )
+                self._unlock_device(target, session)
+                launch_ability()
+            if maximize:
+                self._maximize_desktop_window(target, bundle_name)
             time.sleep(1.0)
             return self._capture_frame_locked(run_id, target, session)
 
-    def _close_open_apps(self, target: str, incoming_bundle_name: str) -> None:
-        """Close every app mission left by a previous preview user."""
-        ability_dump = self._run_output(target, "shell", "aa", "dump", "-a", check=False)
-        open_bundles = parse_open_bundle_names(ability_dump)
-        if incoming_bundle_name not in open_bundles:
-            open_bundles.append(incoming_bundle_name)
-        for bundle_name in open_bundles:
-            self._run(target, "shell", "aa", "force-stop", bundle_name, check=False)
+    def _desktop_maximize_control_bounds(
+        self,
+        target: str,
+        bundle_name: str,
+    ) -> tuple[int, int, int, int] | None:
+        remote_path = f"/data/local/tmp/harmony-pilot-layout-{uuid4().hex}.json"
+        try:
+            self._run(
+                target,
+                "shell",
+                "uitest",
+                "dumpLayout",
+                "-p",
+                remote_path,
+                check=False,
+            )
+            layout_dump = self._run_output(target, "shell", "cat", remote_path, check=False)
+            return parse_layout_control_bounds(layout_dump, bundle_name, "EnhanceMaximizeBtn")
+        finally:
+            self._run(target, "shell", "rm", "-f", remote_path, check=False)
 
-    def _wake_and_unlock(self, target: str, session: _Session) -> None:
+    def _maximize_desktop_window(self, target: str, bundle_name: str) -> bool:
+        """Click the HarmonyOS PC title-bar maximize control for this app.
+
+        ``aa start -s`` only applies to legacy FA abilities and is ignored by
+        the Stage-model HAPs produced by this project. The PC emulator exposes
+        maximize as a system title-bar button, so locate the app window through
+        ``aa dump``/WindowManagerService and click that control by geometry.
+        """
+        render_dump = self._run_output(
+            target,
+            "shell",
+            "hidumper",
+            "-s",
+            "RenderService",
+            "-a",
+            "screen",
+            check=False,
+        )
+        display_size = parse_render_resolution(render_dump)
+        pid = ""
+        bounds: tuple[int, int, int, int] | None = None
+        # A cold Stage-model launch returns before the process and its system
+        # title-bar window are registered. Wait for both instead of silently
+        # skipping maximize on the first empty dump.
+        for _attempt in range(DESKTOP_WINDOW_WAIT_ATTEMPTS):
+            ability_dump = self._run_output(target, "shell", "aa", "dump", "-a", check=False)
+            pid = parse_bundle_pid(ability_dump, bundle_name)
+            if pid:
+                window_dump = self._run_output(
+                    target,
+                    "shell",
+                    "hidumper",
+                    "-s",
+                    "WindowManagerService",
+                    "-a",
+                    "-a",
+                    check=False,
+                )
+                bounds = parse_window_bounds(window_dump, pid)
+                if bounds is not None:
+                    break
+            time.sleep(DESKTOP_WINDOW_RETRY_INTERVAL_SEC)
+        if bounds is None:
+            raise LivePreviewError("PC 应用已启动，但无法识别窗口，未能完成最大化。")
+        if window_is_maximized(bounds, display_size):
+            return True
+
+        for _click_attempt in range(DESKTOP_MAXIMIZE_CLICK_ATTEMPTS):
+            control_bounds = self._desktop_maximize_control_bounds(target, bundle_name)
+            if control_bounds:
+                control_x, control_y, control_width, control_height = control_bounds
+                click_x = control_x + max(1, control_width // 2)
+                click_y = control_y + max(1, control_height // 2)
+            else:
+                x, y, width, _height = bounds
+                # Accessibility data can be unavailable during a cold launch.
+                # HarmonyOS PC places maximize before minimize and close, about
+                # seven percent of the window width from its right edge.
+                click_x = x + width - max(1, round(width * 0.07))
+                click_y = y + 35
+            self._run(
+                target,
+                "shell",
+                "uitest",
+                "uiInput",
+                "click",
+                str(click_x),
+                str(click_y),
+                check=False,
+            )
+            # WindowManagerService can lag behind the title-bar animation.
+            # Poll the state before considering another click, otherwise a
+            # second click could toggle a successfully maximized window back.
+            for _verify_attempt in range(DESKTOP_MAXIMIZE_VERIFY_ATTEMPTS):
+                time.sleep(DESKTOP_WINDOW_RETRY_INTERVAL_SEC)
+                window_dump = self._run_output(
+                    target,
+                    "shell",
+                    "hidumper",
+                    "-s",
+                    "WindowManagerService",
+                    "-a",
+                    "-a",
+                    check=False,
+                )
+                latest_bounds = parse_window_bounds(window_dump, pid)
+                if latest_bounds is None:
+                    continue
+                if window_is_maximized(latest_bounds, display_size):
+                    return True
+                bounds = latest_bounds
+        raise LivePreviewError("PC 应用已启动，但系统窗口最大化未生效，请稍后重新预览。")
+
+    def _wake_device(self, target: str) -> None:
         self._run(target, "shell", "power-shell", "wakeup", check=False)
         time.sleep(0.5)
+
+    def _unlock_device(self, target: str, session: _Session) -> None:
         width, height = session.screen_size or (1080, 1920)
         x1, y1 = normalized_to_pixel((0.5, 0.82), (width, height))
         x2, y2 = normalized_to_pixel((0.5, 0.25), (width, height))

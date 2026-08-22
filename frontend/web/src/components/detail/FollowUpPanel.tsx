@@ -23,6 +23,7 @@ interface FollowUpPanelProps {
   expo?: RunProgress["expo"]
   expoHapReady?: boolean
   className?: string
+  readOnly?: boolean
   /** 演示模式：不实际请求后端 Agent。 */
   mock?: boolean
 }
@@ -132,6 +133,7 @@ export function FollowUpPanel({
   expo,
   expoHapReady = false,
   className,
+  readOnly = false,
   mock,
 }: FollowUpPanelProps) {
   const [message, setMessage] = useState("")
@@ -561,11 +563,11 @@ export function FollowUpPanel({
                     editing={editingCommandId === command.id}
                     editingText={editingText}
                     busy={queueActionId === command.id}
-                    onEdit={() => startEdit(command)}
-                    onEditingTextChange={setEditingText}
-                    onSave={() => void saveEdit(command)}
-                    onCancel={() => { setEditingCommandId(null); setEditingText("") }}
-                    onRemove={() => void removeQueueItem(command)}
+                    onEdit={readOnly ? undefined : () => startEdit(command)}
+                    onEditingTextChange={readOnly ? undefined : setEditingText}
+                    onSave={readOnly ? undefined : () => void saveEdit(command)}
+                    onCancel={readOnly ? undefined : () => { setEditingCommandId(null); setEditingText("") }}
+                    onRemove={readOnly ? undefined : () => void removeQueueItem(command)}
                   />
                 ))}
               </div>
@@ -599,7 +601,7 @@ export function FollowUpPanel({
         )}
       </div>
 
-      <form onSubmit={submit} className="min-w-0 shrink-0 border-t border-border bg-surface/90 px-4 py-3">
+      {!readOnly && <form onSubmit={submit} className="min-w-0 shrink-0 border-t border-border bg-surface/90 px-4 py-3">
         <div className="relative">
           <textarea
             value={message}
@@ -658,7 +660,7 @@ export function FollowUpPanel({
             )}
           </button>
         </div>
-      </form>
+      </form>}
     </div>
   )
 }
@@ -855,21 +857,47 @@ function AgentNotice({
 
 type BuildStageState = "done" | "running" | "failed" | "waiting"
 
-function BuildStagePill({ label, state }: { label: string; state: BuildStageState }) {
-  const styles: Record<BuildStageState, string> = {
-    done: "border-success/25 bg-success/[0.07] text-success",
-    running: "border-accent/25 bg-accent/[0.07] text-accent-soft",
-    failed: "border-danger/25 bg-danger/[0.07] text-danger",
-    waiting: "border-border bg-surface-raised text-subtle",
+function BuildStageIcon({ state, large = false }: { state: BuildStageState; large?: boolean }) {
+  const size = large ? "h-4 w-4" : "h-3.5 w-3.5"
+
+  if (state === "running") {
+    return (
+      <span className={cn("relative inline-flex shrink-0 items-center justify-center", size)} aria-hidden="true">
+        <span className="absolute inset-[2px] rounded-full bg-accent/15" />
+        <span className="absolute inset-0 animate-spin rounded-full border border-accent/25 border-t-accent" />
+      </span>
+    )
   }
-  const glyph = state === "done" ? "✓" : state === "failed" ? "!" : state === "running" ? "•" : "·"
+
+  if (state === "waiting") {
+    return (
+      <span
+        className={cn("inline-flex shrink-0 items-center justify-center rounded-full border border-border-strong bg-surface", size)}
+        aria-hidden="true"
+      >
+        <span className="h-1 w-1 rounded-full bg-border-strong" />
+      </span>
+    )
+  }
+
   return (
-    <span className={cn(
-      "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium",
-      styles[state],
-    )}>
-      <span className={cn("text-[10px]", state === "running" && "live-dot")}>{glyph}</span>
-      {label}
+    <span
+      className={cn(
+        "inline-flex shrink-0 items-center justify-center rounded-full",
+        size,
+        state === "done" ? "bg-success text-background" : "bg-danger text-background",
+      )}
+      aria-hidden="true"
+    >
+      {state === "done" ? (
+        <svg viewBox="0 0 16 16" className="h-2.5 w-2.5" fill="none">
+          <path d="m4 8.2 2.4 2.3L12 5.4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      ) : (
+        <svg viewBox="0 0 16 16" className="h-2.5 w-2.5" fill="none">
+          <path d="M8 4.2v4.6M8 11.6h.01" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+        </svg>
+      )}
     </span>
   )
 }
@@ -889,10 +917,8 @@ function ExpoBuildSummary({
   const stateStatus = normalize(expo.state?.status)
   const packageStatus = normalize(expo.package?.status)
   const generationFailed = stateName === "failed" || stateStatus === "failed"
-  const generationDone = stateName === "completed"
   const packageFailed = packageStatus === "failed"
   const packageDone = packageStatus === "ready" && hapReady
-  const packageRunning = packageStatus === "building"
   const failed = generationFailed || packageFailed
   const [expanded, setExpanded] = useState(failed || running)
   const uniqueEvents = events
@@ -921,10 +947,14 @@ function ExpoBuildSummary({
     >
       <summary className="flex cursor-pointer list-none items-center gap-3 px-3.5 py-3 [&::-webkit-details-marker]:hidden">
         <span className={cn(
-          "flex h-7 w-7 shrink-0 items-center justify-center rounded-full",
-          failed ? "bg-danger/10 text-danger" : packageDone ? "bg-success/10 text-success" : "bg-accent/10 text-accent-soft",
+          "flex h-8 w-8 shrink-0 items-center justify-center rounded-full border",
+          failed
+            ? "border-danger/20 bg-danger/10"
+            : packageDone
+              ? "border-success/20 bg-success/10"
+              : "border-accent/20 bg-accent/[0.08]",
         )}>
-          {failed ? "!" : packageDone ? "✓" : <span className="live-dot">•</span>}
+          <BuildStageIcon state={failed ? "failed" : packageDone ? "done" : "running"} large />
         </span>
         <span className="min-w-0 flex-1">
           <span className="block text-xs font-semibold text-foreground">首轮构建</span>
@@ -937,17 +967,8 @@ function ExpoBuildSummary({
       </summary>
 
       <div className="border-t border-border/70 px-3.5 pb-3.5 pt-3">
-        <div className="flex flex-wrap gap-2">
-          <BuildStagePill label="代码生成" state={generationFailed ? "failed" : generationDone ? "done" : "running"} />
-          <BuildStagePill label="验证导出" state={generationFailed ? "failed" : generationDone ? "done" : running ? "running" : "waiting"} />
-          <BuildStagePill
-            label="HAP"
-            state={packageFailed ? "failed" : packageDone ? "done" : packageRunning ? "running" : "waiting"}
-          />
-        </div>
-
         {uniqueEvents.length > 0 && (
-          <ol className="mt-3 space-y-2 border-l border-border/80 pl-3">
+          <ol className="space-y-2 border-l border-border/80 pl-3">
             {uniqueEvents.map((event, index) => (
               <li key={`${event.timestamp}-${event.kind}-${index}`} className="flex items-start gap-2 text-[11px] leading-5">
                 <span className="min-w-0 flex-1 text-muted">{event.summary}</span>

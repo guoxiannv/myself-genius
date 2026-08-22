@@ -111,6 +111,11 @@ export interface RunPreviewSession {
   refresh_available?: boolean
   refresh_status?: "idle" | "queued" | "building" | "ready" | "failed" | string
   refresh_error?: string
+  viewer_count?: number
+  queue_position?: number
+  last_heartbeat_at?: string
+  released_at?: string
+  release_reason?: string
   error?: string
   updated_at?: string
 }
@@ -327,6 +332,12 @@ export interface ExpoServeState {
 
 export interface RunProgress {
   run: RunRecord
+  access?: {
+    mode: "owner" | "root" | "share" | string
+    can_write: boolean
+    can_preview?: boolean
+    share_url?: string
+  }
   runtime?: RunRuntime | string
   workspace: { path: string; [key: string]: unknown }
   tmux: {

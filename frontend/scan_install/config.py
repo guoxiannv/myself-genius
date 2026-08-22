@@ -143,16 +143,13 @@ PREVIEW_DEVICE_POOL_ROOT = Path(
     or os.environ.get("HP_PREVIEW_DEVICE_POOL_ROOT")
     or "/private/tmp/genius-expo-preview-pool"
 ).expanduser().resolve()
-PREVIEW_LEASE_SECONDS = max(15, int(os.environ.get("EXPO_FAST_PREVIEW_LEASE_SECONDS", "90")))
+PREVIEW_LEASE_SECONDS = max(30, int(os.environ.get("EXPO_FAST_PREVIEW_LEASE_SECONDS", "120")))
 PREVIEW_WAIT_SECONDS = max(1, int(os.environ.get("HP_PHONE_PREVIEW_WAIT_SECONDS", "120")))
-PREVIEW_IDLE_SECONDS = max(30, int(os.environ.get("HP_PREVIEW_IDLE_SECONDS", "90")))
-PREVIEW_HIDDEN_GRACE_SECONDS = max(
-    5,
-    int(os.environ.get("HP_PREVIEW_HIDDEN_GRACE_SECONDS", "30")),
-)
+PREVIEW_IDLE_SECONDS = max(60, int(os.environ.get("HP_PREVIEW_IDLE_SECONDS", "120")))
+PREVIEW_LEAVE_GRACE_SECONDS = max(1, int(os.environ.get("HP_PREVIEW_LEAVE_GRACE_SECONDS", "3")))
 PREVIEW_MAX_SESSION_SECONDS = max(
     PREVIEW_IDLE_SECONDS,
-    int(os.environ.get("HP_PREVIEW_MAX_SESSION_SECONDS", "600")),
+    int(os.environ.get("HP_PREVIEW_MAX_SESSION_SECONDS", "1800")),
 )
 DEFAULT_CAPTURE_PYTHON_BIN = APP_ROOT / ".venv" / "bin" / "python3"
 CAPTURE_PYTHON_CONFIG = os.environ.get("HP_CAPTURE_PYTHON_BIN", "").strip()

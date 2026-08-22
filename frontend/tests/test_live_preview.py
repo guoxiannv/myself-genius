@@ -4,7 +4,6 @@ import time
 import unittest
 from io import BytesIO
 from unittest.mock import patch
-from unittest.mock import patch
 from pathlib import Path
 
 from PIL import Image
@@ -16,8 +15,13 @@ from scan_install.live_preview import (
     normalized_to_pixel,
     parse_open_bundle_names,
     parse_live_input,
+    parse_bundle_pid,
+    parse_layout_control_bounds,
+    parse_render_resolution,
+    parse_window_bounds,
     read_jpeg_size,
     swipe_velocity,
+    window_is_maximized,
 )
 
 
@@ -40,6 +44,27 @@ class FakeHdc:
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="error: capture failed")
         if "file" in command and "recv" in command:
             Path(command[-1]).write_bytes(self.jpeg_data)
+        if command[-3:] == ["aa", "dump", "-a"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="  AppRunningRecord ID #1\n    process name [com.example.app]\n      pid #1234\n",
+                stderr="",
+            )
+        if "WindowManagerService" in command:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="ide0 0 1234 111 1 102 0 110 0 [ 100 100 1000 700 ]",
+                stderr="",
+            )
+        if "RenderService" in command:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="render resolution=1200x800",
+                stderr="",
+            )
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
 
@@ -50,6 +75,35 @@ def make_jpeg(width: int, height: int) -> bytes:
 
 
 class LiveInputTests(unittest.TestCase):
+    def test_parse_window_metadata(self) -> None:
+        self.assertEqual(
+            parse_bundle_pid("process name [com.example.app]\n  pid #1234", "com.example.app"),
+            "1234",
+        )
+        self.assertEqual(
+            parse_window_bounds("ide0 0 1234 111 1 102 0 110 0 [ 100 100 1000 700 ]", "1234"),
+            (100, 100, 1000, 700),
+        )
+        self.assertEqual(parse_render_resolution("render resolution=1200x800"), (1200, 800))
+        self.assertFalse(window_is_maximized((100, 100, 1000, 700), (1200, 800)))
+        self.assertTrue(window_is_maximized((0, 0, 1200, 740), (1200, 800)))
+
+    def test_parse_maximize_control_from_requested_bundle(self) -> None:
+        layout = """{
+          "attributes": {},
+          "children": [{
+            "attributes": {"id": "EnhanceMaximizeBtn", "bounds": "[2877,9][2930,62]"},
+            "children": []
+          }, {
+            "attributes": {"bundleName": "com.example.app"},
+            "children": []
+          }]
+        }"""
+        self.assertEqual(
+            parse_layout_control_bounds(layout, "com.example.app", "EnhanceMaximizeBtn"),
+            (2877, 9, 53, 53),
+        )
+
     def test_open_bundle_names_only_come_from_current_missions(self) -> None:
         ability_dump = """User ID #100
   current mission lists:{
@@ -93,26 +147,10 @@ class LocalLivePreviewTests(unittest.TestCase):
         fake_hdc = FakeHdc()
         original_runner = fake_hdc
 
-        def runner(command, **kwargs):
-            result = original_runner(command, **kwargs)
-            if command[-4:] == ["shell", "aa", "dump", "-a"]:
-                return subprocess.CompletedProcess(
-                    command,
-                    0,
-                    stdout="""current mission lists:{
-    Mission ID #1
-        bundle name [com.example.previous]
- }
-  ExtensionRecords:
-""",
-                    stderr="",
-                )
-            return result
-
         preview = LocalLivePreview(
             preferred_target="emulator-phone",
             hdc_bin="/fake/hdc",
-            command_runner=runner,
+            command_runner=original_runner,
         )
         with patch("scan_install.live_preview.time.sleep"):
             with patch.object(Path, "is_file", return_value=True):
@@ -124,13 +162,10 @@ class LocalLivePreviewTests(unittest.TestCase):
                 )
 
         commands = [command[3:] for command in fake_hdc.commands if command[1:3] == ["-t", "emulator-phone"]]
-        dump_index = commands.index(["shell", "aa", "dump", "-a"])
-        previous_stop_index = commands.index(["shell", "aa", "force-stop", "com.example.previous"])
-        incoming_stop_index = commands.index(["shell", "aa", "force-stop", "com.example.app"])
         install_index = commands.index(["install", "-r", "/tmp/app.hap"])
-        self.assertLess(dump_index, previous_stop_index)
-        self.assertLess(previous_stop_index, install_index)
-        self.assertLess(incoming_stop_index, install_index)
+        self.assertIn(["shell", "aa", "force-stop", "com.example.app"], commands)
+        self.assertNotIn(["shell", "aa", "force-stop", "com.example.previous"], commands)
+        self.assertLess(commands.index(["shell", "aa", "force-stop", "com.example.app"]), install_index)
         self.assertIn(["install", "-r", "/tmp/app.hap"], commands)
         self.assertIn(["shell", "aa", "start", "-b", "com.example.app", "-a", "MainAbility"], commands)
         self.assertTrue(any("power-shell" in command for command in commands))
@@ -174,6 +209,95 @@ class LocalLivePreviewTests(unittest.TestCase):
         self.assertIn(["shell", "aa", "start", "-b", "com.example.app", "-a", "EntryAbility"], flattened)
         self.assertTrue(any("power-shell" in command for command in flattened))
         self.assertTrue(any("snapshot_display" in command for command in flattened))
+
+    def test_desktop_launch_clicks_maximize_control(self) -> None:
+        fake_hdc = FakeHdc()
+        preview = LocalLivePreview(
+            preferred_target="emulator-desktop",
+            hdc_bin="/fake/hdc",
+            command_runner=fake_hdc,
+        )
+        preview.bind_target("run:desktop", "emulator-desktop", preview_kind="desktop")
+
+        window_dumps = iter([
+            "ide0 0 1234 111 1 102 0 110 0 [ 100 100 1000 700 ]",
+            "ide0 0 1234 111 1 1 0 110 0 [ 0 0 1200 740 ]",
+        ])
+
+        def output(_target, *args, **_kwargs):
+            if args[-3:] == ("aa", "dump", "-a"):
+                return "process name [com.example.app]\n  pid #1234"
+            if "WindowManagerService" in args:
+                return next(window_dumps)
+            if "RenderService" in args:
+                return "render resolution=1200x800"
+            return ""
+
+        with patch("scan_install.live_preview.time.sleep", return_value=None), patch.object(
+            Path, "is_file", return_value=True
+        ), patch.object(preview, "_run_output", side_effect=output), patch.object(
+            preview, "_desktop_maximize_control_bounds", return_value=(970, 95, 60, 50)
+        ):
+            preview.install_and_launch(
+                "run:desktop",
+                hap_path=Path("/tmp/app.hap"),
+                bundle_name="com.example.app",
+                maximize=True,
+            )
+
+        commands = [
+            command[3:]
+            for command in fake_hdc.commands
+            if command[1:3] == ["-t", "emulator-desktop"]
+        ]
+        self.assertIn(
+            ["shell", "aa", "start", "-b", "com.example.app", "-a", "EntryAbility"],
+            commands,
+        )
+        self.assertIn(["shell", "uitest", "uiInput", "click", "1000", "120"], commands)
+
+    def test_desktop_maximize_waits_for_cold_start_window(self) -> None:
+        fake_hdc = FakeHdc()
+        preview = LocalLivePreview(
+            preferred_target="emulator-desktop",
+            hdc_bin="/fake/hdc",
+            command_runner=fake_hdc,
+        )
+        ability_dumps = iter([
+            "",
+            "process name [com.example.app]\n  pid #1234",
+        ])
+        window_dumps = iter([
+            "ide0 0 1234 111 1 102 0 110 0 [ 100 100 1000 700 ]",
+            "ide0 0 1234 111 1 1 0 110 0 [ 0 0 1200 740 ]",
+        ])
+
+        def output(_target, *args, **_kwargs):
+            if args[-3:] == ("aa", "dump", "-a"):
+                return next(ability_dumps)
+            if "WindowManagerService" in args:
+                return next(window_dumps)
+            if "RenderService" in args:
+                return "render resolution=1200x800"
+            return ""
+
+        with patch.object(preview, "_run_output", side_effect=output), patch.object(
+            preview, "_run", return_value=0
+        ) as runner, patch.object(
+            preview, "_desktop_maximize_control_bounds", return_value=None
+        ), patch("scan_install.live_preview.time.sleep", return_value=None):
+            preview._maximize_desktop_window("emulator-desktop", "com.example.app")
+
+        runner.assert_called_once_with(
+            "emulator-desktop",
+            "shell",
+            "uitest",
+            "uiInput",
+            "click",
+            "1030",
+            "135",
+            check=False,
+        )
 
     def test_release_session_allows_rebinding_to_another_target(self) -> None:
         preview = LocalLivePreview(

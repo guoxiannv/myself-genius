@@ -2,7 +2,7 @@
 
 ## 目标
 
-构建任务完成后，右侧设备预览保持连接到本机 HarmonyOS 模拟器。用户可以直接在画面上点击、拖动或使用滚轮，操作会通过 HDC 作用于真实模拟器，随后右侧画面自动刷新。模拟器下方不再显示状态和快捷按钮行。
+构建任务完成后不会自动申请模拟器。任何能打开任务详情页的访问者都可以点击预览按钮进入设备池 FIFO；获得设备后，HAP 会被安装并启动，PC 窗口经过系统控件定位和尺寸复验后最大化。用户可在画面上点击、拖动或使用滚轮，操作会通过 HDC 作用于真实模拟器，随后右侧画面自动刷新。
 
 本地模式只需要现有开发机、HDC 和模拟器，不需要域名、额外服务器或 WebRTC 服务。
 
@@ -25,6 +25,16 @@ Python RemoteUIHandler
 
 HarmonyOS 模拟器
 ```
+
+## 权限、排队与释放
+
+- 预览权限来自详情页访问权，不区分 owner、共享或只读访问者。分享令牌会传到 start、heartbeat、frame、input 和 WebRTC 信令接口。
+- `can_write` 仍只控制续跑、回答问题、发布与打包等写操作；分享访问者不能修改任务。
+- 不同任务使用同一类模拟器时严格进入设备池 FIFO，启动新任务不会按 owner 抢占已有任务。
+- 同一任务的多个浏览器使用独立 viewer ID，共享一个任务租约。任意 viewer 仍有有效心跳时，租约继续保留。
+- `visibilitychange=hidden` 只暂停该页面的帧流/WebRTC，不表示离开；页面卸载或 `pagehide` 才发送 leave。最后一个 viewer 离开后释放，未正常上报 leave 时由 `HP_PREVIEW_IDLE_SECONDS`（默认 120 秒）兜底。
+- 为防止浏览器异常持续续租，单次租约仍有 `HP_PREVIEW_MAX_SESSION_SECONDS`（默认 1800 秒）硬上限；到达上限会以 `max_session` 释放并需要重新点击预览。
+- `preview_sessions` 返回 `viewer_count`、`queue_position`、`last_heartbeat_at`、`released_at` 和 `release_reason`，用于排队提示和问题定位。
 
 ### 点击到新画面的完整流程
 
@@ -76,15 +86,15 @@ HarmonyOS 模拟器
 - `X-Harmony-Preview-Status: stale`
 - `X-Harmony-Preview-Sequence: <frame_seq>`
 
-没有任何可用缓存时才返回 `502`。输入载荷无效返回 `400`，输入队列满返回 `429`，运行尚未完成自动安装与采集时返回 `409`。
+没有任何可用缓存时才返回 `502`。输入载荷无效返回 `400`，输入队列满返回 `429`，按需预览尚未就绪时返回 `409`。
 
 运行记录使用临时文件完整写入后再原子替换，避免多个后台线程同时保存 run 状态时产生残缺 JSON，导致预览接口错误返回 `404`。
 
 ## 可用条件
 
 1. 本机 DevEco Studio 和 HarmonyOS 模拟器正在运行。
-2. `hdc list targets` 可识别到一个模拟器；若同时连接多个设备，在 `.env.local` 配置 `HP_HDC_TARGET=<target>`。
-3. 该运行的自动安装与采集已完成，即接口返回的 `artifacts.live_ready` 为 `true`。
+2. `hdc list targets` 可识别设备池中的模拟器；可分别通过 `HP_HDC_DESKTOP_TARGETS` 和 `HP_HDC_PHONE_TARGETS` 配置多个 target。
+3. 该运行已有可安装 HAP，且访问者在详情页点击预览按钮。获得租约并完成安装启动后，接口返回 `artifacts.live_ready=true`。
 
 采集完成后不要关闭模拟器或结束应用进程，否则实时画面无法继续更新。原有 MP4 仍保留；在实时预览尚未就绪时，详情页可以继续展示已有媒体产物。实时预览已经启用但 HDC 临时抓帧失败时，页面优先保持最近一张成功 JPEG，而不是立即切换到 MP4。
 
@@ -92,7 +102,7 @@ HarmonyOS 模拟器
 
 ### `GET /api/runs/:runId/live/frame`
 
-抓取模拟器当前 JPEG 画面。可传 `after=<frame_seq>&wait_ms=<0..1500>` 等待更新帧；响应通过 `X-Harmony-Preview-Sequence` 返回帧序号。接口遵循运行归属校验，只有创建该运行的访客或管理员可以读取。
+抓取模拟器当前 JPEG 画面。可传 `after=<frame_seq>&wait_ms=<0..1500>` 等待更新帧；响应通过 `X-Harmony-Preview-Sequence` 返回帧序号。任务 owner、管理员和持有有效分享令牌的访问者都可以读取并操作。
 
 响应包含 `X-Harmony-Preview-Width`、`X-Harmony-Preview-Height` 和 `X-Harmony-Preview-Bytes`。输入接口通过 JSON `timings` 和 `Server-Timing` 返回排队、HDC 输入及请求总耗时。
 

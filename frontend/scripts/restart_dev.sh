@@ -11,7 +11,8 @@ SERVE_STACK=0
 TMUX_SESSION="${TMUX_SESSION:-remote-ui-dev2}"
 OPENBITFUN_PROXY_SESSION="${OPENBITFUN_PROXY_SESSION:-openbitfun-proxy}"
 OPENBITFUN_PROXY_PORT="${OPENBITFUN_PROXY_PORT:-40363}"
-OPENBITFUN_PROXY_ROOT="${OPENBITFUN_PROXY_ROOT:-}"
+OPENBITFUN_PROXY_ROOT="${OPENBITFUN_PROXY_ROOT:-$ROOT}"
+OPENBITFUN_PROXY_COMMAND="${OPENBITFUN_PROXY_COMMAND:-node scripts/openbitfun-usage-proxy.mjs}"
 OPENBITFUN_PROXY_HEALTH_URL="http://127.0.0.1:${OPENBITFUN_PROXY_PORT}/health"
 
 usage() {
@@ -137,7 +138,7 @@ ensure_openbitfun_proxy() {
   fi
 
   echo "Starting openbitfun proxy in tmux session: $OPENBITFUN_PROXY_SESSION"
-  tmux new-session -d -s "$OPENBITFUN_PROXY_SESSION" "cd '$OPENBITFUN_PROXY_ROOT' && npm run openbitfun:proxy"
+  tmux new-session -d -s "$OPENBITFUN_PROXY_SESSION" "cd '$OPENBITFUN_PROXY_ROOT' && set -a; if [ -f '$ENV_FILE' ]; then . '$ENV_FILE'; fi; if [ -f '$LOCAL_ENV' ]; then . '$LOCAL_ENV'; fi; set +a; OPENBITFUN_PROXY_ENV_FILE='$ENV_FILE' exec $OPENBITFUN_PROXY_COMMAND"
 
   if ! wait_for_url "$OPENBITFUN_PROXY_HEALTH_URL" 20; then
     echo "openbitfun proxy did not become ready at $OPENBITFUN_PROXY_HEALTH_URL" >&2

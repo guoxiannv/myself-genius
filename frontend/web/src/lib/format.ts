@@ -1,8 +1,8 @@
-export function formatTime(value?: string): string {
+export function formatTime(value?: string, approximate = false): string {
   if (!value) return "等待中"
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString("zh-CN", {
+  const formatted = date.toLocaleString("zh-CN", {
     hour12: false,
     month: "2-digit",
     day: "2-digit",
@@ -10,6 +10,7 @@ export function formatTime(value?: string): string {
     minute: "2-digit",
     second: "2-digit",
   })
+  return approximate ? `约 ${formatted}` : formatted
 }
 
 export function formatDateTime(value?: string): string {

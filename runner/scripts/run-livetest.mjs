@@ -87,6 +87,33 @@ function displayClaudeChunk(chunk, state) {
     for (const message of summarizeClaudeEvent(row)) progress(message);
   }
 }
+export function normalizeClaudeTraceChunk(chunk, state, { now = () => new Date().toISOString() } = {}) {
+  state.pending += chunk.toString();
+  const lines = state.pending.split(/\r?\n/);
+  state.pending = lines.pop() || '';
+  return lines.filter((line) => line.length > 0).map((line) => {
+    try {
+      const row = JSON.parse(line);
+      if (row && typeof row === 'object' && !Array.isArray(row) && !row.timestamp) {
+        row.timestamp = now();
+      }
+      return { row };
+    } catch {
+      return { raw: line };
+    }
+  });
+}
+export function flushClaudeTraceChunk(state, options) {
+  if (!state.pending) return [];
+  const pending = state.pending;
+  state.pending = '';
+  return normalizeClaudeTraceChunk(`${pending}\n`, state, options);
+}
+function writeTraceRecords(output, records) {
+  for (const record of records) {
+    output.write(record.row ? `${JSON.stringify(record.row)}\n` : `${record.raw}\n`);
+  }
+}
 function run(cmd, args, options = {}) { const started = Date.now(); const result = spawnSync(cmd, args, { cwd: options.cwd, env: { ...process.env, ...(options.env || {}) }, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }); if (options.log) writeFileSync(options.log, `${result.stdout || ''}${result.stderr || ''}`); if (result.status !== 0) throw new Error(`${cmd} exited ${result.status}\n${result.stderr || result.stdout || ''}`); return { ms: Date.now() - started, stdout: result.stdout || '' }; }
 function runAsync(cmd, args, options = {}) {
   const started = Date.now();
@@ -309,15 +336,27 @@ async function claudeTurn(project, trace, prompt, sessionId, resume = false, tim
     return new Promise((ok, fail) => {
       const child = spawn(claude, args, { cwd: project, env: { ...process.env, ...roleEnvironment, CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_ATTRIBUTION_HEADER: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
       const output = createWriteStream(trace, { flags: appendTrace ? 'a' : 'w' });
-      const liveState = { pending: '' };
+      const traceState = { pending: '' };
       let stderrText = '';
-      child.stdout.on('data', (chunk) => { output.write(chunk); if (liveClaude) displayClaudeChunk(chunk, liveState); });
+      child.stdout.on('data', (chunk) => {
+        const records = normalizeClaudeTraceChunk(chunk, traceState);
+        writeTraceRecords(output, records);
+        if (liveClaude) {
+          for (const record of records) {
+            if (record.row) {
+              for (const message of summarizeClaudeEvent(record.row)) progress(message);
+            }
+          }
+        }
+      });
       child.stderr.on('data', (chunk) => { stderrText += chunk.toString(); output.write(chunk); if (liveClaude) process.stderr.write(`[expo-fast Claude stderr] ${chunk}`); });
       let timedOut = false;
       const timer = timeoutMinutes > 0 ? setTimeout(() => { timedOut = true; child.kill('SIGINT'); }, timeoutMinutes * 60_000) : null;
       child.on('error', (error) => { if (timer) clearTimeout(timer); output.end(); fail(error); });
       child.on('exit', (code) => {
-        if (timer) clearTimeout(timer); output.end(() => {
+        if (timer) clearTimeout(timer);
+        writeTraceRecords(output, flushClaudeTraceChunk(traceState));
+        output.end(() => {
           if (timedOut && acceptDeadline) ok({ deadlineReached: true, exitCode: code, stderrText, ms: Date.now() - started });
           else if (timedOut) fail(new Error(`claude exceeded ${timeoutMinutes} minute limit; partial trace saved to ${trace}`));
           else ok({ deadlineReached: false, exitCode: code, stderrText, ms: Date.now() - started });

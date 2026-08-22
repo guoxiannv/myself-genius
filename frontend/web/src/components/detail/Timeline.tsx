@@ -29,7 +29,7 @@ export function Timeline({ events, running }: { events: TimelineEvent[]; running
                 <span className="rounded-md bg-surface-raised px-1.5 py-0.5 text-[11px] font-medium text-muted">
                   {event.kind || "event"}
                 </span>
-                <time className="text-[11px] text-subtle">{formatTime(event.timestamp)}</time>
+                <time className="text-[11px] text-subtle">{formatTime(event.timestamp, event.timestamp_approximate)}</time>
               </div>
               <p className="mt-1 text-sm leading-relaxed text-foreground">{event.summary}</p>
             </div>

@@ -747,6 +747,30 @@ class ExpoFastRuntimeTests(unittest.TestCase):
         self.assertEqual(revised[2]["trace_file"], "revisions/001-follow-up/agent-trace.jsonl")
         self.assertEqual(revised[2]["label"], "续跑调整 #1")
 
+    def test_legacy_trace_without_row_timestamps_uses_approximate_trace_time(self) -> None:
+        workspace = remote_ui_app.EXPO_FAST_APP_ROOT / "legacy-trace-app"
+        trace_dir = workspace / ".expo-fast"
+        trace_dir.mkdir(parents=True)
+        trace_path = trace_dir / "agent-trace.jsonl"
+        trace_path.write_text(
+            "\n".join(
+                [
+                    json.dumps({"type": "system", "subtype": "init"}),
+                    json.dumps({
+                        "type": "assistant",
+                        "message": {"content": [{"type": "text", "text": "旧 transcript 消息"}]},
+                    }),
+                ]
+            ) + "\n",
+            encoding="utf-8",
+        )
+        state = {"state": "completed", "startedAt": "2026-08-11T00:00:00.000Z"}
+        groups = remote_ui_app.load_expo_claude_trace_groups(workspace, state)
+        assistant = next(event for event in groups[0]["events"] if event["kind"] == "assistant")
+        self.assertTrue(assistant["timestamp_approximate"])
+        self.assertNotEqual(assistant["timestamp"], state["startedAt"])
+        self.assertEqual(assistant["timestamp"], groups[0]["updated_at"])
+
     def test_expo_package_endpoint_rejects_before_hap_is_ready(self) -> None:
         status, headers, payload = self.request(
             "POST",

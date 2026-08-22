@@ -725,10 +725,10 @@ function formatMessageTime(timestamp?: string): string {
   }).format(date)
 }
 
-function MessageTime({ timestamp }: { timestamp?: string }) {
+function MessageTime({ timestamp, approximate = false }: { timestamp?: string; approximate?: boolean }) {
   const formatted = formatMessageTime(timestamp)
   if (!formatted) return null
-  return <time dateTime={timestamp} className="text-[10px] normal-case tracking-normal text-subtle">{formatted}</time>
+  return <time dateTime={timestamp} className="text-[10px] normal-case tracking-normal text-subtle">{approximate ? `约 ${formatted}` : formatted}</time>
 }
 
 function UserBubble({ text, label, timestamp }: { text: string; label?: string; timestamp?: string }) {
@@ -772,7 +772,7 @@ function AgentEventBubble({
         <div className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-subtle">
           <span className={cn("h-1.5 w-1.5 rounded-full", running ? "live-dot bg-accent" : "bg-border-strong")} />
           <span>{labels[event.kind] || "Agent"}</span>
-          <MessageTime timestamp={event.timestamp} />
+          <MessageTime timestamp={event.timestamp} approximate={Boolean(event.timestamp_approximate)} />
         </div>
         <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground">
           {event.summary}

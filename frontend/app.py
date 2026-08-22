@@ -590,6 +590,10 @@ def extract_recent_transcript_events(transcript_path: Path, limit: int = 6) -> l
         return []
     events: list[dict[str, Any]] = []
     try:
+        fallback_timestamp = datetime.fromtimestamp(transcript_path.stat().st_mtime, timezone.utc).isoformat()
+    except OSError:
+        fallback_timestamp = ""
+    try:
         for raw_line in transcript_path.read_text(encoding="utf-8").splitlines():
             if not raw_line.strip():
                 continue
@@ -606,8 +610,9 @@ def extract_recent_transcript_events(transcript_path: Path, limit: int = 6) -> l
             events.append(
                 {
                     "kind": "assistant",
-                    "timestamp": entry.get("timestamp"),
+                    "timestamp": entry.get("timestamp") or fallback_timestamp,
                     "summary": text[:240],
+                    "timestamp_approximate": not bool(entry.get("timestamp")),
                 }
             )
     except OSError:
@@ -621,6 +626,10 @@ def extract_follow_up_trace_events(transcript_path: Path, limit: int = 60) -> li
         return []
     events: list[dict[str, Any]] = []
     try:
+        fallback_timestamp = datetime.fromtimestamp(transcript_path.stat().st_mtime, timezone.utc).isoformat()
+    except OSError:
+        fallback_timestamp = ""
+    try:
         with transcript_path.open(encoding="utf-8") as handle:
             for raw_line in handle:
                 if not raw_line.strip():
@@ -631,7 +640,8 @@ def extract_follow_up_trace_events(transcript_path: Path, limit: int = 60) -> li
                     continue
                 if not isinstance(entry, dict) or not is_assistant_entry(entry):
                     continue
-                timestamp = str(entry.get("timestamp") or "")
+                timestamp = str(entry.get("timestamp") or fallback_timestamp)
+                timestamp_approximate = not bool(entry.get("timestamp"))
                 message = entry.get("message") if isinstance(entry.get("message"), dict) else {}
                 content = message.get("content")
                 if isinstance(content, str):
@@ -645,7 +655,12 @@ def extract_follow_up_trace_events(transcript_path: Path, limit: int = 60) -> li
                     if item_type == "text":
                         text = re.sub(r"\s+", " ", str(item.get("text") or "")).strip()
                         if text:
-                            events.append({"kind": "assistant", "timestamp": timestamp, "summary": text[:800]})
+                            events.append({
+                                "kind": "assistant",
+                                "timestamp": timestamp,
+                                "summary": text[:800],
+                                "timestamp_approximate": timestamp_approximate,
+                            })
     except OSError:
         return []
     return events[-limit:]
@@ -2255,10 +2270,20 @@ def load_expo_claude_trace_groups(
             ]
         actual_timestamps = [event["timestamp"] for event in events if event.get("timestamp")]
         first_timestamp = actual_timestamps[0] if actual_timestamps else state_started_at
-        last_timestamp = actual_timestamps[-1] if actual_timestamps else trace["updated_at"]
+        trace_updated_at = str(trace.get("updated_at") or "")
+        last_timestamp = actual_timestamps[-1] if actual_timestamps else trace_updated_at
         for event in events:
             if not event.get("timestamp"):
-                event["timestamp"] = last_timestamp if event["kind"] == "result" else first_timestamp
+                # Claude's stream-json rows from older runs do not carry a
+                # per-message timestamp. Do not make every message look like
+                # the run start; use the trace file's last observed write time
+                # as an explicitly approximate value instead.
+                event["timestamp"] = (
+                    state_started_at
+                    if event["kind"] == "session"
+                    else trace_updated_at or first_timestamp
+                )
+                event["timestamp_approximate"] = True
 
         groups.append(
             {

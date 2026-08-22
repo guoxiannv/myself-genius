@@ -33,7 +33,11 @@ import { readModelCache, verifyConfiguredModels } from '../scripts/preflight-mod
 import { repairArtifactName } from '../scripts/repair-artifact.mjs';
 import { assertDependencyRuntime, installProjectDependencies, pinRuntimeDependencies, stageHarmonyCli } from '../scripts/dependencies.mjs';
 import { HAP_DEVICE_TYPES, runHapPoolBuild } from '../scripts/hap-build.mjs';
-import { launchHapPreview } from '../scripts/run-livetest.mjs';
+import {
+  flushClaudeTraceChunk,
+  launchHapPreview,
+  normalizeClaudeTraceChunk,
+} from '../scripts/run-livetest.mjs';
 import { acquirePreviewDevice, acquirePreviewDevices, configuredPreviewPools } from '../scripts/preview-device-pool.mjs';
 import { bundleNameFromModuleJson, DEFAULT_HARMONY_GO_BUNDLE_NAME, resolveHarmonyGoBundleName } from '../scripts/harmony-go-runtime.mjs';
 import {
@@ -49,6 +53,29 @@ import {
 const root = resolve(new URL('..', import.meta.url).pathname);
 const script = join(root, 'scripts/fast-harmony.mjs');
 const dependencyController = join(root, 'scripts/dependencies.mjs');
+
+test('Claude trace rows receive timestamps without breaking chunked JSONL', () => {
+  const state = { pending: '' };
+  let tick = 0;
+  const now = () => `2026-08-22T10:14:0${++tick}.000Z`;
+  const first = JSON.stringify({ type: 'assistant', message: { content: [] } });
+  const second = JSON.stringify({ type: 'result', timestamp: '2026-08-22T10:15:00.000Z' });
+
+  assert.deepEqual(normalizeClaudeTraceChunk(first.slice(0, 12), state, { now }), []);
+  const records = normalizeClaudeTraceChunk(
+    `${first.slice(12)}\nnot-json\n${second}\n`,
+    state,
+    { now },
+  );
+
+  assert.equal(records[0].row.timestamp, '2026-08-22T10:14:01.000Z');
+  assert.equal(records[1].raw, 'not-json');
+  assert.equal(records[2].row.timestamp, '2026-08-22T10:15:00.000Z');
+
+  normalizeClaudeTraceChunk('{"type":"assistant"}', state, { now });
+  const flushed = flushClaudeTraceChunk(state, { now });
+  assert.equal(flushed[0].row.timestamp, '2026-08-22T10:14:02.000Z');
+});
 
 const iconBackgroundSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><defs><linearGradient id="bg_gradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FF9A62"/><stop offset="1" stop-color="#F04462"/></linearGradient></defs><rect width="1024" height="1024" fill="url(#bg_gradient)"/></svg>`;
 const iconForegroundSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><circle cx="512" cy="512" r="250" fill="#FFFFFF"/><path d="M512 315V512L650 590" fill="none" stroke="#F04462" stroke-width="72" stroke-linecap="round"/></svg>`;

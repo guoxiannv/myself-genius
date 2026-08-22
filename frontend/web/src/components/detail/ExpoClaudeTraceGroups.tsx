@@ -174,7 +174,7 @@ function AssistantMessage({ event }: { event: ExpoClaudeTraceEvent }) {
       <p className="whitespace-pre-wrap break-words text-[13px] leading-6 text-foreground">
         {assistantPreview(event.summary)}
       </p>
-      <time className="mt-1 block text-[9px] tabular-nums text-subtle">{formatTime(event.timestamp)}</time>
+      <time className="mt-1 block text-[9px] tabular-nums text-subtle">{formatTime(event.timestamp, event.timestamp_approximate)}</time>
     </article>
   )
 }
@@ -282,7 +282,7 @@ function ActionDetail({ event }: { event: ExpoClaudeTraceEvent }) {
       <p className={cn("min-w-0 flex-1 break-words text-xs leading-5", failed ? "text-danger" : "text-muted")}>
         {event.summary}
       </p>
-      <time className="shrink-0 pt-0.5 text-[10px] leading-4 tabular-nums text-subtle">{formatTime(event.timestamp)}</time>
+      <time className="shrink-0 pt-0.5 text-[10px] leading-4 tabular-nums text-subtle">{formatTime(event.timestamp, event.timestamp_approximate)}</time>
     </li>
   )
 }

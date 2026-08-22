@@ -23,6 +23,7 @@ export interface RunRecord {
 
 export interface TimelineEvent {
   timestamp: string
+  timestamp_approximate?: boolean
   kind: string
   summary: string
 }
@@ -252,6 +253,7 @@ export interface FollowUpTraceEvent {
   kind: "assistant" | "tool" | string
   tool_name?: string
   timestamp: string
+  timestamp_approximate?: boolean
   summary: string
 }
 
@@ -292,6 +294,7 @@ export interface ExpoClaudeTraceEvent {
   id: string
   kind: "session" | "action" | "assistant" | "result" | string
   timestamp: string
+  timestamp_approximate?: boolean
   summary: string
   tool_name?: string
   target?: string

@@ -16,7 +16,7 @@ import {
   inspectCurrentMiniApp,
   visibleBundleNames,
 } from '../scripts/layout-identity.mjs';
-import { assignHdcPreviewPorts, configuredHdcPreviewTargets, configuredHdcTarget, discoverHdcPreviewPools, hdcOutputFailed, parseHdcForwardRules, parseHdcTargets, prioritizeHdcPreviewTargets, reversePortCandidates, selectHdcPreviewTargets, selectHdcTarget } from '../scripts/hdc-target.mjs';
+import { HDC_DEVICE_TIMEOUT_MS, HDC_SESSION_TIMEOUT_MS, HDC_TRANSFER_TIMEOUT_MS, assignHdcPreviewPorts, configuredHdcPreviewTargets, configuredHdcTarget, discoverHdcPreviewPools, hdcCommandKind, hdcCommandTarget, hdcCommandTimeoutMs, hdcOutputFailed, hdcTimeoutMessage, parseHdcForwardRules, parseHdcTargets, prioritizeHdcPreviewTargets, reversePortCandidates, selectHdcPreviewTargets, selectHdcTarget } from '../scripts/hdc-target.mjs';
 import { auditImplementationTrace } from '../scripts/trace-scope.mjs';
 import { auditProductSource, verifyHarmonyGoArtifacts } from '../scripts/verify-product.mjs';
 import { writeRunState } from '../scripts/run-state.mjs';
@@ -974,6 +974,46 @@ test('HDC textual start failures are rejected even when the process exits zero',
   assert.equal(hdcOutputFailed('start ability successfully.\n'), false);
   assert.equal(hdcOutputFailed('error: failed to start ability.\nError Code:10106102'), true);
   assert.equal(hdcOutputFailed('[Fail][E003001] Invalid bundle name: com.example.myapplication1.ide'), true);
+});
+
+test('every hdc invocation is bounded so an unresponsive device fails instead of hanging', () => {
+  // A dead device channel does not error: shell/fport/rport block forever while
+  // `list targets` still answers and reports the device as Connected.
+  assert.equal(hdcCommandKind(['list', 'targets']), 'session');
+  assert.equal(hdcCommandKind(['-t', '127.0.0.1:5555', 'shell', 'aa', 'start']), 'device');
+  assert.equal(hdcCommandKind(['-t', '127.0.0.1:5555', 'rport', 'tcp:3333', 'tcp:3333']), 'device');
+  assert.equal(hdcCommandKind(['-t', '127.0.0.1:5555', 'install', '-r', 'app.hap']), 'transfer');
+  assert.equal(hdcCommandKind(['-t', '127.0.0.1:5555', 'file', 'recv', 'a', 'b']), 'transfer');
+  assert.equal(hdcCommandTimeoutMs(['list', 'targets']), HDC_SESSION_TIMEOUT_MS);
+  assert.equal(hdcCommandTimeoutMs(['-t', 'a:1', 'fport', 'ls']), HDC_DEVICE_TIMEOUT_MS);
+  assert.equal(hdcCommandTimeoutMs(['-t', 'a:1', 'install', '-r', 'app.hap']), HDC_TRANSFER_TIMEOUT_MS);
+  assert.equal(hdcCommandTarget(['-t', '127.0.0.1:5555', 'shell', 'id']), '127.0.0.1:5555');
+  assert.equal(hdcCommandTarget(['fport', 'ls']), '');
+  assert.ok(HDC_TRANSFER_TIMEOUT_MS > HDC_DEVICE_TIMEOUT_MS);
+  assert.ok(HDC_DEVICE_TIMEOUT_MS > HDC_SESSION_TIMEOUT_MS);
+
+  const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
+  const launcher = readFileSync(join(root, 'scripts/start-livetest.mjs'), 'utf8');
+  const targets = readFileSync(join(root, 'scripts/hdc-target.mjs'), 'utf8');
+  assert.match(runner, /spawnSync\(hdc, args, \{ encoding: 'utf8', timeout: timeoutMs \}\)/);
+  assert.match(runner, /r\.error\?\.code === 'ETIMEDOUT'/);
+  assert.doesNotMatch(runner, /spawnSync\(hdc,(?![^)]*timeout)/);
+  assert.doesNotMatch(launcher, /spawnSync\(hdc,(?![^)]*timeout)/);
+  assert.doesNotMatch(targets, /spawnSync\(hdc,(?![^)]*timeout)/);
+});
+
+test('hdc timeout errors name the layer that stalled and how to recover it', () => {
+  const device = hdcTimeoutMessage(['-t', '127.0.0.1:5555', 'shell', 'aa', 'start'], HDC_DEVICE_TIMEOUT_MS);
+  assert.match(device, /timed out after 120s/);
+  assert.match(device, /device channel is not responding/);
+  assert.match(device, /reporting the device as Connected/);
+  assert.match(device, /hdc tconn 127\.0\.0\.1:5555 -remove && hdc tconn 127\.0\.0\.1:5555/);
+
+  // `list targets` is answered by the server, so tconn is the wrong advice here.
+  const session = hdcTimeoutMessage(['list', 'targets'], HDC_SESSION_TIMEOUT_MS);
+  assert.match(session, /hdc server is not responding/);
+  assert.match(session, /hdc kill -r/);
+  assert.doesNotMatch(session, /tconn/);
 });
 
 test('Harmony Go preview wakes and unlocks a reused target and retries a locked launch once', () => {

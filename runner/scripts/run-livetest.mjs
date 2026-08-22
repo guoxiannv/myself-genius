@@ -15,7 +15,7 @@ import {
   inspectCurrentMiniApp,
   visibleBundleNames,
 } from './layout-identity.mjs';
-import { discoverHdcPreviewPools, hdcOutputFailed, parseHdcForwardRules, parseHdcTargets, prioritizeHdcPreviewTargets, reversePortCandidates } from './hdc-target.mjs';
+import { HDC_PROBE_TIMEOUT_MS, discoverHdcPreviewPools, hdcCommandTimeoutMs, hdcOutputFailed, hdcTimeoutMessage, parseHdcForwardRules, parseHdcTargets, prioritizeHdcPreviewTargets, reversePortCandidates } from './hdc-target.mjs';
 import { acquirePreviewDevice, configuredPreviewPools } from './preview-device-pool.mjs';
 import { auditImplementationTrace } from './trace-scope.mjs';
 import { writeRunState } from './run-state.mjs';
@@ -336,7 +336,9 @@ async function claudeTurn(project, trace, prompt, sessionId, resume = false, tim
   return { ...first, sessionId, resumed: resume, ms: first.ms };
 }
 function hdcRun(args) {
-  const r = spawnSync(hdc, args, { encoding: 'utf8' });
+  const timeoutMs = hdcCommandTimeoutMs(args);
+  const r = spawnSync(hdc, args, { encoding: 'utf8', timeout: timeoutMs });
+  if (r.error?.code === 'ETIMEDOUT') throw new Error(hdcTimeoutMessage(args, timeoutMs));
   const output = `${r.stdout || ''}\n${r.stderr || ''}`;
   if (r.status !== 0 || hdcOutputFailed(output)) {
     throw new Error(`hdc ${args.join(' ')} failed\n${output.trim()}`);
@@ -415,12 +417,12 @@ function ensureHarmonyGoInstalled(target) {
   // A shell installed outside Runner may not have launched yet either. Ensure
   // its entry files directory exists before configureHarmonyGoOrigin writes it.
   const entryFiles = `/data/app/el2/${userId}/base/${harmonyGoBundleName}/haps/entry/files`;
-  let probe = spawnSync(hdc, ['-t', target, 'shell', `test -d ${entryFiles} && echo EXISTS`], { encoding: 'utf8' });
+  let probe = spawnSync(hdc, ['-t', target, 'shell', `test -d ${entryFiles} && echo EXISTS`], { encoding: 'utf8', timeout: HDC_PROBE_TIMEOUT_MS });
   if (!(probe.stdout || '').includes('EXISTS')) {
     startHarmonyGo(target);
     const deadline = Date.now() + 15000;
     for (;;) {
-      probe = spawnSync(hdc, ['-t', target, 'shell', `test -d ${entryFiles} && echo EXISTS`], { encoding: 'utf8' });
+      probe = spawnSync(hdc, ['-t', target, 'shell', `test -d ${entryFiles} && echo EXISTS`], { encoding: 'utf8', timeout: HDC_PROBE_TIMEOUT_MS });
       if ((probe.stdout || '').includes('EXISTS')) break;
       if (Date.now() > deadline) throw new Error(`Harmony Go entry files directory did not appear on ${target}: ${entryFiles}`);
       pauseMs(500);

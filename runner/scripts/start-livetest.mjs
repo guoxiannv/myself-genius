@@ -5,7 +5,7 @@ import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:pa
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline/promises';
-import { configuredHdcTarget, parseHdcTargets } from './hdc-target.mjs';
+import { HDC_SESSION_TIMEOUT_MS, configuredHdcTarget, hdcTimeoutMessage, parseHdcTargets } from './hdc-target.mjs';
 import { configuredPreviewPools } from './preview-device-pool.mjs';
 import { resolveExecution } from './execution-policy.mjs';
 
@@ -396,7 +396,8 @@ async function main() {
   const hdc = join(deveco, 'Contents/sdk/default/openharmony/toolchains/hdc');
   if (raw.launch) {
     if (!existsSync(hdc)) throw new Error(`hdc does not exist: ${hdc}`);
-    const listed = spawnSync(hdc, ['list', 'targets'], { encoding: 'utf8' });
+    const listed = spawnSync(hdc, ['list', 'targets'], { encoding: 'utf8', timeout: HDC_SESSION_TIMEOUT_MS });
+    if (listed.error?.code === 'ETIMEDOUT') throw new Error(hdcTimeoutMessage(['list', 'targets'], HDC_SESSION_TIMEOUT_MS));
     if (listed.status !== 0) throw new Error(`unable to list Harmony targets: ${listed.stderr || listed.stdout || `hdc exited ${listed.status}`}`);
     const connectedTargets = parseHdcTargets(listed.stdout);
     if (!connectedTargets.length) throw new Error('no Harmony target; start the DevEco emulator first');

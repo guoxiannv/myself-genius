@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline/promises';
 import { HDC_SESSION_TIMEOUT_MS, configuredHdcTarget, hdcTimeoutMessage, parseHdcTargets } from './hdc-target.mjs';
 import { configuredPreviewPools } from './preview-device-pool.mjs';
-import { resolveExecution } from './execution-policy.mjs';
+import { resolveExecution, resolveRole } from './execution-policy.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const resolveRunnerPath = (value) => isAbsolute(value) ? resolve(value) : resolve(root, value);
@@ -24,8 +24,6 @@ const defaults = {
   deveco: '/Applications/DevEco-Studio.app',
   claude: 'claude',
   timeout: 0,
-  designModel: 'haiku',
-  designTimeoutSeconds: 45,
   repairTimeout: 0,
   hapWaitSeconds: 3600,
   firstPort: 3355,
@@ -59,12 +57,14 @@ Run:
   --output-dir PATH      Alias of --project.
   --app-root PATH        Parent for automatic project and prompt input files.
   --session NAME         tmux session name; derived from project by default.
-  --model MODEL          Override the main model, for example deepseek-v4-flash.
+  --model MODEL          Override the main model for this run.
   --effort LEVEL         Override main effort: low, medium, high, or max.
-  --design-model MODEL   HTML design model; defaults to haiku at low effort.
-  --design-timeout SEC   HTML design deadline; defaults to 45, maximum 55.
+  --design-model MODEL   Override the HTML design model.
+  --design-effort LEVEL  Override HTML design effort.
+  --design-timeout SEC   HTML design deadline; maximum 55.
   --repair-model MODEL   Override the repair model.
   --repair-effort LEVEL  Override repair effort.
+  no model option        config/execution.json declares every role default.
   --timeout MINUTES      Main generation deadline; 0 disables it (default).
   --repair-timeout MIN   Per-repair deadline; 0 disables it (default).
   --port PORT            Legacy diagnostic field; preview uses the shared Gateway.
@@ -94,7 +94,7 @@ Examples:
   ./start-livetest.sh --name learning-goals-k3
   ./start-livetest.sh --output-dir my-learning-app
   ./start-livetest.sh --output-dir /absolute/path/my-learning-app
-  ./start-livetest.sh --model deepseek-v4-flash --effort low --repair-effort medium
+  ./start-livetest.sh --effort high --repair-effort medium
   ./start-livetest.sh --repair-timeout 15
   ./start-livetest.sh --prompt-file ./prompts/ledger.md
 `;
@@ -131,6 +131,7 @@ function parse(argv) {
     else if (arg === '--model') out.model = take(argv, i++, arg);
     else if (arg === '--effort') out.effort = take(argv, i++, arg);
     else if (arg === '--design-model') out.designModel = take(argv, i++, arg);
+    else if (arg === '--design-effort') out.designEffort = take(argv, i++, arg);
     else if (arg === '--repair-model' || arg === '--repairModel') out.repairModel = take(argv, i++, arg);
     else if (arg === '--repair-effort' || arg === '--repairEffort') out.repairEffort = take(argv, i++, arg);
     else if (arg === '--port') out.port = Number(take(argv, i++, arg));
@@ -254,6 +255,7 @@ function runnerArguments(plan) {
     '--repairTimeoutMinutes', String(plan.repairTimeout),
     '--repairLimit', String(plan.repairLimit),
     '--designModel', plan.designModel,
+    '--designEffort', plan.designEffort,
     '--designTimeoutSeconds', String(plan.designTimeoutSeconds),
     '--launch', String(plan.launch),
     '--hap', String(plan.hap),
@@ -283,7 +285,7 @@ function printPlan(plan, tmuxId = '') {
   console.log(`  action  : ${plan.action}`);
   console.log(`  prompt  : ${plan.promptKind}${plan.promptSource ? ` (${plan.promptSource})` : ''}`);
   console.log(`  model   : ${plan.model}/${plan.effort}`);
-  console.log(`  design  : ${plan.designModel}/low · ${plan.designTimeoutSeconds}s hard limit`);
+  console.log(`  design  : ${plan.designModel}/${plan.designEffort} · ${plan.designTimeoutSeconds}s hard limit`);
   console.log(`  repair  : ${plan.repairModel}/${plan.repairEffort} (max ${plan.repairLimit})`);
   console.log(`  launch  : ${plan.launch ? 'direct HAP on desktop emulator' : 'disabled'}`);
   console.log(`  HAP     : ${plan.hap ? `SDK pool ${plan.pool}` : 'disabled'}`);
@@ -314,13 +316,15 @@ async function main() {
   const projectName = basename(project);
   const session = raw.session || `expo-fast-${slug(projectName)}`;
   const timeout = checkOptionalTimeout(raw.timeout ?? defaults.timeout, 'timeout');
+  const designRole = resolveRole('design', { model: raw.designModel, effort: raw.designEffort, timeoutSeconds: raw.designTimeoutSeconds });
   const designTimeoutSeconds = checkNumber(
-    raw.designTimeoutSeconds ?? Number(process.env.EXPO_FAST_DESIGN_TIMEOUT_SECONDS || defaults.designTimeoutSeconds),
+    designRole.timeoutSeconds,
     'design timeout seconds',
     1,
     55,
   );
-  const designModel = raw.designModel || process.env.EXPO_FAST_DESIGN_MODEL || defaults.designModel;
+  const designModel = designRole.model;
+  const designEffort = designRole.effort;
   const repairTimeout = checkOptionalTimeout(raw.repairTimeout ?? defaults.repairTimeout, 'repair timeout');
   const port = checkNumber(raw.port ?? defaults.firstPort, 'port', 1024, 65535);
   const hapWaitSeconds = checkNumber(
@@ -362,7 +366,7 @@ async function main() {
   const sessionLog = join(root, '.expo-fast/session-logs', `${slug(session)}.log`);
   const plan = {
     root, configFile: existsSync(localEnvFile) ? localEnvFile : '', project, requestPath, promptKind: prompt.kind, promptSource: prompt.path || '',
-    session, sessionLog, action, followUpPath, ...models, designModel, designTimeoutSeconds, timeout, repairTimeout, port, hapWaitSeconds, pool,
+    session, sessionLog, action, followUpPath, ...models, designModel, designEffort, designTimeoutSeconds, timeout, repairTimeout, port, hapWaitSeconds, pool,
     launch: raw.launch,
     hap: raw.launch || (raw.hap && enabledByEnvironment(process.env.EXPO_HARMONY_HAP_ENABLED)),
     resume: action !== 'initial',
@@ -426,11 +430,6 @@ async function main() {
     EXPO_FAST_HDC_DESKTOP_TARGETS: plan.hdcPreviewPools.desktop.join(','),
     EXPO_FAST_HDC_PHONE_TARGETS: plan.hdcPreviewPools.phone.join(','),
     EXPO_FAST_PREVIEW_GATEWAY_ORIGIN: plan.previewGatewayOrigin,
-    EXPO_FAST_APP_ICON_ENABLED: process.env.EXPO_FAST_APP_ICON_ENABLED || '1',
-    EXPO_FAST_APP_ICON_MODEL: process.env.EXPO_FAST_APP_ICON_MODEL || '',
-    EXPO_FAST_APP_ICON_EFFORT: process.env.EXPO_FAST_APP_ICON_EFFORT || 'low',
-    EXPO_FAST_APP_ICON_TIMEOUT_SECONDS: process.env.EXPO_FAST_APP_ICON_TIMEOUT_SECONDS || '180',
-    EXPO_FAST_APP_ICON_BRIEF_TIMEOUT_SECONDS: process.env.EXPO_FAST_APP_ICON_BRIEF_TIMEOUT_SECONDS || '180',
     EXPO_FAST_ICON_RASTERIZER: process.env.EXPO_FAST_ICON_RASTERIZER || '',
   };
 
@@ -457,11 +456,6 @@ async function main() {
     ['EXPO_FAST_HDC_DESKTOP_TARGETS', env.EXPO_FAST_HDC_DESKTOP_TARGETS],
     ['EXPO_FAST_HDC_PHONE_TARGETS', env.EXPO_FAST_HDC_PHONE_TARGETS],
     ['EXPO_FAST_PREVIEW_GATEWAY_ORIGIN', env.EXPO_FAST_PREVIEW_GATEWAY_ORIGIN],
-    ['EXPO_FAST_APP_ICON_ENABLED', env.EXPO_FAST_APP_ICON_ENABLED],
-    ['EXPO_FAST_APP_ICON_MODEL', env.EXPO_FAST_APP_ICON_MODEL],
-    ['EXPO_FAST_APP_ICON_EFFORT', env.EXPO_FAST_APP_ICON_EFFORT],
-    ['EXPO_FAST_APP_ICON_TIMEOUT_SECONDS', env.EXPO_FAST_APP_ICON_TIMEOUT_SECONDS],
-    ['EXPO_FAST_APP_ICON_BRIEF_TIMEOUT_SECONDS', env.EXPO_FAST_APP_ICON_BRIEF_TIMEOUT_SECONDS],
     ['EXPO_FAST_ICON_RASTERIZER', env.EXPO_FAST_ICON_RASTERIZER],
   ];
   if (process.env.EXPO_FAST_BUNDLE_IDENTIFIER) {

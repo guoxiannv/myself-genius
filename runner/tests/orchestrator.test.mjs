@@ -20,7 +20,13 @@ import { HDC_DEVICE_TIMEOUT_MS, HDC_SESSION_TIMEOUT_MS, HDC_TRANSFER_TIMEOUT_MS,
 import { auditImplementationTrace } from '../scripts/trace-scope.mjs';
 import { auditProductSource, verifyHarmonyGoArtifacts } from '../scripts/verify-product.mjs';
 import { writeRunState } from '../scripts/run-state.mjs';
-import { resolveExecution } from '../scripts/execution-policy.mjs';
+import {
+  executionConfig,
+  resolveExecution,
+  resolveRole,
+  roleNames,
+  validateExecutionConfig,
+} from '../scripts/execution-policy.mjs';
 import { repairArtifactName } from '../scripts/repair-artifact.mjs';
 import { assertDependencyRuntime, installProjectDependencies, pinRuntimeDependencies, stageHarmonyCli } from '../scripts/dependencies.mjs';
 import { HAP_DEVICE_TYPES, runHapPoolBuild } from '../scripts/hap-build.mjs';
@@ -1773,12 +1779,16 @@ test('external dependency controller CLI synchronizes an already installed exact
 test('single execution policy uses external model controls and caps deterministic repair at 100 attempts', () => {
   const config = JSON.parse(readFileSync(join(root, 'config/execution.json'), 'utf8'));
   assert.deepEqual(config, {
-    schemaVersion: 1,
-    model: 'k3-256k',
-    effort: 'low',
-    repairModel: 'k3-256k',
-    repairEffort: 'medium',
-    repairLimit: 100,
+    schemaVersion: 2,
+    roles: {
+      main: { model: 'k3-256k', effort: 'low', contextWindowTokens: 256000, disableAdaptiveThinking: false },
+      repair: { model: 'k3-256k', effort: 'medium', contextWindowTokens: 256000, disableAdaptiveThinking: false, limit: 100 },
+      design: { model: 'k3-256k', effort: 'low', contextWindowTokens: 256000, disableAdaptiveThinking: true, timeoutSeconds: 45 },
+      appIcon: {
+        model: null, effort: 'low', contextWindowTokens: 256000, disableAdaptiveThinking: true,
+        timeoutSeconds: 180, briefTimeoutSeconds: 180, enabled: true,
+      },
+    },
   });
   assert.equal(existsSync(join(root, 'config/candidates.json')), false);
   const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
@@ -1854,6 +1864,76 @@ test('execution policy resolves explicit overrides and main-turn inheritance cen
   assert.throws(() => resolveExecution({ effort: 'automatic' }), /effort must be low, medium, high, or max/);
   assert.throws(() => resolveExecution({ repairLimit: 0 }), /repair limit must be an integer between 1 and 100/);
   assert.throws(() => resolveExecution({ repairLimit: 101 }), /repair limit must be an integer between 1 and 100/);
+});
+
+test('every model role resolves from config/execution.json with no code-level default', () => {
+  assert.deepEqual(roleNames, ['main', 'repair', 'design', 'appIcon']);
+
+  // A null model in configuration inherits the main role. The rule is code; the
+  // name it resolves to is only ever configuration.
+  assert.equal(executionConfig.roles.appIcon.model, null);
+  assert.equal(resolveRole('appIcon').model, executionConfig.roles.main.model);
+
+  // A command-line --model override must reach the inheriting roles too.
+  assert.equal(resolveRole('appIcon', { inheritModel: 'relay-model' }).model, 'relay-model');
+  assert.equal(resolveRole('appIcon', { model: 'explicit-model', inheritModel: 'relay-model' }).model, 'explicit-model');
+  // design declares its own model, so it never inherits.
+  assert.equal(resolveRole('design', { inheritModel: 'relay-model' }).model, executionConfig.roles.design.model);
+
+  // Configuration is reviewed, so its timeout must be in range; a command-line
+  // value is documented as capped and therefore clamps instead of throwing.
+  assert.equal(resolveRole('design', { timeoutSeconds: 90 }).timeoutSeconds, 55);
+  assert.equal(resolveRole('design', { timeoutSeconds: 0 }).timeoutSeconds, 1);
+  assert.equal(resolveRole('design').timeoutSeconds, executionConfig.roles.design.timeoutSeconds);
+
+  assert.throws(() => resolveRole('nope'), /unknown execution role: nope/);
+  assert.throws(() => resolveRole('design', { effort: 'automatic' }), /design effort must be low, medium, high, or max/);
+});
+
+test('an incomplete execution configuration fails loudly instead of falling back', () => {
+  const valid = JSON.parse(readFileSync(join(root, 'config/execution.json'), 'utf8'));
+  const clone = () => JSON.parse(JSON.stringify(valid));
+  assert.deepEqual(validateExecutionConfig(clone()), valid);
+
+  for (const [role, field] of [['main', 'model'], ['repair', 'limit'], ['design', 'timeoutSeconds'], ['appIcon', 'enabled']]) {
+    const broken = clone();
+    delete broken.roles[role][field];
+    assert.throws(() => validateExecutionConfig(broken), new RegExp(`missing roles\\.${role}\\.${field}`));
+  }
+
+  const missingRole = clone();
+  delete missingRole.roles.design;
+  assert.throws(() => validateExecutionConfig(missingRole), /missing roles\.design/);
+
+  const unknownField = clone();
+  unknownField.roles.main.temperature = 0.5;
+  assert.throws(() => validateExecutionConfig(unknownField), /unknown field roles\.main\.temperature/);
+
+  const unknownRole = clone();
+  unknownRole.roles.smoke = { model: 'x' };
+  assert.throws(() => validateExecutionConfig(unknownRole), /unknown role: smoke/);
+
+  // The version-1 layout must be rejected with migration guidance, never
+  // silently reinterpreted.
+  assert.throws(
+    () => validateExecutionConfig({ schemaVersion: 1, model: 'k3-256k', effort: 'low', repairModel: 'k3-256k', repairEffort: 'medium', repairLimit: 100 }),
+    /schemaVersion must be 2/,
+  );
+});
+
+test('no model name or removed override survives in orchestrator code', () => {
+  // Regression guard for the failure that started this refactor: a model name
+  // hardcoded in a script silently disagrees with the configured endpoint.
+  for (const file of ['scripts/run-livetest.mjs', 'scripts/start-livetest.mjs', 'scripts/app-icon.mjs', 'scripts/execution-policy.mjs']) {
+    const source = readFileSync(join(root, file), 'utf8');
+    assert.doesNotMatch(source, /['"`](haiku|sonnet|opus|k3-256k|deepseek-v4-[a-z]+|glm-[0-9.]+|kimi-for-coding)['"`]/, file);
+  }
+
+  // The removed override layer must not come back as a second configuration surface.
+  for (const file of ['scripts/run-livetest.mjs', 'scripts/start-livetest.mjs', 'scripts/app-icon.mjs']) {
+    const source = readFileSync(join(root, file), 'utf8');
+    assert.doesNotMatch(source, /EXPO_FAST_DESIGN_MODEL|EXPO_FAST_DESIGN_TIMEOUT_SECONDS|EXPO_FAST_APP_ICON_(MODEL|EFFORT|ENABLED|TIMEOUT_SECONDS|BRIEF_TIMEOUT_SECONDS)/, file);
+  }
 });
 
 test('repair artifacts give every retry separate evidence', () => {

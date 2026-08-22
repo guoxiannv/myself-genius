@@ -8,6 +8,11 @@ import {
 } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import { resolveRole } from './execution-policy.mjs';
+
+// config/execution.json is the only source for this role's model, effort,
+// timeouts, and context window.
+const appIconRole = resolveRole('appIcon');
 
 export const APP_ICON_ASSET_ROOT = 'assets/app-icon';
 export const APP_ICON_EVIDENCE_ROOT = '.expo-fast/app-icon';
@@ -321,10 +326,10 @@ function structuredIconOutput(stdout) {
 export async function runIconModel({
   project,
   claude = process.env.CLAUDE_BIN || 'claude',
-  model,
-  effort = 'low',
+  model = appIconRole.model,
+  effort = appIconRole.effort,
   context,
-  timeoutSeconds = 180,
+  timeoutSeconds = appIconRole.timeoutSeconds,
   signal,
   spawnProcess = spawn,
 }) {
@@ -415,11 +420,11 @@ export async function generateAppIconAfterBrief({
   project: projectRoot,
   request = '',
   claude = process.env.CLAUDE_BIN || 'claude',
-  model,
-  effort = process.env.EXPO_FAST_APP_ICON_EFFORT || 'low',
-  timeoutSeconds = Number(process.env.EXPO_FAST_APP_ICON_TIMEOUT_SECONDS || 180),
-  briefTimeoutSeconds = Number(process.env.EXPO_FAST_APP_ICON_BRIEF_TIMEOUT_SECONDS || 180),
-  enabled = process.env.EXPO_FAST_APP_ICON_ENABLED !== '0',
+  model = appIconRole.model,
+  effort = appIconRole.effort,
+  timeoutSeconds = appIconRole.timeoutSeconds,
+  briefTimeoutSeconds = appIconRole.briefTimeoutSeconds,
+  enabled = appIconRole.enabled,
   signal,
   modelRunner = runIconModel,
   installer = installGeneratedIcon,

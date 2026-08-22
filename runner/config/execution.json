@@ -1,8 +1,34 @@
 {
-  "schemaVersion": 1,
-  "model": "k3-256k",
-  "effort": "low",
-  "repairModel": "k3-256k",
-  "repairEffort": "medium",
-  "repairLimit": 100
+  "schemaVersion": 2,
+  "roles": {
+    "main": {
+      "model": "k3-256k",
+      "effort": "low",
+      "contextWindowTokens": 256000,
+      "disableAdaptiveThinking": false
+    },
+    "repair": {
+      "model": "k3-256k",
+      "effort": "medium",
+      "contextWindowTokens": 256000,
+      "disableAdaptiveThinking": false,
+      "limit": 100
+    },
+    "design": {
+      "model": "k3-256k",
+      "effort": "low",
+      "contextWindowTokens": 256000,
+      "disableAdaptiveThinking": true,
+      "timeoutSeconds": 45
+    },
+    "appIcon": {
+      "model": null,
+      "effort": "low",
+      "contextWindowTokens": 256000,
+      "disableAdaptiveThinking": true,
+      "timeoutSeconds": 180,
+      "briefTimeoutSeconds": 180,
+      "enabled": true
+    }
+  }
 }

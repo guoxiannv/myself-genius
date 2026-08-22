@@ -2012,6 +2012,36 @@ function environmentNamesReadByRunner() {
   return names;
 }
 
+test('the product contract is injected, not inherited from a CLAUDE.md walk', () => {
+  const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
+  const icon = readFileSync(join(root, 'scripts/app-icon.mjs'), 'utf8');
+
+  // The contract reaches the implementation and repair turns as system prompt.
+  // Relying on the model to read AGENTS.md, or on Claude Code loading
+  // project/CLAUDE.md, leaves it optional; passing the file does not.
+  assert.match(runner, /'--append-system-prompt-file', join\(project, 'AGENTS\.md'\)/);
+  assert.match(runner, /writeFileSync\(join\(project, 'AGENTS\.md'\)/, 'the injected file is still written');
+
+  // Every Claude Code spawn stops walking up for CLAUDE.md. Generated projects
+  // live under the repository, so that walk reached every ancestor's file.
+  const spawns = [
+    ...[...runner.matchAll(/spawn\(claude, args, \{[^}]*env: \{([^}]*)\}/g)].map((match) => match[1]),
+    icon.slice(icon.indexOf('env: { ...process.env, ...roleEnv(appIconRole)')).split('\n')[0],
+  ];
+  assert.equal(spawns.length, 3, 'design, implementation, and app icon');
+  for (const spawnEnv of spawns) assert.match(spawnEnv, /CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1'/);
+
+  // The design turn starts before the project exists, and its prompt is
+  // self-contained, so it must not be given the file.
+  const designSpawn = runner.slice(runner.indexOf('async function designTurn'), runner.indexOf('async function claudeTurn'));
+  assert.doesNotMatch(designSpawn, /append-system-prompt-file/);
+  assert.ok(
+    runner.indexOf('const designPromise = designTurn') < runner.indexOf("writeFileSync(join(project, 'AGENTS.md')"),
+    'design starts before AGENTS.md is written',
+  );
+  assert.doesNotMatch(icon, /append-system-prompt-file/);
+});
+
 test('model preflight reads only a local cache and never the network', () => {
   const dir = mkdtempSync(join(tmpdir(), 'expo-fast-preflight-'));
   const llmEnvPath = join(dir, 'llm.env');

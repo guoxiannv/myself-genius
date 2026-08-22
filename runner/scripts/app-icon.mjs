@@ -356,7 +356,9 @@ export async function runIconModel({
   return await new Promise((resolvePromise, reject) => {
     const child = spawnProcess(claude, args, {
       cwd: project,
-      env: { ...process.env, ...roleEnv(appIconRole), CLAUDE_CODE_ATTRIBUTION_HEADER: '0' },
+      // The icon prompt is self-contained, so this turn needs no CLAUDE.md at
+      // all; inheriting one from any ancestor directory would only add noise.
+      env: { ...process.env, ...roleEnv(appIconRole), CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_ATTRIBUTION_HEADER: '0' },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';

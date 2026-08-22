@@ -264,7 +264,7 @@ async function designTurn(prompt, timeoutSeconds, role) {
     // Thinking is requested in the request body, not through a header, so the
     // former X-Genius-Disable-Thinking hint could never reach a relay. The
     // design role's disableAdaptiveThinking now carries that intent.
-    const child = spawn(claude, args, { cwd: root, env: { ...process.env, ...roleEnv(role), CLAUDE_CODE_ATTRIBUTION_HEADER: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(claude, args, { cwd: root, env: { ...process.env, ...roleEnv(role), CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_ATTRIBUTION_HEADER: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
     const liveState = { pending: '' }; let timedOut = false; let settled = false; let killTimer;
     const settle = (fn, value) => { if (settled) return; settled = true; clearTimeout(timer); clearTimeout(killTimer); fn(value); };
     const timer = setTimeout(() => { timedOut = true; child.kill('SIGINT'); killTimer = setTimeout(() => child.kill('SIGKILL'), 750); }, timeoutSeconds * 1000);
@@ -299,10 +299,15 @@ async function claudeTurn(project, trace, prompt, sessionId, resume = false, tim
   if (!Number.isFinite(timeoutMinutes) || timeoutMinutes < 0) throw new Error(`invalid Claude timeout: ${timeoutMinutes}`);
   const runTurn = (turnSessionId, turnResume, turnPrompt, appendTrace = false) => {
     const sessionArgs = turnResume ? ['--resume', turnSessionId] : ['--session-id', turnSessionId];
-    const args = ['-p', '--permission-mode', 'dontAsk', '--model', model, '--effort', effort, '--mcp-config', mcpConfig, '--strict-mcp-config', '--tools', tools, '--allowedTools', allowedTools.join(','), '--output-format', 'stream-json', '--verbose', ...sessionArgs, turnPrompt];
+    // The product contract reaches the model as system prompt rather than as
+    // memory. Claude Code loaded project/CLAUDE.md, which imports AGENTS.md, only
+    // because it walks up from the working directory; that also pulled in every
+    // CLAUDE.md above the generated project. Passing the file explicitly makes the
+    // contract independent of both that walk and of the model choosing to read it.
+    const args = ['-p', '--permission-mode', 'dontAsk', '--model', model, '--effort', effort, '--append-system-prompt-file', join(project, 'AGENTS.md'), '--mcp-config', mcpConfig, '--strict-mcp-config', '--tools', tools, '--allowedTools', allowedTools.join(','), '--output-format', 'stream-json', '--verbose', ...sessionArgs, turnPrompt];
     const started = Date.now();
     return new Promise((ok, fail) => {
-      const child = spawn(claude, args, { cwd: project, env: { ...process.env, ...roleEnvironment, CLAUDE_CODE_ATTRIBUTION_HEADER: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = spawn(claude, args, { cwd: project, env: { ...process.env, ...roleEnvironment, CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_ATTRIBUTION_HEADER: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
       const output = createWriteStream(trace, { flags: appendTrace ? 'a' : 'w' });
       const liveState = { pending: '' };
       let stderrText = '';

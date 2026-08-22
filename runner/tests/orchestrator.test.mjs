@@ -22,7 +22,7 @@ import { auditProductSource, verifyHarmonyGoArtifacts } from '../scripts/verify-
 import { writeRunState } from '../scripts/run-state.mjs';
 import { resolveExecution } from '../scripts/execution-policy.mjs';
 import { repairArtifactName } from '../scripts/repair-artifact.mjs';
-import { assertDependencyRuntime, pinRuntimeDependencies, stageHarmonyCli } from '../scripts/dependencies.mjs';
+import { assertDependencyRuntime, installProjectDependencies, pinRuntimeDependencies, stageHarmonyCli } from '../scripts/dependencies.mjs';
 import { HAP_DEVICE_TYPES, runHapPoolBuild } from '../scripts/hap-build.mjs';
 import { launchHapPreview } from '../scripts/run-livetest.mjs';
 import { acquirePreviewDevice, acquirePreviewDevices, configuredPreviewPools } from '../scripts/preview-device-pool.mjs';
@@ -1600,6 +1600,43 @@ test('external dependency controller pins the Harmony runtime core without a pro
     assert.equal(pkg.dependencies[name], '57.0.8');
     assert.equal(scaffold.dependencies[name], '57.0.8');
   }
+});
+
+test('a stale npm package document retries against the registry instead of failing the run', () => {
+  const project = mkdtempSync(join(tmpdir(), 'expo-fast-etarget-'));
+  mkdirSync(join(project, '.expo-fast'), { recursive: true });
+  const calls = [];
+  const record = (result) => (command, args) => {
+    calls.push(args.filter((arg) => arg.startsWith('--prefer-offline')).length > 0);
+    return result(args);
+  };
+
+  // The common path stays a single --prefer-offline install, so the retry costs
+  // nothing when the cache is current.
+  const ok = installProjectDependencies(project, 'a.log', {}, record(() => ({ ms: 1, output: '' })));
+  assert.deepEqual(calls, [true]);
+  assert.equal(ok.ms, 1);
+
+  // npm answered from a package document cached before the pinned version was
+  // published, so the version looks nonexistent. Retry without --prefer-offline.
+  calls.length = 0;
+  let attempt = 0;
+  const retried = installProjectDependencies(project, 'b.log', {}, record(() => {
+    attempt += 1;
+    if (attempt === 1) throw new Error('npm exited 1\nnpm error code ETARGET\nnpm error notarget No matching version found for @expo/cli@57.0.11');
+    return { ms: 2, output: 'added 348 packages' };
+  }));
+  assert.deepEqual(calls, [true, false], 'second attempt drops --prefer-offline');
+  assert.equal(retried.output, 'added 348 packages');
+
+  // Any other failure is a real one and must surface unchanged, not be retried.
+  calls.length = 0;
+  assert.throws(
+    () => installProjectDependencies(project, 'c.log', {}, record(() => { throw new Error('npm exited 1\nnpm error code ENOSPC'); })),
+    /ENOSPC/,
+  );
+  assert.deepEqual(calls, [true], 'no retry for unrelated failures');
+  rmSync(project, { recursive: true, force: true });
 });
 
 test('external dependency controller runs the SDK Harmony overlay from project-installed CLI', () => {

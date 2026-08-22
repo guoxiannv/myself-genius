@@ -81,23 +81,36 @@ export function assertDependencyRuntime() {
   return { node: process.version, nodePath: process.execPath, npm: output };
 }
 
-function installProjectDependencies(project, logName, exactDependencies = {}) {
+export function installProjectDependencies(project, logName, exactDependencies = {}, runner = run) {
   const npm = npmInvocation();
   const exactSpecs = Object.entries(exactDependencies)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([name, version]) => `${name}@${version}`);
-  return run(npm.command, [
+  const invoke = (extraFlags) => runner(npm.command, [
     ...npm.prefix,
     'install',
     ...exactSpecs,
     ...(exactSpecs.length ? ['--no-save'] : []),
     '--ignore-scripts',
     '--legacy-peer-deps',
-    '--prefer-offline',
+    ...extraFlags,
     '--no-audit',
     '--no-fund',
     '--package-lock=false',
   ], { cwd: project, env: { COREPACK_ENABLE_PROJECT_SPEC: '0' }, log: join(project, '.expo-fast', logName) });
+
+  // --prefer-offline keeps repeated installs fast, but it also lets npm answer
+  // from a cached package document without revalidating it. The SDK pins exact
+  // versions, so a document cached before one of them was published makes that
+  // version look nonexistent and the install fails with ETARGET naming whichever
+  // package happens to be stale. Retry once against the registry, which both
+  // resolves the version and refreshes the cache for later runs.
+  try {
+    return invoke(['--prefer-offline']);
+  } catch (error) {
+    if (!/\bETARGET\b|No matching version found/.test(String(error?.message || ''))) throw error;
+    return invoke([]);
+  }
 }
 
 function assertCompatibleCache(cache, fingerprint) {

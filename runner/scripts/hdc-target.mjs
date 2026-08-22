@@ -6,6 +6,24 @@ export function hdcOutputFailed(output) {
   return HDC_TEXT_FAILURE.test(String(output || ''));
 }
 
+// hdc exits 0 even when a command failed, so hdcOutputFailed classifies by text.
+// That makes "the bundle is not installed" indistinguishable from a real fault,
+// yet it is the normal state before a first install: there is no process to stop
+// and nothing to uninstall. Recognise each command's own absence signature so it
+// can be allowed through without also allowing the failures that matter -- a
+// process that survives `install -r` and gets photographed as the new build, or
+// persisted data from the previous build that the new one silently inherits.
+const HDC_FORCE_STOP_BUNDLE_ABSENT = /\b10104002\b|package name is not installed/i;
+const HDC_UNINSTALL_BUNDLE_ABSENT = /\b9568386\b|uninstall missing installed bundle/i;
+
+export function hdcForceStopBundleAbsent(output) {
+  return HDC_FORCE_STOP_BUNDLE_ABSENT.test(String(output || ''));
+}
+
+export function hdcUninstallBundleAbsent(output) {
+  return HDC_UNINSTALL_BUNDLE_ABSENT.test(String(output || ''));
+}
+
 // hdc has no built-in timeout, and a device channel that stops responding does
 // not fail: anything needing the device daemon (shell, install, file, fport,
 // rport) blocks forever while `list targets` keeps reporting Connected. Bound

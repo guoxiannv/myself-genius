@@ -15,7 +15,7 @@ import {
   inspectCurrentMiniApp,
   visibleBundleNames,
 } from './layout-identity.mjs';
-import { HDC_PROBE_TIMEOUT_MS, discoverHdcPreviewPools, hdcCommandTimeoutMs, hdcOutputFailed, hdcTimeoutMessage, parseHdcForwardRules, parseHdcTargets, prioritizeHdcPreviewTargets, reversePortCandidates } from './hdc-target.mjs';
+import { HDC_PROBE_TIMEOUT_MS, discoverHdcPreviewPools, hdcCommandTimeoutMs, hdcForceStopBundleAbsent, hdcOutputFailed, hdcTimeoutMessage, hdcUninstallBundleAbsent, parseHdcForwardRules, parseHdcTargets, prioritizeHdcPreviewTargets, reversePortCandidates } from './hdc-target.mjs';
 import { acquirePreviewDevice, configuredPreviewPools } from './preview-device-pool.mjs';
 import { auditImplementationTrace } from './trace-scope.mjs';
 import { writeRunState } from './run-state.mjs';
@@ -391,6 +391,16 @@ function hdcRun(args) {
   }
   return r.stdout || '';
 }
+// Clearing a bundle before installing must distinguish "there was nothing to
+// clear" from "the previous build is still there". Only the first is normal.
+function hdcRunClearingBundle(args, absent) {
+  try {
+    return hdcRun(args);
+  } catch (error) {
+    if (!absent(String(error?.message || error))) throw error;
+    return '';
+  }
+}
 function reverseMappings() { return parseHdcForwardRules(hdcRun(['fport', 'ls'])); }
 function clearReverse(target, devicePort, hostPort) {
   for (const mapping of reverseMappings()) {
@@ -590,8 +600,14 @@ async function installHapAndOpen(project, target, hap, previewKind = 'desktop') 
   const bundleName = String(hap?.bundleName || '').trim();
   if (!hapPath || !existsSync(hapPath)) throw new Error('desktop preview HAP is missing');
   if (!bundleName) throw new Error('desktop preview HAP has no bundleName');
-  hdcRun(['-t', target, 'shell', 'aa', 'force-stop', bundleName]);
-  try { hdcRun(['-t', target, 'shell', 'bm', 'uninstall', '-n', bundleName]); } catch {}
+  // A first install of this bundle has nothing to stop and nothing to remove, so
+  // each command's own "not installed" signature is allowed through. Everything
+  // else stays fatal: a process that outlives `install -r` would be started,
+  // verified and photographed as this build, and data left by a failed uninstall
+  // would be inherited by it -- both silently, since the foreground check only
+  // matches the bundle name.
+  hdcRunClearingBundle(['-t', target, 'shell', 'aa', 'force-stop', bundleName], hdcForceStopBundleAbsent);
+  hdcRunClearingBundle(['-t', target, 'shell', 'bm', 'uninstall', '-n', bundleName], hdcUninstallBundleAbsent);
   hdcRun(['-t', target, 'install', '-r', hapPath]);
   wakeAndUnlockHarmonyTarget(target);
   const startArgs = ['-t', target, 'shell', 'aa', 'start', '-a', 'EntryAbility', '-b', bundleName];

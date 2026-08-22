@@ -16,7 +16,7 @@ import {
   inspectCurrentMiniApp,
   visibleBundleNames,
 } from '../scripts/layout-identity.mjs';
-import { HDC_DEVICE_TIMEOUT_MS, HDC_SESSION_TIMEOUT_MS, HDC_TRANSFER_TIMEOUT_MS, assignHdcPreviewPorts, configuredHdcPreviewTargets, configuredHdcTarget, discoverHdcPreviewPools, hdcCommandKind, hdcCommandTarget, hdcCommandTimeoutMs, hdcOutputFailed, hdcTimeoutMessage, parseHdcForwardRules, parseHdcTargets, prioritizeHdcPreviewTargets, reversePortCandidates, selectHdcPreviewTargets, selectHdcTarget } from '../scripts/hdc-target.mjs';
+import { HDC_DEVICE_TIMEOUT_MS, HDC_SESSION_TIMEOUT_MS, HDC_TRANSFER_TIMEOUT_MS, assignHdcPreviewPorts, configuredHdcPreviewTargets, configuredHdcTarget, discoverHdcPreviewPools, hdcCommandKind, hdcCommandTarget, hdcCommandTimeoutMs, hdcForceStopBundleAbsent, hdcOutputFailed, hdcTimeoutMessage, hdcUninstallBundleAbsent, parseHdcForwardRules, parseHdcTargets, prioritizeHdcPreviewTargets, reversePortCandidates, selectHdcPreviewTargets, selectHdcTarget } from '../scripts/hdc-target.mjs';
 import { auditImplementationTrace } from '../scripts/trace-scope.mjs';
 import { auditProductSource, verifyHarmonyGoArtifacts } from '../scripts/verify-product.mjs';
 import { writeRunState } from '../scripts/run-state.mjs';
@@ -1050,6 +1050,51 @@ test('hdc timeout errors name the layer that stalled and how to recover it', () 
   assert.match(session, /hdc server is not responding/);
   assert.match(session, /hdc kill -r/);
   assert.doesNotMatch(session, /tconn/);
+});
+
+test('a first install distinguishes an absent bundle from a previous build left behind', () => {
+  // Verbatim device output for a bundle that is not installed yet.
+  const forceStopAbsent = [
+    'error: failed to force stop process.',
+    'Error Code:10104002  Error Message:Failed to retrieve specified package information.',
+    'Error cause: The application corresponding to the specified package name is not installed.',
+  ].join('\n');
+  const uninstallAbsent = [
+    'error: failed to uninstall bundle.',
+    'code:9568386',
+    'error: uninstall missing installed bundle.',
+  ].join('\n');
+
+  // hdc exits 0 for both, so they are failures as far as text classification
+  // goes; the tolerance is layered on top of that detection, not instead of it.
+  assert.equal(hdcOutputFailed(forceStopAbsent), true);
+  assert.equal(hdcOutputFailed(uninstallAbsent), true);
+
+  assert.equal(hdcForceStopBundleAbsent(forceStopAbsent), true);
+  assert.equal(hdcUninstallBundleAbsent(uninstallAbsent), true);
+
+  // Each signature is specific to its own command: neither may wave the other
+  // through, and neither may wave a genuine failure through. A force-stop that
+  // fails for any other reason means the previous build may still be running,
+  // and a failed uninstall means its persisted data survives `install -r`.
+  assert.equal(hdcForceStopBundleAbsent(uninstallAbsent), false);
+  assert.equal(hdcUninstallBundleAbsent(forceStopAbsent), false);
+  for (const genuine of [
+    'error: failed to force stop process.\nError Code:16000050  Internal error.',
+    '[Fail][E003001] Invalid bundle name: com.example.myapplication1.ide',
+    'error: failed to uninstall bundle.\ncode:9568256\nerror: uninstall failed due to a running application.',
+  ]) {
+    assert.equal(hdcForceStopBundleAbsent(genuine), false, genuine);
+    assert.equal(hdcUninstallBundleAbsent(genuine), false, genuine);
+  }
+
+  const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
+  const install = runner.match(/async function installHapAndOpen\([\s\S]*?\n\}/)?.[0];
+  assert.ok(install, 'installHapAndOpen source');
+  assert.match(install, /hdcRunClearingBundle\(\[[^\]]*'force-stop', bundleName\], hdcForceStopBundleAbsent\)/);
+  assert.match(install, /hdcRunClearingBundle\(\[[^\]]*'uninstall', '-n', bundleName\], hdcUninstallBundleAbsent\)/);
+  // A bare catch would hide a previous build that refused to go away.
+  assert.doesNotMatch(install, /catch\s*\{\s*\}/);
 });
 
 test('Harmony Go preview wakes and unlocks a reused target and retries a locked launch once', () => {

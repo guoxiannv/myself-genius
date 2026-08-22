@@ -3781,7 +3781,11 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
             "hap_path": str(hap_path) if hap_path else "",
             "hap_display_path": relative_to_root(hap_path, workspace) if hap_path else "",
             "hap_download_path": f"/api/runs/{record.run_id}/hap" if hap_path else "",
-            "hap_qr_path": f"/api/runs/{record.run_id}/hap-qr" if hap_path else "",
+            # Never expose a QR code for the unsigned HAP.  That artifact is
+            # for local preview/development and HarmonyOS may require developer
+            # mode to install it.  QR installation is only valid after HPack
+            # has produced the signed release package below.
+            "hap_qr_path": "",
             "install_ready": install_ready,
             "install_url": str(hpack_manifest.get("install_url") or "") if hpack_manifest else "",
             "install_store_url": str(hpack_manifest.get("install_store_url") or "")
@@ -4056,7 +4060,10 @@ def build_progress_payload(record: RunRecord) -> dict[str, Any]:
             "hap_path": str(hap_path) if hap_path else "",
             "hap_display_path": relative_to_root(hap_path, workspace) if hap_path else "",
             "hap_download_path": f"/api/runs/{record.run_id}/hap" if hap_path else "",
-            "hap_qr_path": f"/api/runs/{record.run_id}/hap-qr" if hap_path else "",
+            # The raw HAP is intentionally not QR-installable.  Keep the
+            # download endpoint for preview/debug workflows, but direct users
+            # to the signed install QR once packaging is ready.
+            "hap_qr_path": "",
             "install_ready": install_ready,
             "install_url": str(hpack_manifest.get("install_url") or "") if hpack_manifest else "",
             "install_store_url": str(hpack_manifest.get("install_store_url") or "")
@@ -4354,6 +4361,11 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             return self.handle_get_hap(path.split("/")[-2], head_only=True)
         if re.fullmatch(r"/api/runs/[a-f0-9]+/(hap-qr|install-qr)", path):
             if not self.load_accessible_run(path.split("/")[-2], allow_share=True):
+                return
+            if path.endswith("/hap-qr"):
+                self.send_response(HTTPStatus.GONE)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
                 return
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "image/png")
@@ -6096,26 +6108,19 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             self.send_file(hap_path, download_name=hap_path.name)
 
     def handle_get_hap_qr(self, run_id: str) -> None:
-        record = self.load_accessible_run(run_id, allow_share=True)
-        if not record:
+        # A raw/unsigned HAP is suitable for HDC preview only.  Encoding it in
+        # a QR code makes it too easy to install a debug package on a phone and
+        # leads to HarmonyOS's "developer mode required" message.  Signed
+        # distribution has its own /install-qr endpoint.
+        if not self.load_accessible_run(run_id, allow_share=True):
             return
-        workspace = Path(record.workspace)
-        hap_path = (
-            resolve_expo_hap_artifact(workspace)
-            if record.runtime == "expo"
-            else find_latest_hap(workspace)
+        self.send_json(
+            {
+                "error": "Raw HAP QR installation is disabled; use the signed install QR after packaging completes.",
+                "code": "unsigned_hap_qr_disabled",
+            },
+            status=HTTPStatus.GONE,
         )
-        if not hap_path:
-            self.send_error(HTTPStatus.NOT_FOUND, "HAP not found")
-            return
-        try:
-            qr_bytes = self.generate_qr_png(
-                self.build_absolute_url(f"/api/runs/{run_id}/hap?share={quote(record.share_token)}")
-            )
-        except RuntimeError as exc:
-            self.send_json({"error": str(exc)}, status=HTTPStatus.SERVICE_UNAVAILABLE)
-            return
-        self.send_bytes(qr_bytes, "image/png")
 
     def handle_get_install_qr(self, run_id: str, *, version: str = "latest") -> None:
         record = self.load_accessible_run(run_id, allow_share=True)

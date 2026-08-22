@@ -208,7 +208,7 @@ window.RemoteUI = (() => {
       }
       if (hapDownloadLink) {
         hapDownloadLink.href = downloadUrl;
-        hapDownloadLink.textContent = "原始 HAP 已生成，等待签名安装页";
+        hapDownloadLink.textContent = "下载原始 HAP（仅预览/开发用途）";
         hapDownloadLink.classList.remove("hidden");
       }
     } else {
@@ -226,7 +226,7 @@ window.RemoteUI = (() => {
       if (hapDownloadLink) {
         hapDownloadLink.classList.add("hidden");
         hapDownloadLink.removeAttribute("href");
-        hapDownloadLink.textContent = "下载原始 HAP";
+        hapDownloadLink.textContent = "下载原始 HAP（仅预览/开发用途）";
       }
     }
     if (payload.artifacts.media_ready && payload.artifacts.media_path) {

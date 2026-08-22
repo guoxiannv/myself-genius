@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import mimetypes
 import os
 import subprocess
 import time
+import zipfile
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote
@@ -149,10 +151,25 @@ def serve_hpack_static(
     except ValueError:
         send_error(403, "Forbidden")
         return
+    if file_path.suffix.lower() == ".hap" and not _is_release_hap(file_path):
+        send_error(410, "Debug HAP distribution is disabled; generate a signed release package")
+        return
     if head_only:
         send_file_head(file_path)
     else:
         send_file(file_path)
+
+
+def _is_release_hap(file_path: Path) -> bool:
+    """Prevent stale debug HAPs from being served by old install pages."""
+    if not file_path.is_file():
+        return False
+    try:
+        with zipfile.ZipFile(file_path) as archive:
+            app = json.loads(archive.read("module.json")).get("app") or {}
+        return app.get("debug") is False and app.get("buildMode") == "release"
+    except (OSError, KeyError, ValueError, json.JSONDecodeError, zipfile.BadZipFile):
+        return False
 
 
 def wait_for_hap_and_package(

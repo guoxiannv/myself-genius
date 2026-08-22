@@ -378,10 +378,7 @@ class ExpoFastRuntimeTests(unittest.TestCase):
             payload["artifacts"]["hap_download_path"],
             "/api/runs/e6f6a000000000000000000000000006/hap",
         )
-        self.assertEqual(
-            payload["artifacts"]["hap_qr_path"],
-            "/api/runs/e6f6a000000000000000000000000006/hap-qr",
-        )
+        self.assertEqual(payload["artifacts"]["hap_qr_path"], "")
         self.assertTrue(payload["artifacts"]["media_ready"])
         self.assertEqual(
             payload["artifacts"]["media_path"],

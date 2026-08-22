@@ -1053,8 +1053,45 @@ test('desktop preview installs the same generated HAP used by phone preview', ()
   assert.match(hapBuilder, /HAP_DEVICE_TYPES\.join\(','\)/);
 });
 
+test('preview leases identify a run the same way the HAP build does', async () => {
+  // A command-line project is not named remote-ui-<32 hex>, and the lease must
+  // not require that shape: the run id it carries is diagnostic, never read
+  // back. run_id appears only as a written field, and the frontend matches a
+  // lease by lease_id instead.
+  const project = join(tmpdir(), 'pomodoro-01');
+  const seen = [];
+  const result = await launchHapPreview(
+    project,
+    { desktop: ['desktop-ready'] },
+    { hapPath: '/tmp/product.hap', bundleName: 'com.example.product' },
+    () => {},
+    {
+      discoverTargets: async () => ['desktop-ready'],
+      acquireDevice: async ({ runId, availableTargets }) => {
+        seen.push(runId);
+        return { target: (await availableTargets())[0], release: async () => {}, quarantine: async () => {} };
+      },
+      installPreview: async () => ({ result: 'PASS' }),
+    },
+  );
+  assert.equal(result.target, 'desktop-ready');
+  assert.equal(seen.length, 1);
+
+  // Called outside a run there is no run state, and the device pool supplies its
+  // own identifier, so an absent value must not throw.
+  assert.equal(seen[0], undefined);
+
+  // Both paths read the identity this run already recorded in state.json, so a
+  // lease and its HAP job carry the same value.
+  const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
+  assert.match(runner, /runId: activeRunState\?\.runId/);
+  assert.match(runner, /runId: activeRunState\.runId/);
+  assert.doesNotMatch(runner, /frontendRunId/);
+  assert.match(readFileSync(join(root, 'scripts/preview-device-pool.mjs'), 'utf8'), /String\(runId \|\| randomUUID\(\)\)/);
+});
+
 test('desktop HAP preview quarantines a failed emulator and installs on the fallback', async () => {
-  const project = join(tmpdir(), 'remote-ui-00000000000000000000000000000001');
+  const project = join(tmpdir(), 'pomodoro-01');
   const targets = ['desktop-broken', 'desktop-ready'];
   const events = [];
   const leases = [];

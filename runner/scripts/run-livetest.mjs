@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { basename, join, relative, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -438,11 +438,6 @@ function configureHarmonyGoOrigin(target, devicePort) {
   if (stored !== origin) throw new Error(`Harmony Go server origin was not saved on ${target}: ${stored || '<empty>'}`);
   return origin;
 }
-function frontendRunId(project) {
-  const match = basename(project).match(/([a-f0-9]{32})$/i);
-  if (!match) throw new Error(`project name does not contain a frontend run id: ${basename(project)}`);
-  return match[1].toLowerCase();
-}
 function previewTargetError(kind, target, error) {
   const wrapped = new Error(
     `Harmony Go ${kind} preview device ${target} failed: ${String(error?.message || error)}`,
@@ -521,7 +516,7 @@ export async function launchHapPreview(project, pools, hap, onWait = () => {}, d
       );
     }
     const lease = await acquireDevice({
-      runId: frontendRunId(project),
+      runId: activeRunState?.runId,
       kind: 'desktop',
       availableTargets,
       onWait: (event) => onWait({ ...event, kind: 'desktop' }),

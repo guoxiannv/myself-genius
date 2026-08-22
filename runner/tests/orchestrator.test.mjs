@@ -1850,7 +1850,10 @@ test('initial 0-to-1 product prompt remains byte-stable while follow-up tools ev
   mkdirSync(join(project, '.expo-fast'), { recursive: true });
   writeFileSync(join(project, '.expo-fast/request.md'), readFileSync(join(root, 'prompts/learning-goals.md')));
   const digest = createHash('sha256').update(buildPrompt(project)).digest('hex');
-  assert.equal(digest, '54309185afceaf7ccfb38fbe52e2f5f1c8a3510d71442cce359626545fa3ef86');
+  // Updated deliberately: the 0-to-1 prompt no longer tells the model to read
+  // AGENTS.md, because its contents now arrive as system prompt. Any other
+  // change to this digest is unintended.
+  assert.equal(digest, '5306d868709930160898f12ecbeaebc190266571bc0c622cd300758c547fa272');
   rmSync(project, { recursive: true, force: true });
 });
 

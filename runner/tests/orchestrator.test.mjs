@@ -7,13 +7,16 @@ import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { validateSmoke } from '../scripts/validate-smoke.mjs';
 import {
+  buildIdentityNodeId,
   catalogFingerprint,
   catalogHasProject,
   catalogProjectCard,
   catalogVisibleProjectIds,
   harmonyGoActiveMiniAppNodeId,
   harmonyGoCatalogMiniAppNodeId,
+  hasBuildIdentity,
   inspectCurrentMiniApp,
+  observedBuildStamps,
   visibleBundleNames,
 } from '../scripts/layout-identity.mjs';
 import { HDC_DEVICE_TIMEOUT_MS, HDC_SESSION_TIMEOUT_MS, HDC_TRANSFER_TIMEOUT_MS, assignHdcPreviewPorts, configuredHdcPreviewTargets, configuredHdcTarget, discoverHdcPreviewPools, hdcCommandKind, hdcCommandTarget, hdcCommandTimeoutMs, hdcForceStopBundleAbsent, hdcOutputFailed, hdcTimeoutMessage, hdcUninstallBundleAbsent, parseHdcForwardRules, parseHdcTargets, prioritizeHdcPreviewTargets, reversePortCandidates, selectHdcPreviewTargets, selectHdcTarget } from '../scripts/hdc-target.mjs';
@@ -32,7 +35,7 @@ import {
 import { readModelCache, verifyConfiguredModels } from '../scripts/preflight-models.mjs';
 import { repairArtifactName } from '../scripts/repair-artifact.mjs';
 import { assertDependencyRuntime, installProjectDependencies, pinRuntimeDependencies, stageHarmonyCli } from '../scripts/dependencies.mjs';
-import { HAP_DEVICE_TYPES, runHapPoolBuild } from '../scripts/hap-build.mjs';
+import { BUILD_IDENTITY_FILE, HAP_DEVICE_TYPES, buildIdentityModule, buildStampFromJobId, runHapPoolBuild } from '../scripts/hap-build.mjs';
 import {
   flushClaudeTraceChunk,
   launchHapPreview,
@@ -1091,8 +1094,12 @@ test('a first install distinguishes an absent bundle from a previous build left 
   const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
   const install = runner.match(/async function installHapAndOpen\([\s\S]*?\n\}/)?.[0];
   assert.ok(install, 'installHapAndOpen source');
-  assert.match(install, /hdcRunClearingBundle\(\[[^\]]*'force-stop', bundleName\], hdcForceStopBundleAbsent\)/);
+  // force-stop is depth now that the foreground check reads the build stamp, so a
+  // non-absence failure is reported rather than fatal. uninstall is not: `install -r`
+  // keeps application data, and stale data rendered by new code still stamps correctly.
+  assert.match(install, /hdcRunAdvisory\(\s*\['-t', target, 'shell', 'aa', 'force-stop', bundleName\],\s*hdcForceStopBundleAbsent,/);
   assert.match(install, /hdcRunClearingBundle\(\[[^\]]*'uninstall', '-n', bundleName\], hdcUninstallBundleAbsent\)/);
+  assert.doesNotMatch(install, /hdcRunClearingBundle\(\[[^\]]*'force-stop'/);
   // A bare catch would hide a previous build that refused to go away.
   assert.doesNotMatch(install, /catch\s*\{\s*\}/);
 });
@@ -2558,4 +2565,138 @@ test('pool setup reports every supported pnpm source when none is available', { 
   } finally {
     rmSync(fixture.workspace, { recursive: true, force: true });
   }
+});
+
+test('a direct-HAP preview proves the foreground app is this build, not a previous one wearing the bundle name', () => {
+  // Device-measured shape: uitest dumpLayout carries a React Native testID on both
+  // `id` and `key`, keeps a 1x1 absolutely positioned node, and reports it visible.
+  const stamped = (stamp) => ({ children: [{
+    attributes: { bundleName: 'com.genius.pomodoro.04', type: 'root' },
+    children: [
+      { attributes: { id: 'timer-ring', key: 'timer-ring', type: 'Custom', bounds: '[40,756][1280,1800]', visible: 'true' } },
+      { attributes: { id: buildIdentityNodeId(stamp), key: buildIdentityNodeId(stamp), type: 'Text', text: stamp, bounds: '[515,351][517,353]', visible: 'true', opacity: '0.010000' } },
+    ],
+  }] });
+  const current = buildStampFromJobId('hap-run-2-phone-2in1');
+  const previous = buildStampFromJobId('hap-run-1-phone-2in1');
+  assert.notEqual(current, previous);
+  assert.equal(hasBuildIdentity(stamped(current), current), true);
+  // The whole point of the check: same bundle name, previous build.
+  assert.equal(hasBuildIdentity(stamped(previous), current), false);
+  assert.deepEqual(observedBuildStamps(stamped(previous)), [previous]);
+  assert.deepEqual(visibleBundleNames(stamped(previous)), ['com.genius.pomodoro.04']);
+  // A build with no stamp must not pass on its bundle name alone.
+  const unstamped = { children: [{ attributes: { bundleName: 'com.genius.pomodoro.04', type: 'root' } }] };
+  assert.equal(hasBuildIdentity(unstamped, current), false);
+  assert.deepEqual(observedBuildStamps(unstamped), []);
+  assert.equal(hasBuildIdentity(stamped(current), ''), false);
+
+  const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
+  const install = runner.match(/async function installHapAndOpen\([\s\S]*?\n\}/)?.[0];
+  assert.ok(install, 'installHapAndOpen source');
+  assert.match(install, /if \(hasBuildIdentity\(layout, buildStamp\)\) break;/);
+  assert.match(install, /installed HAP did not reach the foreground as this build/);
+  assert.doesNotMatch(install, /if \(visibleBundleNames\(layout\)\.includes\(bundleName\)\) break;/);
+  // Evidence and proof have to describe one app: the stamp is read from a dump
+  // taken before the screenshot, and leaves with it.
+  assert.ok(install.indexOf('hasBuildIdentity(layout || {}, buildStamp)') < install.indexOf("'screenCap'"));
+  assert.match(install, /return \{ result: 'PASS'[^}]*buildStamp, hapSha256 \}/);
+});
+
+test('the orchestrator stamps the build into the product entry without moving the source digest', () => {
+  const stamp = buildStampFromJobId('hap-stamp-run-phone-2in1');
+  assert.match(stamp, /^[0-9a-f]{16}$/);
+  assert.equal(buildStampFromJobId('hap-stamp-run-phone-2in1'), stamp);
+  assert.throws(() => buildStampFromJobId(''), /needs a job id/);
+
+  const module = buildIdentityModule(stamp);
+  assert.match(module, new RegExp(`export const BUILD_STAMP = '${stamp}';`));
+  assert.match(module, new RegExp(`export const BUILD_IDENTITY_NODE_ID = '${buildIdentityNodeId(stamp)}';`));
+  // dumpLayout drops zero-sized and off-screen nodes, so the injected node has to be
+  // 1x1 and on screen; absolute placement keeps the product layout untouched.
+  assert.match(module, /position: 'absolute', top: 0, left: 0, width: 1, height: 1/);
+  assert.match(buildIdentityModule(null), /export const BUILD_STAMP = null;/);
+  assert.match(buildIdentityModule(null), /if \(!BUILD_STAMP\) return App;/);
+  assert.throws(() => buildIdentityModule('not-a-stamp'), /invalid HAP build stamp/);
+
+  // The template ships the unstamped module verbatim, so the two cannot drift.
+  assert.equal(readFileSync(join(root, `templates/expo-harmony/${BUILD_IDENTITY_FILE}`), 'utf8'), buildIdentityModule(null));
+  assert.match(readFileSync(join(root, 'templates/expo-harmony/index.js'), 'utf8'), /registerRootComponent\(withBuildIdentity\(App\)\);/);
+
+  // index.js and build-identity.js are orchestrator-owned. Restamping must not move
+  // productInputSha256, or every build would read as a source change.
+  const project = mkdtempSync(join(tmpdir(), 'expo-fast-stamp-'));
+  mkdirSync(join(project, '.expo-fast'), { recursive: true });
+  mkdirSync(join(project, 'src'), { recursive: true });
+  writeFileSync(join(project, '.expo-fast/request.md'), '记一笔');
+  writeFileSync(join(project, '.expo-fast/capability-catalog.json'), JSON.stringify({ available: [], unavailable: [] }));
+  writeFileSync(join(project, 'package.json'), JSON.stringify({ dependencies: {} }));
+  writeFileSync(join(project, 'app.json'), JSON.stringify({ expo: { slug: 'stamp-app' } }));
+  writeFileSync(join(project, 'App.tsx'), 'export default function App(){ return <View testID="ledger-summary" /> }');
+  writeFileSync(join(project, 'index.js'), readFileSync(join(root, 'templates/expo-harmony/index.js')));
+  writeFileSync(join(project, BUILD_IDENTITY_FILE), buildIdentityModule(stamp));
+  const stampedDigest = auditProductSource(project).productInputSha256;
+  writeFileSync(join(project, BUILD_IDENTITY_FILE), buildIdentityModule(buildStampFromJobId('hap-other-run-phone-2in1')));
+  assert.equal(auditProductSource(project).productInputSha256, stampedDigest);
+  writeFileSync(join(project, 'App.tsx'), 'export default function App(){ return <View testID="ledger-total" /> }');
+  assert.notEqual(auditProductSource(project).productInputSha256, stampedDigest);
+});
+
+test('the HAP build stamps the source before the pool runs and reports the stamp of the artifact on disk', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-hap-stamp-'));
+  const project = join(workspace, 'product');
+  const sdk = join(workspace, 'sdk');
+  const pool = join(workspace, 'pool');
+  mkdirSync(project);
+  mkdirSync(sdk);
+  mkdirSync(pool);
+  const realProject = realpathSync(project);
+  let builtJobId = '';
+
+  const built = runHapPoolBuild({
+    project,
+    sdk,
+    pool,
+    runId: 'run-1',
+    reuseExisting: false,
+    commandRunner(_command, args) {
+      const output = args[args.indexOf('--output') + 1];
+      builtJobId = args[args.indexOf('--job-id') + 1];
+      // The stamp has to be in the source before the pool reads it.
+      assert.equal(
+        readFileSync(join(realProject, BUILD_IDENTITY_FILE), 'utf8'),
+        buildIdentityModule(buildStampFromJobId(builtJobId)),
+      );
+      const hapPath = join(output, `${builtJobId}.hap`);
+      mkdirSync(output, { recursive: true });
+      writeFileSync(hapPath, builtJobId);
+      writeFileSync(join(output, 'build-result.json'), JSON.stringify({
+        schemaVersion: 1,
+        status: 'success',
+        jobId: builtJobId,
+        productRoot: realProject,
+        hapPath,
+        hapSha256: createHash('sha256').update(builtJobId).digest('hex'),
+        bundleName: 'com.genius.stamped',
+        deviceTypes: ['phone', '2in1'],
+        buildMode: 'release',
+      }));
+      return { status: 0, stdout: '', stderr: '' };
+    },
+  });
+  assert.equal(built.status, 'ready');
+  assert.equal(built.buildStamp, buildStampFromJobId(builtJobId));
+
+  // A later run that reuses the HAP must expect the stamp baked into that HAP,
+  // not one derived from its own run id.
+  const reused = runHapPoolBuild({
+    project,
+    sdk,
+    pool,
+    runId: 'run-2',
+    commandRunner() { throw new Error('a reused HAP must not rebuild'); },
+  });
+  assert.equal(reused.reused, true);
+  assert.equal(reused.buildStamp, built.buildStamp);
+  assert.notEqual(buildStampFromJobId('hap-run-2-phone-2in1'), built.buildStamp);
 });

@@ -12,7 +12,9 @@ import {
   catalogVisibleProjectIds,
   harmonyGoActiveMiniAppNodeId,
   harmonyGoCatalogMiniAppNodeId,
+  hasBuildIdentity,
   inspectCurrentMiniApp,
+  observedBuildStamps,
   visibleBundleNames,
 } from './layout-identity.mjs';
 import { HDC_PROBE_TIMEOUT_MS, discoverHdcPreviewPools, hdcCommandTimeoutMs, hdcForceStopBundleAbsent, hdcOutputFailed, hdcTimeoutMessage, hdcUninstallBundleAbsent, parseHdcForwardRules, parseHdcTargets, prioritizeHdcPreviewTargets, reversePortCandidates } from './hdc-target.mjs';
@@ -401,6 +403,17 @@ function hdcRunClearingBundle(args, absent) {
     return '';
   }
 }
+// Depth, not the load-bearing guarantee: the foreground check reads the build
+// stamp, so a step that only exists to remove the previous build reports its
+// failure instead of ending the run.
+function hdcRunAdvisory(args, absent, note) {
+  try {
+    return hdcRun(args);
+  } catch (error) {
+    if (!absent(String(error?.message || error))) console.warn(`[expo-fast] ${note}\n${String(error?.message || error)}`);
+    return '';
+  }
+}
 function reverseMappings() { return parseHdcForwardRules(hdcRun(['fport', 'ls'])); }
 function clearReverse(target, devicePort, hostPort) {
   for (const mapping of reverseMappings()) {
@@ -598,15 +611,22 @@ export async function launchHapPreview(project, pools, hap, onWait = () => {}, d
 async function installHapAndOpen(project, target, hap, previewKind = 'desktop') {
   const hapPath = String(hap?.hapPath || '').trim();
   const bundleName = String(hap?.bundleName || '').trim();
+  const buildStamp = String(hap?.buildStamp || '').trim();
+  const hapSha256 = String(hap?.hapSha256 || '').trim();
   if (!hapPath || !existsSync(hapPath)) throw new Error('desktop preview HAP is missing');
   if (!bundleName) throw new Error('desktop preview HAP has no bundleName');
-  // A first install of this bundle has nothing to stop and nothing to remove, so
-  // each command's own "not installed" signature is allowed through. Everything
-  // else stays fatal: a process that outlives `install -r` would be started,
-  // verified and photographed as this build, and data left by a failed uninstall
-  // would be inherited by it -- both silently, since the foreground check only
-  // matches the bundle name.
-  hdcRunClearingBundle(['-t', target, 'shell', 'aa', 'force-stop', bundleName], hdcForceStopBundleAbsent);
+  if (!buildStamp) throw new Error('desktop preview HAP carries no build stamp; rebuild it so the foreground check can name which build is running');
+  // `install -r` keeps application data, so a failed uninstall would hand this
+  // build the previous run's store -- new code rendering stale state stamps
+  // itself correctly, which the foreground check cannot see. That one stays
+  // fatal. A force-stop that fails for any reason other than absence no longer
+  // has to be: a process that outlives the install carries the previous stamp
+  // and is caught below.
+  hdcRunAdvisory(
+    ['-t', target, 'shell', 'aa', 'force-stop', bundleName],
+    hdcForceStopBundleAbsent,
+    `could not force-stop ${bundleName} on ${target} before installing; the build stamp check below decides the run`,
+  );
   hdcRunClearingBundle(['-t', target, 'shell', 'bm', 'uninstall', '-n', bundleName], hdcUninstallBundleAbsent);
   hdcRun(['-t', target, 'install', '-r', hapPath]);
   wakeAndUnlockHarmonyTarget(target);
@@ -622,17 +642,23 @@ async function installHapAndOpen(project, target, hap, previewKind = 'desktop') 
   for (let attempt = 0; attempt < 20; attempt += 1) {
     await new Promise((resolveWait) => setTimeout(resolveWait, 750));
     layout = dumpLayout(project, target, `launch-product-${previewKind}`);
-    if (visibleBundleNames(layout).includes(bundleName)) break;
+    if (hasBuildIdentity(layout, buildStamp)) break;
   }
-  const visible = visibleBundleNames(layout || {});
-  if (!visible.includes(bundleName)) {
-    throw new Error(`installed HAP did not reach foreground; expected ${bundleName}, visible=${visible.join(', ') || 'none'}`);
+  if (!hasBuildIdentity(layout || {}, buildStamp)) {
+    const visible = visibleBundleNames(layout || {});
+    const observed = observedBuildStamps(layout || {});
+    throw new Error(
+      `installed HAP did not reach the foreground as this build; expected ${bundleName} stamped ${buildStamp}; ` +
+      `visible bundle(s)=${visible.join(', ') || 'none'}; foreground build stamp(s)=${observed.join(', ') || 'none'}`,
+    );
   }
+  // The screenshot is taken only after the same dump proved which build is on
+  // screen, so the evidence and the proof describe one app.
   const shotDevice = `/data/local/tmp/expo-fast-${process.pid}-launch-${previewKind}.jpeg`;
   const shotLocal = join(project, `.expo-fast/launch-screenshot-${previewKind}.jpeg`);
   hdcRun(['-t', target, 'shell', 'uitest', 'screenCap', '-p', shotDevice]);
   hdcRun(['-t', target, 'file', 'recv', shotDevice, shotLocal]);
-  return { result: 'PASS', target, previewKind, screenshot: shotLocal, bundleName, hapPath };
+  return { result: 'PASS', target, previewKind, screenshot: shotLocal, bundleName, hapPath, buildStamp, hapSha256 };
 }
 function nodeText(node) { const a = node?.attributes || {}; return a.text || a.originalText || a.description || ''; }
 function children(node) { return node.children || []; }

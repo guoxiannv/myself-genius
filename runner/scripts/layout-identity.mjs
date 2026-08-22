@@ -1,6 +1,7 @@
 import { harmonyGoBundleName } from './harmony-go-runtime.mjs';
 
 const HARMONY_GO_ACTIVE_MINI_APP_ID_PREFIX = 'harmony-go-active-mini-app-';
+const BUILD_IDENTITY_NODE_ID_PREFIX = 'genius-build-';
 const HARMONY_GO_CATALOG_MINI_APP_ID_PREFIX = 'harmony-go-catalog-mini-app-';
 
 export function harmonyGoActiveMiniAppNodeId(manifestId) {
@@ -24,6 +25,27 @@ function nodeText(node) {
 }
 export function visibleBundleNames(layout) {
   return [...new Set(collect(layout, (node) => Boolean(node.attributes?.bundleName)).map((node) => node.attributes.bundleName))];
+}
+export function buildIdentityNodeId(stamp) {
+  return `${BUILD_IDENTITY_NODE_ID_PREFIX}${stamp}`;
+}
+// A direct-HAP install has no host to vouch for it, so the build stamps itself
+// into its own accessibility tree. Measured on device: uitest dumpLayout carries
+// a React Native testID on both `id` and `key`, and drops zero-sized, off-screen
+// and display:none nodes outright -- hence the 1x1 absolutely positioned node the
+// orchestrator injects. Presence in the tree is the whole claim; visibility is
+// deliberately not required.
+export function observedBuildStamps(layout) {
+  const stamped = collect(layout, (node) => {
+    const identity = node.attributes?.id || node.attributes?.key;
+    return typeof identity === 'string' && identity.startsWith(BUILD_IDENTITY_NODE_ID_PREFIX);
+  });
+  return [...new Set(stamped
+    .map((node) => String(node.attributes.id || node.attributes.key).slice(BUILD_IDENTITY_NODE_ID_PREFIX.length))
+    .filter(Boolean))];
+}
+export function hasBuildIdentity(layout, stamp) {
+  return Boolean(stamp) && observedBuildStamps(layout).includes(String(stamp));
 }
 function hasHarmonyGoBundle(layout, expectedBundleName = harmonyGoBundleName) {
   return visibleBundleNames(layout).includes(expectedBundleName);

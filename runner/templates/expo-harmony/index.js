@@ -1,5 +1,6 @@
 import { registerRootComponent } from 'expo';
 
 import App from './App';
+import { withBuildIdentity } from './build-identity';
 
-registerRootComponent(App);
+registerRootComponent(withBuildIdentity(App));

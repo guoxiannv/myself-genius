@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline/promises';
 import { HDC_SESSION_TIMEOUT_MS, configuredHdcTarget, hdcTimeoutMessage, parseHdcTargets } from './hdc-target.mjs';
 import { configuredPreviewPools } from './preview-device-pool.mjs';
-import { resolveExecution, resolveRole } from './execution-policy.mjs';
+import { resolveExecution, resolveRole, roleOwnedEnvironmentKeys } from './execution-policy.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const resolveRunnerPath = (value) => isAbsolute(value) ? resolve(value) : resolve(root, value);
@@ -303,7 +303,23 @@ function printPlan(plan, tmuxId = '') {
   console.log('');
 }
 
+// The orchestrator injects these per role at every Claude Code spawn. Finding
+// one already in the ambient environment means runner/.env or the developer's
+// shell also declares it, which is a second configuration surface for something
+// config/execution.json owns. Reject it here rather than let the two disagree.
+function rejectRoleOwnedEnvironment(env = process.env) {
+  for (const key of roleOwnedEnvironmentKeys) {
+    if (!String(env[key] ?? '').trim()) continue;
+    throw new Error(
+      `${key} is set in the environment, but config/execution.json owns it.\n`
+      + '  Remove it from runner/.env and from the calling shell.\n'
+      + '  It is a per-model property, so it belongs to a role, not to the machine.',
+    );
+  }
+}
+
 async function main() {
+  rejectRoleOwnedEnvironment();
   const raw = parse(process.argv.slice(2));
   if (raw.help) { console.log(usage()); return; }
   const requestedActions = Number(Boolean(raw.followUpFile)) + Number(Boolean(raw.rebuild || raw.resume)) + Number(Boolean(raw.previewOnly));

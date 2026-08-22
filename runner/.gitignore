@@ -13,6 +13,12 @@ expo-app/
 .env.*
 !.env.example
 
+# Runner-scoped Claude Code isolation. The launcher and its template are
+# shared; the credentials, Claude Code state, and caches are not.
+.local/llm.env
+.local/claude-config/
+.local/models-cache.json
+
 *.log
 
 # Raw Codex exports can contain credentials and machine-local execution context.

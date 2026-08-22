@@ -1,0 +1,72 @@
+#!/bin/sh
+# Runner-scoped Claude Code launcher.
+#
+# scripts/start-livetest.mjs exports CLAUDE_BIN into every execution path
+# (foreground and the tmux pane), so everything set here reaches the model turn
+# without leaking into the developer's own Claude Code setup.
+set -e
+
+RUNNER_LOCAL="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
+# 1) Keep all Claude Code state inside the repository, never in ~/.claude.
+export CLAUDE_CONFIG_DIR="$RUNNER_LOCAL/claude-config"
+
+# 2) Drop the parent session's identity so a nested launch is a clean process.
+unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION
+unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_EXECPATH
+unset CLAUDE_PID CLAUDE_EFFORT AI_AGENT
+
+# 3) Drop any inherited credentials before applying this runner's own endpoint.
+unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL ANTHROPIC_MODEL
+
+# 4) llm.env is sourced after the parent environment, so anything it exports wins
+# over the per-role values the orchestrator injects into this process. A stale
+# copy of a variable that now lives in config/execution.json would therefore
+# override its role silently, leaving that configuration decorative with nothing
+# reporting it. Inspect the file rather than the resulting environment, so that
+# the orchestrator's own injection passes through untouched.
+# Keep this list equal to roleOwnedEnvironmentKeys in scripts/execution-policy.mjs;
+# tests/orchestrator.test.mjs asserts the two agree.
+if [ -f "$RUNNER_LOCAL/llm.env" ]; then
+  for owned in CLAUDE_CODE_MAX_CONTEXT_TOKENS CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING; do
+    if grep -qE "^[[:space:]]*(export[[:space:]]+)?$owned=" "$RUNNER_LOCAL/llm.env"; then
+      echo "claude-isolated: llm.env sets $owned, but config/execution.json owns it." >&2
+      echo "  Remove that line from $RUNNER_LOCAL/llm.env." >&2
+      echo "  It is a per-model property, so it belongs to a role, not to the endpoint." >&2
+      exit 78
+    fi
+  done
+  . "$RUNNER_LOCAL/llm.env"
+fi
+
+# 6) Fail closed. CLAUDE_CONFIG_DIR isolates config and history, but on macOS the
+# developer's own subscription token lives in the login Keychain under
+# "Claude Code-credentials", which no environment variable can hide. Without an
+# explicit endpoint below, Claude Code would silently bill the developer's own
+# Anthropic subscription for every runner turn. Refuse to start instead.
+if [ -z "${ANTHROPIC_BASE_URL:-}" ] || { [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; }; then
+  echo "claude-isolated: refusing to start without a runner-scoped LLM endpoint." >&2
+  echo "  Set ANTHROPIC_BASE_URL plus ANTHROPIC_AUTH_TOKEN (or ANTHROPIC_API_KEY) in:" >&2
+  echo "    $RUNNER_LOCAL/llm.env" >&2
+  echo "  Start from the template: cp llm.env.example llm.env" >&2
+  echo "  Otherwise Claude Code falls back to the macOS Keychain subscription." >&2
+  exit 78
+fi
+
+# 7) The real Claude Code executable. CLAUDE_BIN already points at this launcher,
+# so the underlying binary needs its own name. Set GENIUS_CLAUDE_REAL_BIN in
+# runner/.env when claude is not on PATH.
+REAL_CLAUDE="${GENIUS_CLAUDE_REAL_BIN:-$(command -v claude 2>/dev/null || true)}"
+if [ -z "$REAL_CLAUDE" ] || [ ! -x "$REAL_CLAUDE" ]; then
+  echo "claude-isolated: cannot find the Claude Code executable." >&2
+  echo "  Put claude on PATH, or set GENIUS_CLAUDE_REAL_BIN in runner/.env." >&2
+  exit 78
+fi
+case "$REAL_CLAUDE" in
+  "$RUNNER_LOCAL"/*)
+    echo "claude-isolated: GENIUS_CLAUDE_REAL_BIN points back at this launcher: $REAL_CLAUDE" >&2
+    exit 78
+    ;;
+esac
+
+exec "$REAL_CLAUDE" "$@"

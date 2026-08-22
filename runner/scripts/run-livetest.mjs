@@ -19,7 +19,7 @@ import { HDC_PROBE_TIMEOUT_MS, discoverHdcPreviewPools, hdcCommandTimeoutMs, hdc
 import { acquirePreviewDevice, configuredPreviewPools } from './preview-device-pool.mjs';
 import { auditImplementationTrace } from './trace-scope.mjs';
 import { writeRunState } from './run-state.mjs';
-import { executionDefaults, resolveExecution, resolveRole } from './execution-policy.mjs';
+import { executionDefaults, resolveExecution, resolveExecutionRoles, resolveRole, roleEnv } from './execution-policy.mjs';
 import { repairArtifactName } from './repair-artifact.mjs';
 import { readExistingHapResult, runHapPoolBuild } from './hap-build.mjs';
 import { verifyImplementation } from './verification.mjs';
@@ -256,13 +256,13 @@ function buildPrompt(project) {
   return `Build this Expo React Native product from scratch in the current freshly prepared Harmony Go technical scaffold. No prior product implementation is present.\n\nUSER REQUEST:\n${request}\n\nRead only AGENTS.md, package.json, app.json, index.js, tsconfig.json, App.tsx, src/**, ${hasDesign ? '.expo-fast/design.html, ' : ''}.expo-fast/model-capability-index.txt, and .expo-fast/sdk-fingerprint.json. These paths are permission-whitelisted and authoritative; do not attempt any other path, SDK scan, or web access. The model capability index is a deterministic projection of the local compatibility catalog: REQUIRED rows are request-matched AVAILABLE capabilities and must be represented in the brief, package dependencies, and working code; other AVAILABLE rows are optional; UNAVAILABLE rows must never be imported. ${extra}\n\n${designInstruction}\n\nImplement the complete requested product now; do not collapse requested behavior into placeholders. Derive acceptance rules directly from the user request. Work in vertical slices, not a bottom-up library pass. Write .expo-fast/brief.json, then immediately replace starter App.tsx/app-shell, expose every requested destination, and implement a real primary state mutation. Keep the app runnable as you add data/persistence, complete screens, secondary actions, charts, and polish. Write each complete file as soon as it is ready; never leave entry composition or requested screens until the end.\n\nKeep the implementation compact: prefer 6-10 cohesive product files and avoid rewriting an already complete file unless integration requires it. Build the product's visual system from the design reference while reusing generic UI primitives only where they fit. Avoid commentary, long comments, duplicate wrappers, and one-file-per-small-component architecture. Treat useWindowDimensions().width as logical layout width; never infer breakpoints from physical pixels or emulator resolution. Use phone <640, tablet 640–1279, and desktop >=1280. For apps with multiple top-level destinations, phone uses bottom navigation and a single content column, tablet uses top horizontal navigation and one or two content columns as space allows, and desktop uses a fixed-width left sidebar plus a flexible main area as siblings inside the same horizontal root container. Never place the desktop sidebar before or outside that row container. Desktop dashboard/list cards must form a real multi-column layout, such as wrapping cards with about 48% basis. Do not invent tabs for a single-destination app; still preserve the same responsive content rules. Add stable literal testID and accessibilityLabel values to tabs, primary actions, and state summaries that change after actions.\n\nUse src/components/icons.tsx as the local Lucide icon system with one consistent 2.2 default stroke width. Prefer an existing icon matching each Lucide name from the design; when extending it, reproduce canonical Lucide 24px path geometry. Every production icon and chart must use inline react-native-svg primitives; never use emoji, text glyphs, Unicode symbols, or an external icon runtime. Resolve native product behavior through the capability index. For bulk non-sensitive local app state, use REQUIRED AsyncStorage; hydrate before writes, seed only when storage is empty, namespace keys with the app slug, and persist every mutation.\n\nUse no package unless it has a REQUIRED or AVAILABLE row in the capability index and declare it in package.json dependencies at that exact version. Preserve all scaffold dependencies and every other package.json field. Do not create prose Spec/Plan, additional HTML, ArkTS, native files, tests, docs, or subagents. Do not edit the design artifact or other infrastructure. Do not run shell, install, Expo, lint, test, typecheck, grep, or build commands; the orchestrator owns verification. After the whole app is connected, spend the remaining pass on behavior and visual fidelity, then stop.`;
 }
 
-async function designTurn(prompt, timeoutSeconds, model, effort) {
+async function designTurn(prompt, timeoutSeconds, role) {
   if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 55) throw new Error(`invalid design timeout: ${timeoutSeconds}`);
-  const args = ['-p', '--permission-mode', 'dontAsk', '--model', model, '--effort', effort, '--mcp-config', JSON.stringify({ mcpServers: {} }), '--strict-mcp-config', '--tools', '', '--output-format', 'stream-json', '--verbose', '--session-id', randomUUID(), prompt];
+  const args = ['-p', '--permission-mode', 'dontAsk', '--model', role.model, '--effort', role.effort, '--mcp-config', JSON.stringify({ mcpServers: {} }), '--strict-mcp-config', '--tools', '', '--output-format', 'stream-json', '--verbose', '--session-id', randomUUID(), prompt];
   const started = Date.now(); let trace = '';
   const outcome = await new Promise((resolveOutcome, rejectOutcome) => {
     const customHeaders = [process.env.ANTHROPIC_CUSTOM_HEADERS, 'X-Genius-Disable-Thinking: 1'].filter(Boolean).join('\n');
-    const child = spawn(claude, args, { cwd: root, env: { ...process.env, ANTHROPIC_CUSTOM_HEADERS: customHeaders, CLAUDE_CODE_ATTRIBUTION_HEADER: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(claude, args, { cwd: root, env: { ...process.env, ...roleEnv(role), ANTHROPIC_CUSTOM_HEADERS: customHeaders, CLAUDE_CODE_ATTRIBUTION_HEADER: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
     const liveState = { pending: '' }; let timedOut = false; let settled = false; let killTimer;
     const settle = (fn, value) => { if (settled) return; settled = true; clearTimeout(timer); clearTimeout(killTimer); fn(value); };
     const timer = setTimeout(() => { timedOut = true; child.kill('SIGINT'); killTimer = setTimeout(() => child.kill('SIGKILL'), 750); }, timeoutSeconds * 1000);
@@ -277,7 +277,7 @@ async function designTurn(prompt, timeoutSeconds, model, effort) {
   return { ms: Date.now() - started, status: usable ? 'ready' : 'fallback', timedOut: outcome.timedOut, exitCode: outcome.exitCode, html: usable ? html : '', trace };
 }
 
-async function claudeTurn(project, trace, prompt, sessionId, resume = false, timeoutMinutes = 0, acceptDeadline = false, effort = executionDefaults.effort, model = executionDefaults.model, selfVerify = false) {
+async function claudeTurn(project, trace, prompt, sessionId, resume = false, timeoutMinutes = 0, acceptDeadline = false, effort = executionDefaults.effort, model = executionDefaults.model, selfVerify = false, roleEnvironment = {}) {
   const allowedTools = [
     'Read(./AGENTS.md)', 'Read(./package.json)', 'Read(./app.json)', 'Read(./index.js)', 'Read(./tsconfig.json)', 'Read(./App.tsx)', 'Read(./src/**)',
     'Read(./.expo-fast/design.html)',
@@ -300,7 +300,7 @@ async function claudeTurn(project, trace, prompt, sessionId, resume = false, tim
     const args = ['-p', '--permission-mode', 'dontAsk', '--model', model, '--effort', effort, '--mcp-config', mcpConfig, '--strict-mcp-config', '--tools', tools, '--allowedTools', allowedTools.join(','), '--output-format', 'stream-json', '--verbose', ...sessionArgs, turnPrompt];
     const started = Date.now();
     return new Promise((ok, fail) => {
-      const child = spawn(claude, args, { cwd: project, env: { ...process.env, CLAUDE_CODE_ATTRIBUTION_HEADER: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = spawn(claude, args, { cwd: project, env: { ...process.env, ...roleEnvironment, CLAUDE_CODE_ATTRIBUTION_HEADER: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
       const output = createWriteStream(trace, { flags: appendTrace ? 'a' : 'w' });
       const liveState = { pending: '' };
       let stderrText = '';
@@ -775,6 +775,7 @@ async function main() {
   const isFollowUp = action === 'follow-up';
   const followUpPath = isFollowUp ? resolve(o.followUp || '') : '';
   if (isFollowUp && (!followUpPath || !existsSync(followUpPath))) throw new Error(`follow-up request does not exist: ${followUpPath || '<missing>'}`);
+  const { main: mainRole, repair: repairRole } = resolveExecutionRoles(o);
   const { model, effort, repairModel, repairEffort, repairLimit } = resolveExecution(o);
   const designRole = resolveRole('design', { model: o.designModel, effort: o.designEffort, timeoutSeconds: o.designTimeoutSeconds, inheritModel: model });
   const designTimeoutSeconds = designRole.timeoutSeconds;
@@ -807,7 +808,7 @@ async function main() {
   let appIconModel = '';
   if (isInitial) {
     progress(`HTML design started immediately from prompt · model=${designModel} · effort=${designRole.effort} · thinking=disabled · hard-limit=${designTimeoutSeconds}s`);
-    const designPromise = designTurn(buildDesignPrompt(requestText), designTimeoutSeconds, designModel, designRole.effort)
+    const designPromise = designTurn(buildDesignPrompt(requestText), designTimeoutSeconds, designRole)
       .catch((error) => ({ status: 'fallback', timedOut: false, ms: 0, html: '', trace: '', error: String(error?.message || error).slice(0, 1000) }));
     progress('parallel preparation · cold-start template/capability catalog + HTML design');
     const prepareResult = await runAsync(node22, [helper, 'prepare', project, request]);
@@ -850,7 +851,7 @@ async function main() {
     progress(`implementation turn · session=${sessionId} · model=${model} · effort=${effort}`);
     let implementationTurn;
     try {
-      implementationTurn = await claudeTurn(project, join(project, '.expo-fast/agent-trace.jsonl'), buildPrompt(project), sessionId, false, Number(o.claudeTimeoutMinutes || 0), o.acceptClaudeDeadline === 'true', effort, model);
+      implementationTurn = await claudeTurn(project, join(project, '.expo-fast/agent-trace.jsonl'), buildPrompt(project), sessionId, false, Number(o.claudeTimeoutMinutes || 0), o.acceptClaudeDeadline === 'true', effort, model, false, roleEnv(mainRole));
     } catch (error) {
       appIconAbortController.abort();
       throw error;
@@ -881,7 +882,7 @@ async function main() {
     if (!followUpText) throw new Error('follow-up request is empty');
     setRunState('generating_code', 'follow_up', { ...stateContext, revision: currentRevision.number, sessionId });
     progress(`follow-up turn · revision=${currentRevision.number} · session=${sessionId} · model=${model} · effort=${effort}`);
-    const followUpTurn = await claudeTurn(project, implementationTrace, buildFollowUpPrompt(followUpText), sessionId, true, Number(o.claudeTimeoutMinutes || 0), false, effort, model, true);
+    const followUpTurn = await claudeTurn(project, implementationTrace, buildFollowUpPrompt(followUpText), sessionId, true, Number(o.claudeTimeoutMinutes || 0), false, effort, model, true, roleEnv(mainRole));
     if (followUpTurn.sessionId && followUpTurn.sessionId !== sessionId) {
       sessionId = followUpTurn.sessionId;
       metrics.sessionId = sessionId;
@@ -938,7 +939,7 @@ async function main() {
       (metrics.repairAttempts ||= []).push(attemptMetrics);
       if (currentRevision) currentRevision.repairAttempts.push(attemptMetrics);
       try {
-        const repairTurn = await claudeTurn(project, repairTrace, `Deterministic verification failed on repair cycle ${repairAttempt}. Read only .expo-fast/verification-errors.txt and the whitelisted current product source or deterministic diagnostic files needed to understand it. Fix only reported product problems in App.tsx/src/**, .expo-fast/brief.json, or package.json dependencies. Any dependency must use its exact catalog.available version; preserve all scaffold dependencies and other package.json fields. Use expo_fast.check after edits, fix every reported diagnostic, then use expo_fast.build once before stopping. Do not attempt any other path or run arbitrary shell commands.`, sessionId, true, Number(o.repairTimeoutMinutes ?? 0), false, repairEffort, repairModel, true);
+        const repairTurn = await claudeTurn(project, repairTrace, `Deterministic verification failed on repair cycle ${repairAttempt}. Read only .expo-fast/verification-errors.txt and the whitelisted current product source or deterministic diagnostic files needed to understand it. Fix only reported product problems in App.tsx/src/**, .expo-fast/brief.json, or package.json dependencies. Any dependency must use its exact catalog.available version; preserve all scaffold dependencies and other package.json fields. Use expo_fast.check after edits, fix every reported diagnostic, then use expo_fast.build once before stopping. Do not attempt any other path or run arbitrary shell commands.`, sessionId, true, Number(o.repairTimeoutMinutes ?? 0), false, repairEffort, repairModel, true, roleEnv(repairRole));
         attemptMetrics.ms = repairTurn.ms;
         attemptMetrics.status = 'completed';
         attemptMetrics.completedAt = new Date().toISOString();

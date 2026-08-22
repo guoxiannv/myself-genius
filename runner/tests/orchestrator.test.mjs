@@ -24,7 +24,9 @@ import {
   executionConfig,
   resolveExecution,
   resolveRole,
+  roleEnv,
   roleNames,
+  roleOwnedEnvironmentKeys,
   validateExecutionConfig,
 } from '../scripts/execution-policy.mjs';
 import { repairArtifactName } from '../scripts/repair-artifact.mjs';
@@ -1921,7 +1923,16 @@ test('an incomplete execution configuration fails loudly instead of falling back
   );
 });
 
-test('no model name or removed override survives in orchestrator code', () => {
+test('role environment carries model window and thinking, and no model name survives in code', () => {
+  // Both variables are model properties rather than credentials, so they are
+  // injected per spawn from configuration instead of living in llm.env.
+  assert.deepEqual(roleEnv(resolveRole('design')), {
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(executionConfig.roles.design.contextWindowTokens),
+    CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING: '1',
+  });
+  assert.equal(roleEnv(resolveRole('main')).CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING, '0');
+  assert.deepEqual(roleOwnedEnvironmentKeys, ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING']);
+
   // Regression guard for the failure that started this refactor: a model name
   // hardcoded in a script silently disagrees with the configured endpoint.
   for (const file of ['scripts/run-livetest.mjs', 'scripts/start-livetest.mjs', 'scripts/app-icon.mjs', 'scripts/execution-policy.mjs']) {
@@ -1934,6 +1945,31 @@ test('no model name or removed override survives in orchestrator code', () => {
     const source = readFileSync(join(root, file), 'utf8');
     assert.doesNotMatch(source, /EXPO_FAST_DESIGN_MODEL|EXPO_FAST_DESIGN_TIMEOUT_SECONDS|EXPO_FAST_APP_ICON_(MODEL|EFFORT|ENABLED|TIMEOUT_SECONDS|BRIEF_TIMEOUT_SECONDS)/, file);
   }
+
+  // Every Claude Code spawn must carry its own role environment. A role whose
+  // window is not injected silently falls back to the 200k Claude Code assumes
+  // for an unrecognized model and auto-compacts the turn.
+  const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
+  const icon = readFileSync(join(root, 'scripts/app-icon.mjs'), 'utf8');
+  const spawns = [...runner.matchAll(/spawn\(claude, args, \{[^}]*env: \{([^}]*)\}/g)].map((match) => match[1]);
+  assert.equal(spawns.length, 2, 'design and implementation spawns');
+  for (const spawnEnv of spawns) assert.match(spawnEnv, /\.\.\.role/);
+  assert.match(icon, /env: \{ \.\.\.process\.env, \.\.\.roleEnv\(appIconRole\)/);
+
+  // The launcher's rejection list is duplicated in shell, so assert it still
+  // equals the schema it guards. Both files must name the same variables.
+  const launcher = readFileSync(join(root, '.local/claude-isolated'), 'utf8');
+  const guarded = launcher.match(/^\s*for owned in (.+); do$/m)?.[1].split(/\s+/);
+  assert.deepEqual(guarded, roleOwnedEnvironmentKeys);
+  // It must inspect llm.env itself, not the resulting environment: the
+  // orchestrator injects the same variables and must pass through untouched.
+  assert.match(launcher, /grep -qE .* "\$RUNNER_LOCAL\/llm\.env"/);
+
+  // runner/.env and the developer's shell are checked too, so all three
+  // configuration files are covered.
+  const starter = readFileSync(join(root, 'scripts/start-livetest.mjs'), 'utf8');
+  assert.match(starter, /rejectRoleOwnedEnvironment\(\);/);
+  assert.match(starter, /for \(const key of roleOwnedEnvironmentKeys\)/);
 });
 
 test('repair artifacts give every retry separate evidence', () => {

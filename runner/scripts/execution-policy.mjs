@@ -123,10 +123,26 @@ export function resolveRole(name, overrides = {}) {
   return role;
 }
 
-// Main and repair in the shape the orchestrator has always consumed. A
-// command-line main override that has no matching repair override is inherited
-// by the repair turn, as before.
-export function resolveExecution(options = {}) {
+// The environment a role's Claude Code process needs. Both variables are model
+// properties, not credentials, so they belong here rather than in llm.env:
+// Claude Code applies CLAUDE_CODE_MAX_CONTEXT_TOKENS only to models it does not
+// recognize, and would otherwise assume a 200k window and auto-compact the turn.
+// claude-isolated refuses to start when llm.env sets either of them, because a
+// stale copy there would silently override everything passed here.
+export function roleEnv(role) {
+  return {
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(role.contextWindowTokens),
+    CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING: role.disableAdaptiveThinking ? '1' : '0',
+  };
+}
+
+// Variables that only config/execution.json may set. claude-isolated rejects an
+// llm.env that declares any of them.
+export const roleOwnedEnvironmentKeys = Object.freeze(Object.keys(roleEnv(resolveRole('main'))));
+
+// The two turn roles, fully resolved. A command-line main override that has no
+// matching repair override is inherited by the repair turn, as before.
+export function resolveExecutionRoles(options = {}) {
   const main = resolveRole('main', { model: options.model, effort: options.effort });
   const repair = resolveRole('repair', {
     model: options.repairModel || options.model,
@@ -134,6 +150,12 @@ export function resolveExecution(options = {}) {
     limit: options.repairLimit,
     inheritModel: main.model,
   });
+  return { main, repair };
+}
+
+// The same resolution in the flat shape the orchestrator records as evidence.
+export function resolveExecution(options = {}) {
+  const { main, repair } = resolveExecutionRoles(options);
   return {
     model: main.model,
     effort: main.effort,

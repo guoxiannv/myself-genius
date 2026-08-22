@@ -8,7 +8,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { resolveRole } from './execution-policy.mjs';
+import { resolveRole, roleEnv } from './execution-policy.mjs';
 
 // config/execution.json is the only source for this role's model, effort,
 // timeouts, and context window.
@@ -356,7 +356,7 @@ export async function runIconModel({
   return await new Promise((resolvePromise, reject) => {
     const child = spawnProcess(claude, args, {
       cwd: project,
-      env: { ...process.env, CLAUDE_CODE_ATTRIBUTION_HEADER: '0' },
+      env: { ...process.env, ...roleEnv(appIconRole), CLAUDE_CODE_ATTRIBUTION_HEADER: '0' },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';

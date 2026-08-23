@@ -34,10 +34,12 @@ import {
 } from '../scripts/execution-policy.mjs';
 import { readModelCache, verifyConfiguredModels } from '../scripts/preflight-models.mjs';
 import { probeContextWindow, probeThinking, windowFromRejection } from '../scripts/model-probes.mjs';
+import { parseArguments as parseTimingArguments } from '../scripts/probe-turn-timing.mjs';
 import { repairArtifactName } from '../scripts/repair-artifact.mjs';
 import { assertDependencyRuntime, installProjectDependencies, pinRuntimeDependencies, stageHarmonyCli } from '../scripts/dependencies.mjs';
 import { BUILD_IDENTITY_FILE, HAP_DEVICE_TYPES, buildIdentityModule, buildStampFromJobId, runHapPoolBuild } from '../scripts/hap-build.mjs';
 import {
+  designTurnInvocation,
   flushClaudeTraceChunk,
   launchHapPreview,
   normalizeClaudeTraceChunk,
@@ -2119,7 +2121,14 @@ test('the product contract is injected, not inherited from a CLAUDE.md walk', ()
     icon.slice(icon.indexOf('env: { ...process.env, ...roleEnv(appIconRole)')).split('\n')[0],
   ];
   assert.equal(spawns.length, 3, 'design, implementation, and app icon');
-  for (const spawnEnv of spawns) assert.match(spawnEnv, /CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1'/);
+  // The design turn assembles its environment through designTurnInvocation, so
+  // it is checked by value here rather than by searching for a literal nearby --
+  // a stronger guarantee than the two spawns that still spell it out inline.
+  const designInvocation = designTurnInvocation(resolveRole('design'), 'prompt');
+  assert.equal(designInvocation.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS, '1');
+  assert.equal(designInvocation.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, String(executionConfig.roles.design.contextWindowTokens));
+  const spelledOut = spawns.filter((spawnEnv) => /CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1'/.test(spawnEnv));
+  assert.equal(spelledOut.length, 2, 'implementation and app icon still spell it out at the spawn');
 
   // The design turn starts before the project exists, and its prompt is
   // self-contained, so it must not be given the file.
@@ -2843,4 +2852,29 @@ echo 'HTTP/2 500' >&2
 echo 'gateway exploded'`);
   assert.match(probeThinking(broken, 'k3-256k').unmeasured, /HTTP 500/);
   rmSync(dir, { recursive: true, force: true });
+});
+
+test('the timing probe never picks which models to spend turns on', () => {
+  // This is the one probe that costs real turns, so naming a model is the
+  // whole opt-in. A default would turn "measure the endpoint" into a bill
+  // nobody asked for, and setup-harmony-pool.sh calls the cheap refresh on
+  // every pool build.
+  assert.throws(() => parseTimingArguments([]), /name the models to time/);
+  assert.throws(() => parseTimingArguments(['--model', 'a', '--samples', '0']), /--samples must be a whole number/);
+  assert.throws(() => parseTimingArguments(['--model', 'a', '--cap-seconds', 'soon']), /--cap-seconds must be seconds/);
+  assert.throws(() => parseTimingArguments(['--everything']), /unknown option: --everything/);
+
+  const parsed = parseTimingArguments(['--model', 'a', '--model', 'b', '--samples', '5', '--cap-seconds', '180']);
+  assert.deepEqual(parsed.models, ['a', 'b']);
+  assert.equal(parsed.samples, 5);
+  assert.equal(parsed.capSeconds, 180);
+
+  // A model this endpoint does not serve has to be caught before the first
+  // turn, not when the result is filed: such a turn does not fail fast, it
+  // hangs, so finding out afterwards costs the whole run and measures nothing.
+  const source = readFileSync(join(root, 'scripts/probe-turn-timing.mjs'), 'utf8');
+  assert.ok(
+    source.indexOf('does not serve') < source.indexOf('for (let run = 1'),
+    'the served-model check runs before any sample',
+  );
 });

@@ -197,9 +197,31 @@ function normalizeDesignHtml(html) {
 function usableDesignHtml(path) {
   return existsSync(path) && usableDesignHtmlContent(normalizeDesignHtml(readFileSync(path, 'utf8')));
 }
-function buildDesignPrompt(request) {
+export function buildDesignPrompt(request) {
   return `Create a polished visual design reference for the Expo React Native app below. Do not analyze, reason, explain, or plan: immediately emit the finished HTML. Make one decisive design, not a generic dashboard template.\n\nUSER REQUEST:\n${request.trim()}\n\nYour first output character must be <. Return exactly one self-contained HTML document and then stop. Do not call tools and do not write files. Keep the complete document around 4-6 KB so it finishes quickly. Use semantic HTML and embedded CSS to show the primary screen plus compact representations of other requested destinations/states. Make the composition feel specific to this product: derive its visual metaphor, information hierarchy, density, palette, typography scale, spacing, radii, surfaces, and navigation from the request. Avoid the familiar purple-gradient SaaS dashboard, interchangeable KPI-card grids, repeated KPI summaries, decorative clutter, and phone list rows merely stretched across a PC window. Include realistic copy and populated states. Put reusable visual values in :root CSS custom properties so another model can translate them to React Native.\n\nDesign and mentally check these exact logical viewport canvases: phone 390x844, compact PC/tablet 1024x640, and wide desktop 1440x900. CSS media queries are the layout source of truth: phone is width <640, tablet/compact PC is 640-1279, and wide desktop is >=1280. The 1024x640 composition is a primary PC preview target, not an afterthought: use a top horizontal navigation and a balanced one- or two-column content composition without large accidental blank regions. At >=1280 use a fixed-width left sidebar and a flexible genuinely multi-column main area. At <640 use bottom navigation and one content column when there are multiple destinations. Make flex directions, wrapping, maximum content widths, and card widths explicit at every breakpoint; never use a 900px desktop breakpoint, fixed full-screen content height, or vertical stretching merely to fill the viewport.\n\nInclude one tiny inline script marked data-genius-viewport-monitor that observes matchMedia('(max-width: 639px)') and matchMedia('(min-width: 1280px)'), listens for media/resize changes, and updates document.documentElement.dataset.viewport to phone, tablet, or desktop plus dataset.logicalWidth and dataset.logicalHeight. The script only exposes the active viewport for inspection; do not use it to imperatively restyle elements or duplicate the CSS breakpoint logic.\n\nFor icons, use recognizable Lucide icon names via elements such as <i data-lucide="plus"></i>; load exactly https://unpkg.com/lucide@0.468.0/dist/umd/lucide.js and call lucide.createIcons() instead of drawing bespoke SVG. Use no raster assets and no other external dependency. Return only the HTML, with no Markdown fences, explanation, or additional text.`;
 }
+// What the design turn counts as a finished document, shared with the timing
+// probe so that "complete" means one thing. A probe with its own idea of
+// complete would report a production rate nobody experiences.
+export function designHtmlFromTrace(trace) {
+  const rows = trace.split(/\r?\n/).filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
+  const html = rows.flatMap((row) => Array.isArray(row.message?.content) ? row.message.content : []).filter((block) => block?.type === 'text' && typeof block.text === 'string').map((block) => normalizeDesignHtml(block.text)).filter((value) => /<html(?:\s|>)/i.test(value) && /<\/html>\s*$/i.test(value)).sort((a, b) => b.length - a.length)[0] || '';
+  const usable = Boolean(usableDesignHtmlContent(html));
+  return { html: usable ? html : '', usable };
+}
+
+// Everything that decides what the design turn asks for, shared with the
+// offline timing probe. The deadline is deliberately not part of this: the
+// production turn enforces one and the probe has to measure past it, so those
+// two genuinely differ. Everything else must not, or the probe would time a
+// turn nobody runs.
+export function designTurnInvocation(role, prompt) {
+  return {
+    args: ['-p', '--permission-mode', 'dontAsk', '--model', role.model, '--effort', role.effort, '--mcp-config', JSON.stringify({ mcpServers: {} }), '--strict-mcp-config', '--tools', '', '--output-format', 'stream-json', '--verbose', '--session-id', randomUUID(), prompt],
+    env: { ...roleEnv(role), CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_ATTRIBUTION_HEADER: '0' },
+  };
+}
+
 function buildFollowUpPrompt(text) {
   return `The user wants to modify the existing product in this same project and conversation. Preserve working behavior that is not part of the request, and do not recreate the app from scratch.\n\nUSER FOLLOW-UP:\n${text.trim()}\n\nImplement the requested change completely in the current App.tsx/src/** and permitted product files. Use only catalog-supported exact dependency versions. Read only the explicitly whitelisted product and diagnostic paths; do not read .expo-fast/capability-catalog.json or any other unlisted path. After meaningful edits, call expo_fast.check and fix every diagnostic. When the change is complete, call expo_fast.build once and fix any remaining failure before stopping. Do not use arbitrary shell commands or inspect paths outside the product whitelist.`;
 }
@@ -287,13 +309,13 @@ function buildPrompt(project) {
 
 async function designTurn(prompt, timeoutSeconds, role) {
   if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 55) throw new Error(`invalid design timeout: ${timeoutSeconds}`);
-  const args = ['-p', '--permission-mode', 'dontAsk', '--model', role.model, '--effort', role.effort, '--mcp-config', JSON.stringify({ mcpServers: {} }), '--strict-mcp-config', '--tools', '', '--output-format', 'stream-json', '--verbose', '--session-id', randomUUID(), prompt];
+  const { args, env: roleEnvironment } = designTurnInvocation(role, prompt);
   const started = Date.now(); let trace = '';
   const outcome = await new Promise((resolveOutcome, rejectOutcome) => {
     // Thinking is requested in the request body, not through a header, so the
     // former X-Genius-Disable-Thinking hint could never reach a relay. The
     // design role's disableAdaptiveThinking now carries that intent.
-    const child = spawn(claude, args, { cwd: root, env: { ...process.env, ...roleEnv(role), CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_ATTRIBUTION_HEADER: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(claude, args, { cwd: root, env: { ...process.env, ...roleEnvironment }, stdio: ['ignore', 'pipe', 'pipe'] });
     const liveState = { pending: '' }; let timedOut = false; let settled = false; let killTimer;
     const settle = (fn, value) => { if (settled) return; settled = true; clearTimeout(timer); clearTimeout(killTimer); fn(value); };
     const timer = setTimeout(() => { timedOut = true; child.kill('SIGINT'); killTimer = setTimeout(() => child.kill('SIGKILL'), 750); }, timeoutSeconds * 1000);
@@ -302,10 +324,8 @@ async function designTurn(prompt, timeoutSeconds, role) {
     child.on('error', (error) => settle(rejectOutcome, error));
     child.on('exit', (code) => settle(resolveOutcome, { timedOut, exitCode: code }));
   });
-  const rows = trace.split(/\r?\n/).filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
-  const html = rows.flatMap((row) => Array.isArray(row.message?.content) ? row.message.content : []).filter((block) => block?.type === 'text' && typeof block.text === 'string').map((block) => normalizeDesignHtml(block.text)).filter((value) => /<html(?:\s|>)/i.test(value) && /<\/html>\s*$/i.test(value)).sort((a, b) => b.length - a.length)[0] || '';
-  const usable = usableDesignHtmlContent(html);
-  return { ms: Date.now() - started, status: usable ? 'ready' : 'fallback', timedOut: outcome.timedOut, exitCode: outcome.exitCode, html: usable ? html : '', trace };
+  const { html, usable } = designHtmlFromTrace(trace);
+  return { ms: Date.now() - started, status: usable ? 'ready' : 'fallback', timedOut: outcome.timedOut, exitCode: outcome.exitCode, html, trace };
 }
 
 async function claudeTurn(project, trace, prompt, sessionId, resume = false, timeoutMinutes = 0, acceptDeadline = false, effort = executionDefaults.effort, model = executionDefaults.model, selfVerify = false, roleEnvironment = {}) {

@@ -213,3 +213,29 @@ function probeModel(claudeBin, model, notice) {
   }
   return record;
 }
+
+// Record what one probe measured about one model, leaving the fingerprint and
+// every other model untouched. Kept apart from refreshModelCache because the
+// expensive probe is asked for on its own and should not have to re-fetch the
+// model list to write down what it learned.
+//
+// Only a fresh cache accepts a recording. If llm.env has changed, this cache
+// describes a different endpoint, and filing a measurement taken against the
+// current one under that fingerprint would produce exactly the quiet
+// disagreement between configuration and reality this whole effort is about.
+export function recordModelFacts(model, facts, paths = {}) {
+  const cacheFile = paths.cachePath || cachePath;
+  const current = readModelCache(paths);
+  if (current.status !== 'fresh') {
+    throw new Error(`the model cache is ${current.status}, so there is nothing to record into · ./start-livetest.sh --refresh-models`);
+  }
+  const { cache } = current;
+  if (!cache.models[model]) {
+    throw new Error(`this endpoint does not serve ${model}. It serves: ${Object.keys(cache.models).join(', ')}`);
+  }
+  const measuredAt = new Date().toISOString();
+  const stamped = Object.fromEntries(Object.entries(facts).map(([name, fact]) => [name, { ...fact, measuredAt }]));
+  cache.models[model] = { ...cache.models[model], ...stamped };
+  writeFileSync(cacheFile, `${JSON.stringify(cache, null, 2)}\n`);
+  return cache.models[model];
+}

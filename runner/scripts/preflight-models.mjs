@@ -3,6 +3,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { resolveExecutionRoles, resolveRole } from './execution-policy.mjs';
+import { probeContextWindow, probeThinking } from './model-probes.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const llmEnvPath = join(root, '.local/llm.env');
@@ -64,6 +65,19 @@ export function readModelCache(paths = {}, now = Date.now()) {
   return { status: 'fresh', cache, measuredDaysAgo: age };
 }
 
+// Every role's model, including the command-line overrides, because those reach
+// the endpoint exactly as configuration does and must be checked and measured on
+// the same terms.
+function roleModels(options = {}) {
+  const { main, repair } = resolveExecutionRoles(options);
+  return [
+    ['main', main.model],
+    ['repair', repair.model],
+    ['design', resolveRole('design', { model: options.designModel, effort: options.designEffort, inheritModel: main.model }).model],
+    ['appIcon', resolveRole('appIcon', { inheritModel: main.model }).model],
+  ];
+}
+
 // Verify the configured roles against a cached list. A model the endpoint does
 // not serve is a configuration error worth failing on; anything that leaves the
 // list unknown is reported and allowed through, because turning a missing cache
@@ -83,13 +97,7 @@ export function verifyConfiguredModels(options = {}, paths = {}) {
       notice: `models unverified: ${because} · ./start-livetest.sh --refresh-models`,
     };
   }
-  const { main, repair } = resolveExecutionRoles(options);
-  const roles = [
-    ['main', main.model],
-    ['repair', repair.model],
-    ['design', resolveRole('design', { model: options.designModel, effort: options.designEffort, inheritModel: main.model }).model],
-    ['appIcon', resolveRole('appIcon', { inheritModel: main.model }).model],
-  ];
+  const roles = roleModels(options);
   const servedNames = Object.keys(result.cache.models);
   const served = new Set(servedNames);
   const missing = roles.filter(([, model]) => !served.has(model));
@@ -117,7 +125,7 @@ export function verifyConfiguredModels(options = {}, paths = {}) {
 
 // Fetch through the launcher so the credentials stay inside it. Out of band
 // only: this is the call that costs seconds.
-export function refreshModelCache(claudeBin, paths = {}) {
+export function refreshModelCache(claudeBin, paths = {}, options = {}) {
   const cacheFile = paths.cachePath || cachePath;
   const envFile = paths.llmEnvPath || llmEnvPath;
   const fetched = spawnSync(claudeBin, ['--genius-list-models'], { encoding: 'utf8', timeout: 60_000 });
@@ -134,14 +142,28 @@ export function refreshModelCache(claudeBin, paths = {}) {
   if (!Array.isArray(entries)) throw new Error('the endpoint returned no model list');
   const models = entries.map((entry) => String(entry?.id ?? entry ?? '').trim()).filter(Boolean).sort();
   if (!models.length) throw new Error('the endpoint returned an empty model list');
+  // Probed only for the models a run would actually use. Measuring all thirteen
+  // would spend most of its time on models no role names, and the expensive
+  // probes scale with that list rather than with how useful it is.
+  const notice = options.notice || (() => {});
+  const wanted = options.probe === false
+    ? []
+    : [...new Set(roleModels().map(([, model]) => model))].filter((model) => models.includes(model));
+  const measured = Object.fromEntries(models.map((model) => [model, {}]));
+  for (const model of wanted) {
+    notice(`probing ${model}`);
+    measured[model] = probeModel(claudeBin, model, notice);
+  }
   const cache = {
     schemaVersion: cacheSchemaVersion,
     ...fingerprintLlmEnv(envFile),
     fetchedAt: new Date().toISOString(),
     claudeCodeVersion: claudeCodeVersion(claudeBin),
-    // One record per served model. Empty until a probe measures something about
-    // it; the names alone are what this file has always carried.
-    models: Object.fromEntries(models.map((model) => [model, {}])),
+    probeSuiteVersion,
+    // One record per served model, measured for the ones in use and an empty
+    // slot for the rest. An empty slot is not a claim about the model; it says
+    // nothing was asked.
+    models: measured,
   };
   writeFileSync(cacheFile, `${JSON.stringify(cache, null, 2)}\n`);
   return cache;
@@ -157,4 +179,37 @@ function claudeCodeVersion(claudeBin) {
   const shown = spawnSync(claudeBin, ['--version'], { encoding: 'utf8', timeout: 30_000 });
   if (shown.status !== 0) return null;
   return shown.stdout.match(/\b\d+(?:\.\d+)+[\w.-]*/)?.[0] ?? null;
+}
+
+// Bump when a probe changes what its answer means, so that a record measured by
+// an older suite is visibly not the same measurement. A probe that cannot reach
+// a verdict records that it could not, and never fails the refresh: the model
+// names are the part this file has always been trusted for, and losing them
+// because one probe timed out would trade a small gap for a large one.
+export const probeSuiteVersion = 1;
+
+function probeModel(claudeBin, model, notice) {
+  const measuredAt = new Date().toISOString();
+  const stamp = (fact) => ({ ...fact, measuredAt });
+  const unmeasured = (error) => stamp({ status: 'unmeasured', evidence: `probe failed: ${error.message}` });
+  const record = {};
+  try {
+    record.contextWindowTokens = stamp(probeContextWindow(claudeBin, model, notice));
+  } catch (error) {
+    record.contextWindowTokens = unmeasured(error);
+  }
+  try {
+    const thinking = probeThinking(claudeBin, model);
+    if (thinking.unmeasured) {
+      record.thinkingDisablable = stamp({ status: 'unmeasured', evidence: thinking.unmeasured });
+      record.absentThinkingMeansOff = stamp({ status: 'unmeasured', evidence: thinking.unmeasured });
+    } else {
+      record.thinkingDisablable = stamp(thinking.thinkingDisablable);
+      record.absentThinkingMeansOff = stamp(thinking.absentThinkingMeansOff);
+    }
+  } catch (error) {
+    record.thinkingDisablable = unmeasured(error);
+    record.absentThinkingMeansOff = unmeasured(error);
+  }
+  return record;
 }

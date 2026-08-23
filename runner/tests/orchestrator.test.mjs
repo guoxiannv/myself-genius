@@ -33,6 +33,7 @@ import {
   validateExecutionConfig,
 } from '../scripts/execution-policy.mjs';
 import { readModelCache, verifyConfiguredModels } from '../scripts/preflight-models.mjs';
+import { probeContextWindow, probeThinking, windowFromRejection } from '../scripts/model-probes.mjs';
 import { repairArtifactName } from '../scripts/repair-artifact.mjs';
 import { assertDependencyRuntime, installProjectDependencies, pinRuntimeDependencies, stageHarmonyCli } from '../scripts/dependencies.mjs';
 import { BUILD_IDENTITY_FILE, HAP_DEVICE_TYPES, buildIdentityModule, buildStampFromJobId, runHapPoolBuild } from '../scripts/hap-build.mjs';
@@ -2745,4 +2746,101 @@ test('the HAP build stamps the source before the pool runs and reports the stamp
   assert.equal(reused.reused, true);
   assert.equal(reused.buildStamp, built.buildStamp);
   assert.notEqual(buildStampFromJobId('hap-run-2-phone-2in1'), built.buildStamp);
+});
+
+test('model probes rest on an observable difference, never on a request being accepted', () => {
+  // Both strings below are verbatim rejections from the configured endpoint,
+  // and the pair is the whole reason a probe records how it knows a number.
+  // One states the limit; the other states a magnitude, and "256K" does not say
+  // whether K is 1000 or 1024. Reading it as 256000 is the value this
+  // repository shipped, and the value that was wrong.
+  assert.deepEqual(
+    windowFromRejection("This model's maximum context length is 1048576 tokens. However, you requested 1624100 tokens (1624084 in the messages, 16 in the completion)."),
+    { value: 1048576, confidence: 'exact' },
+  );
+  assert.deepEqual(
+    windowFromRejection('k3-256k supports only 256K context. (request id: 20260823)'),
+    { value: 262144, confidence: 'derived' },
+  );
+  // Anything else is unmeasured rather than guessed, because a guess here
+  // reproduces the failure the probes exist to catch.
+  assert.equal(windowFromRejection('You have reached your concurrent request limit'), null);
+  assert.equal(windowFromRejection('invalid api key'), null);
+
+  const dir = mkdtempSync(join(tmpdir(), 'expo-fast-probes-'));
+  const fakeEndpoint = (script) => {
+    const path = join(dir, `launcher-${createHash('sha256').update(script).digest('hex').slice(0, 8)}`);
+    writeFileSync(path, `#!/bin/sh\n${script}\n`);
+    chmodSync(path, 0o755);
+    return path;
+  };
+
+  // A rejection is the measurement, so the probe has to read a body that comes
+  // with an error status rather than treating the status as the answer. This
+  // endpoint answers an over-long request with 401, which is also its answer to
+  // a bad credential.
+  const rejects = fakeEndpoint(`cat > /dev/null
+echo 'HTTP/2 401' >&2
+echo '{"error":{"message":"k3-256k supports only 256K context."}}'`);
+  assert.deepEqual(probeContextWindow(rejects, 'k3-256k'), {
+    value: 262144,
+    confidence: 'derived',
+    evidence: 'k3-256k supports only 256K context.',
+  });
+
+  // A rejection that names no window measures nothing, and says so.
+  const silent = fakeEndpoint(`cat > /dev/null
+echo 'HTTP/2 429' >&2
+echo '{"error":{"message":"slow down"}}'`);
+  assert.match(probeContextWindow(silent, 'k3-256k').evidence, /rejected without naming a window: slow down/);
+  assert.equal(probeContextWindow(silent, 'k3-256k').status, 'unmeasured');
+
+  // The thinking verdict comes from the reply, not from the field being
+  // accepted: a relay that hid the block while the model still thought would
+  // leave the token count behind, and this is what would catch it.
+  const thinks = fakeEndpoint(`body=$(cat)
+echo 'HTTP/2 200' >&2
+case "$body" in
+  *'"thinking"'*) echo '{"content":[{"type":"text","text":"red"}],"usage":{"output_tokens":5}}' ;;
+  *) echo '{"content":[{"type":"thinking","thinking":"x"},{"type":"text","text":"red"}],"usage":{"output_tokens":50,"output_tokens_details":{"thinking_tokens":34}}}' ;;
+esac`);
+  const measured = probeThinking(thinks, 'k3-256k');
+  assert.equal(measured.thinkingDisablable.value, true);
+  assert.match(measured.thinkingDisablable.evidence, /34 thinking tokens .*, none with thinking disabled/);
+  // Omitting the field is not the same as disabling it. Claude Code drops the
+  // field entirely at MAX_THINKING_TOKENS=0, so this is what decides whether
+  // that could ever have meant what it looks like.
+  assert.equal(measured.absentThinkingMeansOff.value, false);
+
+  // A relay that keeps thinking under both bodies is reported as unable to
+  // disable it, not as a probe failure.
+  const alwaysThinks = fakeEndpoint(`cat > /dev/null
+echo 'HTTP/2 200' >&2
+echo '{"content":[{"type":"thinking","thinking":"x"}],"usage":{"output_tokens_details":{"thinking_tokens":9}}}'`);
+  assert.equal(probeThinking(alwaysThinks, 'k3-256k').thinkingDisablable.value, false);
+
+  // A window larger than the probe expects grows the request until it is
+  // rejected, because only a rejection carries the number and only a rejection
+  // is free. Every accepted rung is billed, so each one says so, and running
+  // out of rungs records what is actually known -- a lower bound -- rather than
+  // a number nobody measured.
+  const acceptsEverything = fakeEndpoint(`cat > /dev/null
+echo 'HTTP/2 200' >&2
+echo '{"content":[{"type":"text","text":"ok"}]}'`);
+  const spoken = [];
+  const huge = probeContextWindow(acceptsEverything, 'roomy', (line) => spoken.push(line));
+  assert.equal(huge.status, 'unmeasured');
+  assert.equal(huge.atLeastTokens, 6_400_000);
+  assert.equal(spoken.length, 2, 'every accepted rung is announced because it costs money');
+  assert.match(spoken[0], /which is billed\. Growing the probe to 6,400,000\./);
+  assert.match(spoken[1], /No larger probe to try\./);
+
+  // An endpoint that cannot answer leaves the fact unmeasured; it never fails
+  // the refresh, because the model names are what this cache has always been
+  // trusted for.
+  const broken = fakeEndpoint(`cat > /dev/null
+echo 'HTTP/2 500' >&2
+echo 'gateway exploded'`);
+  assert.match(probeThinking(broken, 'k3-256k').unmeasured, /HTTP 500/);
+  rmSync(dir, { recursive: true, force: true });
 });

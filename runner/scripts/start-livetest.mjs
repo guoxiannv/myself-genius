@@ -329,9 +329,24 @@ async function main() {
   const raw = parse(process.argv.slice(2));
   if (raw.help) { console.log(usage()); return; }
   if (raw.refreshModels) {
-    const cache = refreshModelCache(commandOrPath(process.env.CLAUDE_BIN || defaults.claude));
+    const cache = refreshModelCache(commandOrPath(process.env.CLAUDE_BIN || defaults.claude), {}, {
+      notice: (line) => console.log(`  ${line}`),
+    });
     const names = Object.keys(cache.models);
     console.log(`cached ${names.length} models: ${names.join(', ')}`);
+    // Print what was measured rather than only that measuring happened. A fact
+    // nobody reads is how a wrong value survives, and "derived" has to be as
+    // visible here as the number it qualifies.
+    for (const [model, facts] of Object.entries(cache.models)) {
+      if (!Object.keys(facts).length) continue;
+      console.log(`  ${model}`);
+      for (const [name, fact] of Object.entries(facts)) {
+        const answer = fact.status === 'unmeasured'
+          ? `unmeasured · ${fact.evidence}`
+          : `${fact.value}${fact.confidence === 'derived' ? ' (derived)' : ''}`;
+        console.log(`    ${name}: ${answer}`);
+      }
+    }
     return;
   }
   const requestedActions = Number(Boolean(raw.followUpFile)) + Number(Boolean(raw.rebuild || raw.resume)) + Number(Boolean(raw.previewOnly));

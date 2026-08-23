@@ -7,9 +7,12 @@ capability resolution; `scripts/dependencies.mjs` exclusively owns dependency se
 synchronization, runtime pins, and Harmony Go export.
 
 As soon as an initial prompt arrives, the runner starts an independent, tool-less HTML
-design turn in parallel with scaffold preparation and dependency seeding. It uses low
-effort, disables thinking only for this turn, and has a hard deadline below one minute.
-Valid output is saved as `.expo-fast/design.html`; failure is a non-blocking fallback.
+design turn in parallel with scaffold preparation and dependency seeding. It runs on its
+own configured model at low effort with a hard deadline below one minute. The turn still
+thinks: no Claude Code knob reaches the `thinking` field of the request body, so
+`disableAdaptiveThinking` leaves that request byte-for-byte identical either way, as
+measured against Claude Code 2.1.241. Valid output is saved as `.expo-fast/design.html`;
+failure is a non-blocking fallback.
 The main implementation turn keeps its normal reasoning and translates the reference
 into native React Native layout and local Lucide path geometry.
 

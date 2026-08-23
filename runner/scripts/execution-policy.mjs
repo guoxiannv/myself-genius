@@ -129,6 +129,13 @@ export function resolveRole(name, overrides = {}) {
 // recognize, and would otherwise assume a 200k window and auto-compact the turn.
 // claude-isolated refuses to start when llm.env sets either of them, because a
 // stale copy there would silently override everything passed here.
+//
+// Neither variable reaches the request body, which is exactly why neither can be
+// trusted on its name. CLAUDE_CODE_MAX_CONTEXT_TOKENS only decides when this
+// process compacts; it is not the endpoint's hard limit, so a value above the
+// real window is never rejected, it just compacts too late. And measured against
+// Claude Code 2.1.241, CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING changes nothing at
+// all: the request is byte-for-byte identical with it set to 1, to 0, or unset.
 export function roleEnv(role) {
   return {
     CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(role.contextWindowTokens),

@@ -1860,14 +1860,18 @@ test('external dependency controller CLI synchronizes an already installed exact
 
 test('single execution policy uses external model controls and caps deterministic repair at 100 attempts', () => {
   const config = JSON.parse(readFileSync(join(root, 'config/execution.json'), 'utf8'));
+  // Every window below is the endpoint's measured limit, not the number in the
+  // model's name: the k3 model rejects at 262144 (256*1024) and the design model
+  // at 1048576 (1024*1024). Rounding either back to a marketing figure gives up
+  // real context, and nothing in this repo would report the loss.
   assert.deepEqual(config, {
     schemaVersion: 2,
     roles: {
-      main: { model: 'k3-256k', effort: 'low', contextWindowTokens: 256000, disableAdaptiveThinking: false },
-      repair: { model: 'k3-256k', effort: 'medium', contextWindowTokens: 256000, disableAdaptiveThinking: false, limit: 100 },
-      design: { model: 'k3-256k', effort: 'low', contextWindowTokens: 256000, disableAdaptiveThinking: true, timeoutSeconds: 45 },
+      main: { model: 'k3-256k', effort: 'low', contextWindowTokens: 262144, disableAdaptiveThinking: false },
+      repair: { model: 'k3-256k', effort: 'medium', contextWindowTokens: 262144, disableAdaptiveThinking: false, limit: 100 },
+      design: { model: 'deepseek-v4-flash', effort: 'low', contextWindowTokens: 1048576, disableAdaptiveThinking: true, timeoutSeconds: 45 },
       appIcon: {
-        model: null, effort: 'low', contextWindowTokens: 256000, disableAdaptiveThinking: true,
+        model: null, effort: 'low', contextWindowTokens: 262144, disableAdaptiveThinking: true,
         timeoutSeconds: 180, briefTimeoutSeconds: 180, enabled: true,
       },
     },

@@ -330,7 +330,8 @@ async function main() {
   if (raw.help) { console.log(usage()); return; }
   if (raw.refreshModels) {
     const cache = refreshModelCache(commandOrPath(process.env.CLAUDE_BIN || defaults.claude));
-    console.log(`cached ${cache.models.length} models: ${cache.models.join(', ')}`);
+    const names = Object.keys(cache.models);
+    console.log(`cached ${names.length} models: ${names.join(', ')}`);
     return;
   }
   const requestedActions = Number(Boolean(raw.followUpFile)) + Number(Boolean(raw.rebuild || raw.resume)) + Number(Boolean(raw.previewOnly));

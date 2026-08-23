@@ -2147,9 +2147,29 @@ test('model preflight reads only a local cache and never the network', () => {
   assert.deepEqual(verifyConfiguredModels({}, paths).verified, false);
   assert.match(verifyConfiguredModels({}, paths).notice, /no model cache/);
 
-  writeFileSync(cachePath, JSON.stringify({ schemaVersion: 1, llmEnvMtimeMs, llmEnvSize, fetchedAt: '2026-08-22T00:00:00.000Z', models: served }));
+  const writeCache = (extra = {}) => writeFileSync(cachePath, JSON.stringify({
+    schemaVersion: 2, llmEnvMtimeMs, llmEnvSize, fetchedAt: '2026-08-22T00:00:00.000Z',
+    claudeCodeVersion: '2.1.241', models: Object.fromEntries(served.map((model) => [model, {}])), ...extra,
+  }));
+  writeCache();
   assert.equal(readModelCache(paths).status, 'fresh');
-  assert.equal(verifyConfiguredModels({}, paths).verified, true);
+  const fresh = verifyConfiguredModels({}, paths);
+  assert.equal(fresh.verified, true);
+  assert.deepEqual(fresh.models, [...new Set(served)]);
+
+  // How old a measurement is travels with the answer instead of being enforced.
+  // An age threshold would be a number invented rather than measured, and it
+  // cannot see the thing that actually matters: whether the endpoint changed.
+  assert.equal(readModelCache(paths, Date.parse('2026-08-27T00:00:00.000Z')).measuredDaysAgo, 5);
+  assert.equal(fresh.claudeCodeVersion, '2.1.241');
+
+  // A cache written before the current schema is outdated, not corrupt. It
+  // degrades to unverified with its own reason, so that "refresh it" is
+  // distinguishable from "something is wrong with this file".
+  writeFileSync(cachePath, JSON.stringify({ schemaVersion: 1, llmEnvMtimeMs, llmEnvSize, fetchedAt: '2026-08-22T00:00:00.000Z', models: served }));
+  assert.equal(readModelCache(paths).status, 'outdated');
+  assert.match(verifyConfiguredModels({}, paths).notice, /predates the current schema/);
+  writeCache();
 
   // A model the endpoint does not serve is the error this exists to catch.
   assert.throws(
@@ -2169,6 +2189,8 @@ test('model preflight reads only a local cache and never the network', () => {
   // Corrupt or foreign cache content degrades the same way.
   writeFileSync(cachePath, 'not json');
   assert.equal(readModelCache(paths).status, 'unreadable');
+  writeFileSync(cachePath, JSON.stringify({ schemaVersion: 2, llmEnvMtimeMs, llmEnvSize, models: served }));
+  assert.equal(readModelCache(paths).status, 'unreadable', 'schema 2 keys models by name');
   rmSync(dir, { recursive: true, force: true });
 
   // The budget for starting a run is a few milliseconds and one round trip to

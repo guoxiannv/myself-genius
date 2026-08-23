@@ -32,7 +32,7 @@ import {
   roleOwnedEnvironmentKeys,
   validateExecutionConfig,
 } from '../scripts/execution-policy.mjs';
-import { readModelCache, verifyConfiguredModels } from '../scripts/preflight-models.mjs';
+import { readModelCache, refreshModelCache, verifyConfiguredModels } from '../scripts/preflight-models.mjs';
 import { probeContextWindow, probeEfforts, probeThinking, windowLadder } from '../scripts/model-probes.mjs';
 import { windowFromApiError, windowFromRejection } from '../scripts/endpoint-limits.mjs';
 import { parseArguments as parseTimingArguments } from '../scripts/probe-turn-timing.mjs';
@@ -2960,5 +2960,53 @@ echo '{"content":[{"type":"thinking","thinking":"xx"},{"type":"text","text":"269
   // its own answer, checked by brute force before use, which is what makes a
   // wrong answer a fact about the model rather than about the question.
   assert.equal(measured.wrongAnswers, 8);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a cheap refresh keeps the facts that cost real turns to measure', () => {
+  // setup-harmony-pool.sh runs --refresh-models on every pool build, and the
+  // expensive probes do not run then. Rebuilding each model record from scratch
+  // therefore destroyed the reference-turn and effort rows every time somebody
+  // built a pool -- measurements that cost minutes of real generation.
+  const dir = mkdtempSync(join(tmpdir(), 'expo-fast-carry-'));
+  const llmEnvPath = join(dir, 'llm.env');
+  const cachePath = join(dir, 'models-cache.json');
+  const paths = { llmEnvPath, cachePath };
+  writeFileSync(llmEnvPath, 'export ANTHROPIC_BASE_URL="https://relay.example"\n');
+
+  const configured = executionConfig.roles.main.model;
+  const launcher = join(dir, 'launcher');
+  writeFileSync(launcher, `#!/bin/sh
+case "$1" in
+  --genius-list-models) echo '{"data":[{"id":"${configured}"},{"id":"bystander"}]}' ;;
+  --version) echo '2.1.241 (Claude Code)' ;;
+  *) cat > /dev/null; echo 'HTTP/2 401' >&2; echo '{"error":{"message":"${configured} supports only 256K context."}}' ;;
+esac
+`);
+  chmodSync(launcher, 0o755);
+
+  const expensive = { observedMaxMs: 77400, completedOf: '5/5', measuredAt: '2026-08-23T00:00:00.000Z' };
+  writeFileSync(cachePath, JSON.stringify({
+    schemaVersion: 2, probeSuiteVersion: 1, claudeCodeVersion: '2.1.241',
+    llmEnvMtimeMs: Math.trunc(statSync(llmEnvPath).mtimeMs), llmEnvSize: statSync(llmEnvPath).size,
+    fetchedAt: '2026-08-23T00:00:00.000Z',
+    models: {
+      [configured]: { referenceTurn: expensive, contextWindowTokens: { value: 1, confidence: 'exact' } },
+      bystander: { efforts: { accepted: ['low'], measuredAt: '2026-08-23T00:00:00.000Z' } },
+    },
+  }));
+
+  const refreshed = refreshModelCache(launcher, paths);
+  assert.deepEqual(refreshed.models[configured].referenceTurn, expensive, 'the turn timing survives a cheap refresh');
+  assert.equal(refreshed.models[configured].contextWindowTokens.value, 262144, 'what was re-probed is replaced');
+  assert.deepEqual(refreshed.models.bystander.efforts.accepted, ['low'], 'a model nobody probed keeps what it had');
+
+  // Once llm.env changes the stored facts describe a different endpoint, so
+  // carrying them across would file measurements under the wrong relay -- the
+  // exact quiet disagreement this whole effort is about.
+  writeFileSync(llmEnvPath, 'export ANTHROPIC_BASE_URL="https://a-different-relay.example"\n');
+  const afterMove = refreshModelCache(launcher, paths);
+  assert.equal(afterMove.models[configured].referenceTurn, undefined, 'a different endpoint drops the old facts');
+  assert.equal(afterMove.models.bystander.efforts, undefined);
   rmSync(dir, { recursive: true, force: true });
 });

@@ -142,6 +142,18 @@ export function refreshModelCache(claudeBin, paths = {}, options = {}) {
   if (!Array.isArray(entries)) throw new Error('the endpoint returned no model list');
   const models = entries.map((entry) => String(entry?.id ?? entry ?? '').trim()).filter(Boolean).sort();
   if (!models.length) throw new Error('the endpoint returned an empty model list');
+  // Facts already measured about the same endpoint are carried across, because
+  // this refresh runs on every pool build and the expensive probes do not:
+  // rebuilding each record from scratch quietly destroyed the reference-turn
+  // and effort rows, which cost real turns to produce. Only a fresh cache is
+  // carried -- once llm.env changes, the stored facts describe a different
+  // endpoint -- and a probe suite bump drops them for the same reason, since a
+  // number measured by an older suite is not the same measurement.
+  const previous = readModelCache(paths);
+  const carried = previous.status === 'fresh' && previous.cache.probeSuiteVersion === probeSuiteVersion
+    ? previous.cache.models
+    : {};
+
   // Probed only for the models a run would actually use. Measuring all thirteen
   // would spend most of its time on models no role names, and the expensive
   // probes scale with that list rather than with how useful it is.
@@ -149,10 +161,10 @@ export function refreshModelCache(claudeBin, paths = {}, options = {}) {
   const wanted = options.probe === false
     ? []
     : [...new Set(roleModels().map(([, model]) => model))].filter((model) => models.includes(model));
-  const measured = Object.fromEntries(models.map((model) => [model, {}]));
+  const measured = Object.fromEntries(models.map((model) => [model, { ...(carried[model] || {}) }]));
   for (const model of wanted) {
     notice(`probing ${model}`);
-    measured[model] = probeModel(claudeBin, model, notice);
+    measured[model] = { ...(carried[model] || {}), ...probeModel(claudeBin, model, notice) };
   }
   const cache = {
     schemaVersion: cacheSchemaVersion,

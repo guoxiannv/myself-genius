@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildDesignPrompt, designHtmlFromTrace, designTurnInvocation } from './run-livetest.mjs';
+import { buildDesignPrompt, readDesignTrace, designTurnInvocation } from './run-livetest.mjs';
 import { resolveRole } from './execution-policy.mjs';
 import { assertModelsServed, recordModelFacts } from './preflight-models.mjs';
 
@@ -64,7 +64,7 @@ async function timeOneTurn(role, prompt, capSeconds) {
     child.on('error', (error) => { clearTimeout(timer); clearTimeout(killTimer); settle({ capped, failed: String(error.message) }); });
     child.on('exit', (code) => { clearTimeout(timer); clearTimeout(killTimer); settle({ capped, exitCode: code }); });
   });
-  const { html, usable } = designHtmlFromTrace(trace);
+  const { html, usable } = readDesignTrace(trace);
   return { ms: Date.now() - started, bytes: html.length, complete: usable, capped: outcome.capped, exitCode: outcome.exitCode ?? null };
 }
 

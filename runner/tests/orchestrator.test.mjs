@@ -41,6 +41,7 @@ import { assertDependencyRuntime, installProjectDependencies, pinRuntimeDependen
 import { BUILD_IDENTITY_FILE, HAP_DEVICE_TYPES, buildIdentityModule, buildStampFromJobId, runHapPoolBuild } from '../scripts/hap-build.mjs';
 import {
   designTurnInvocation,
+  readDesignTrace,
   flushClaudeTraceChunk,
   launchHapPreview,
   normalizeClaudeTraceChunk,
@@ -3027,4 +3028,28 @@ esac
   assert.equal(afterMove.models[configured].referenceTurn, undefined, 'a different endpoint drops the old facts');
   assert.equal(afterMove.models.bystander.efforts, undefined);
   rmSync(dir, { recursive: true, force: true });
+});
+
+test('the design turn records the thinking it observed, not the thinking it asked for', () => {
+  // The run used to write `thinking: "disabled"` into run state and into
+  // .expo-fast/experiment.json from a configuration field. Two of those three
+  // writes happened before the turn had even returned, so they could not have
+  // been observations of anything; and the field itself set a variable that
+  // changes nothing. Experiment evidence recorded an event that never happened.
+  const line = (content) => JSON.stringify({ type: 'assistant', message: { content } });
+  const trace = [
+    line([{ type: 'thinking', thinking: 'weighing a layout' }]),
+    line([{ type: 'thinking', thinking: 'still weighing' }, { type: 'text', text: 'not a document' }]),
+    'not json at all',
+  ].join('\n');
+  const read = readDesignTrace(trace);
+  assert.equal(read.thinkingBlocks, 2);
+  assert.equal(read.usable, false, 'a stray text block is not a finished document');
+  assert.equal(readDesignTrace(line([{ type: 'text', text: 'x' }])).thinkingBlocks, 0);
+
+  // The claim must not come back. Nothing we can send decides whether this turn
+  // thinks, so nothing may report that it was told not to.
+  const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
+  assert.doesNotMatch(runner, /thinking=disabled|designThinking|thinking: 'disabled'/);
+  assert.match(runner, /thinkingBlocks arrives from designMetrics/);
 });

@@ -226,14 +226,21 @@ function reportEndpointWindow(row, roleEnvironment, once) {
   );
 }
 
-// What the design turn counts as a finished document, shared with the timing
-// probe so that "complete" means one thing. A probe with its own idea of
-// complete would report a production rate nobody experiences.
-export function designHtmlFromTrace(trace) {
+// What a design turn actually produced, read back from its own trace. Shared
+// with the timing probe so that "complete" means one thing; a probe with its own
+// idea of complete would report a production rate nobody experiences.
+//
+// thinkingBlocks is counted here because it is the one thing about this turn's
+// reasoning we can observe. The run used to record `thinking: "disabled"` from a
+// configuration field, which was an intention rather than an observation, and a
+// wrong one: no knob Claude Code exposes reaches the request body's thinking
+// field. Counting what came back replaces a claim with a measurement.
+export function readDesignTrace(trace) {
   const rows = trace.split(/\r?\n/).filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
-  const html = rows.flatMap((row) => Array.isArray(row.message?.content) ? row.message.content : []).filter((block) => block?.type === 'text' && typeof block.text === 'string').map((block) => normalizeDesignHtml(block.text)).filter((value) => /<html(?:\s|>)/i.test(value) && /<\/html>\s*$/i.test(value)).sort((a, b) => b.length - a.length)[0] || '';
+  const blocks = rows.flatMap((row) => Array.isArray(row.message?.content) ? row.message.content : []);
+  const html = blocks.filter((block) => block?.type === 'text' && typeof block.text === 'string').map((block) => normalizeDesignHtml(block.text)).filter((value) => /<html(?:\s|>)/i.test(value) && /<\/html>\s*$/i.test(value)).sort((a, b) => b.length - a.length)[0] || '';
   const usable = Boolean(usableDesignHtmlContent(html));
-  return { html: usable ? html : '', usable };
+  return { html: usable ? html : '', usable, thinkingBlocks: blocks.filter((block) => block?.type === 'thinking').length };
 }
 
 // Everything that decides what the design turn asks for, shared with the
@@ -356,8 +363,8 @@ async function designTurn(prompt, timeoutSeconds, role) {
     if (!line.includes('api_error')) continue;
     try { reportEndpointWindow(JSON.parse(line), roleEnvironment, refusal); } catch { /* not a stream record */ }
   }
-  const { html, usable } = designHtmlFromTrace(trace);
-  return { ms: Date.now() - started, status: usable ? 'ready' : 'fallback', timedOut: outcome.timedOut, exitCode: outcome.exitCode, html, trace };
+  const { html, usable, thinkingBlocks } = readDesignTrace(trace);
+  return { ms: Date.now() - started, status: usable ? 'ready' : 'fallback', timedOut: outcome.timedOut, exitCode: outcome.exitCode, thinkingBlocks, html, trace };
 }
 
 async function claudeTurn(project, trace, prompt, sessionId, resume = false, timeoutMinutes = 0, acceptDeadline = false, effort = executionDefaults.effort, model = executionDefaults.model, selfVerify = false, roleEnvironment = {}) {
@@ -950,7 +957,7 @@ async function main() {
   let appIconAbortController = null;
   let appIconModel = '';
   if (isInitial) {
-    progress(`HTML design started immediately from prompt · model=${designModel} · effort=${designRole.effort} · thinking=disabled · hard-limit=${designTimeoutSeconds}s`);
+    progress(`HTML design started immediately from prompt · model=${designModel} · effort=${designRole.effort} · hard-limit=${designTimeoutSeconds}s`);
     const designPromise = designTurn(buildDesignPrompt(requestText), designTimeoutSeconds, designRole)
       .catch((error) => ({ status: 'fallback', timedOut: false, ms: 0, html: '', trace: '', error: String(error?.message || error).slice(0, 1000) }));
     progress('parallel preparation · cold-start template/capability catalog + HTML design');
@@ -962,13 +969,16 @@ async function main() {
     writeJson(join(project, '.expo-fast/experiment.json'), experiment);
     metrics.experiment = experiment;
     progress('parallel preparation · dependency seed + in-flight HTML design');
-    setRunState('generating_code', 'visual_design', { ...stateContext, designModel, designEffort: designRole.effort, designThinking: 'disabled', designTimeoutSeconds });
+    setRunState('generating_code', 'visual_design', { ...stateContext, designModel, designEffort: designRole.effort, designTimeoutSeconds });
     const seedPromise = runAsync(node22, [dependencies, 'seed', project]);
     const [designResult, seedResult] = await Promise.all([designPromise, seedPromise]);
     const { html: designHtml, trace: designTrace, ...designMetrics } = designResult;
     writeFileSync(join(project, '.expo-fast/design-trace.jsonl'), designTrace || '');
     if (designHtml) writeFileSync(join(project, '.expo-fast/design.html'), designHtml);
-    metrics.design = { ...designMetrics, path: designHtml ? '.expo-fast/design.html' : '', model: designModel, effort: designRole.effort, thinking: 'disabled', timeoutSeconds: designTimeoutSeconds };
+    // thinkingBlocks arrives from designMetrics, counted in the reply. Nothing
+    // here asserts what the turn was asked to do with thinking, because nothing
+    // we can send decides it.
+    metrics.design = { ...designMetrics, path: designHtml ? '.expo-fast/design.html' : '', model: designModel, effort: designRole.effort, timeoutSeconds: designTimeoutSeconds };
     metrics.stages.designMs = metrics.design.ms;
     metrics.experiment.design = { ...metrics.design, ...(metrics.design.path ? { sha256: sha256(readFileSync(join(project, metrics.design.path), 'utf8')) } : {}) };
     writeJson(join(project, '.expo-fast/experiment.json'), metrics.experiment);

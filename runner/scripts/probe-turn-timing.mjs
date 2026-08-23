@@ -4,7 +4,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDesignPrompt, designHtmlFromTrace, designTurnInvocation } from './run-livetest.mjs';
 import { resolveRole } from './execution-policy.mjs';
-import { readModelCache, recordModelFacts } from './preflight-models.mjs';
+import { assertModelsServed, recordModelFacts } from './preflight-models.mjs';
 
 // How long a reference turn takes, measured the only way it can be: by running
 // it. Deliberately separate from --refresh-models, which is called by
@@ -76,20 +76,7 @@ async function main() {
   const prompt = buildDesignPrompt(request);
   const reference = options.request.replace(/^.*\//, '').replace(/\.md$/, '');
 
-  // Checked before a single turn is spent, not when the result is filed. A name
-  // the endpoint does not serve does not fail fast on its own -- the turn hangs
-  // -- so discovering it afterwards would cost the whole run and report nothing.
-  const cache = readModelCache();
-  if (cache.status !== 'fresh') {
-    throw new Error(`the model cache is ${cache.status}, so the models cannot be checked before spending turns · ./start-livetest.sh --refresh-models`);
-  }
-  const unserved = options.models.filter((model) => !cache.cache.models[model]);
-  if (unserved.length) {
-    throw new Error(
-      `this endpoint does not serve: ${unserved.join(', ')}\n`
-      + `  It serves: ${Object.keys(cache.cache.models).join(', ')}`,
-    );
-  }
+  assertModelsServed(options.models);
 
   for (const model of options.models) {
     // The role is the design role with this model substituted, so the turn is

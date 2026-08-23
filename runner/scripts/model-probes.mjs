@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { windowFromRejection } from './endpoint-limits.mjs';
 
 // Offline probes. Nothing here may run on a run path: every function below
 // spends a network round trip, and several spend tokens.
@@ -35,37 +36,19 @@ export function completion(claudeBin, body, timeoutSeconds = 120) {
 const filler = 'lorem ipsum dolor sit amet consectetur ';
 const tokensPerRepeat = 7;
 
-// Both forms below were observed on the configured endpoint:
-//
-//   deepseek-v4-flash  400  This model's maximum context length is 1048576
-//                           tokens. However, you requested 1624100 tokens
-//                           (1624084 in the messages, 16 in the completion)
-//   k3-256k            401  k3-256k supports only 256K context
-//
-// They are not equally precise, and the difference matters more than it looks.
-// The first states the limit; the second states a magnitude, and "256K" does
-// not say whether K is 1000 or 1024. Reading it as 256000 is exactly the value
-// this repository shipped and exactly the value that was wrong, so a derived
-// number is labelled as derived rather than quietly promoted. Anything neither
-// pattern matches is recorded as unmeasured: guessing here would reproduce the
-// failure the probes exist to prevent.
-export function windowFromRejection(message) {
-  const exact = message.match(/maximum context length is (\d+)/i);
-  if (exact) return { value: Number(exact[1]), confidence: 'exact' };
-  const magnitude = message.match(/(\d+)\s*K\b[^.]*context/i);
-  if (magnitude) return { value: Number(magnitude[1]) * 1024, confidence: 'derived' };
-  return null;
-}
-
 // A rejected request is not billed, so the probe starts above every window it
 // expects to meet and only grows if that was not enough. An accepted rung is
 // the expensive case and is reported as such by the caller; it is not wasted,
 // because it proves the window is at least that large.
-const windowLadder = [1_600_000, 6_400_000];
+export const windowLadder = [1_600_000, 6_400_000];
 
-export function probeContextWindow(claudeBin, model, notice = () => {}) {
+// The ladder is a parameter so a test can exercise the escalation without
+// pushing tens of megabytes through a pipe for it; the sizes themselves are
+// pinned separately. What the tests need to hold is the behaviour -- grow on
+// acceptance, announce the cost, stop with a lower bound -- not the volume.
+export function probeContextWindow(claudeBin, model, notice = () => {}, ladder = windowLadder) {
   let acceptedTokens = 0;
-  for (const [rung, target] of windowLadder.entries()) {
+  for (const [rung, target] of ladder.entries()) {
     const reply = completion(claudeBin, {
       model,
       max_tokens: 16,
@@ -82,7 +65,7 @@ export function probeContextWindow(claudeBin, model, notice = () => {}) {
       return { status: 'unmeasured', evidence: `unexpected reply: HTTP ${reply.status} ${reply.body.slice(0, 200)}` };
     }
     acceptedTokens = target;
-    const next = windowLadder[rung + 1];
+    const next = ladder[rung + 1];
     notice(`${model}: accepted about ${target.toLocaleString('en-US')} tokens, which is billed.`
       + (next ? ` Growing the probe to ${next.toLocaleString('en-US')}.` : ' No larger probe to try.'));
   }
@@ -138,5 +121,112 @@ export function probeThinking(claudeBin, model) {
       confidence: 'exact',
       evidence: `no thinking field sent, reply carried ${seen(before)}`,
     },
+  };
+}
+
+// A probe stimulus has to be hard enough for the difference it looks for to
+// exist. Measured both ways: asked a one-line riddle, low/medium/high/max all
+// land within noise of one another, and the honest-looking verdict "no
+// observable difference" is simply wrong -- the task never needed more
+// thinking. Asked to derive a recurrence, low < medium < high held in 3 of 3
+// variants, odds of about 1 in 200 by chance.
+//
+// So "no difference" has two causes, a dead knob and a weak stimulus, and only
+// the second is ours. A probe that cannot tell them apart reports our own
+// blind spot as a property of the endpoint, which is the failure this suite
+// exists to prevent, pointed the other way.
+const effortLevels = ['low', 'medium', 'high', 'max'];
+
+// Variants defeat any caching between levels while keeping the task identical
+// in kind, so levels are compared within a variant rather than across runs.
+// Each answer was checked by brute force before use (n=12 gives 466 by both
+// the recurrence and enumeration), which makes a wrong answer a fact about the
+// model rather than about the question.
+const effortVariants = [
+  { n: 30, answer: '2692538' },
+  { n: 34, answer: '18454930' },
+  { n: 38, answer: '126491972' },
+];
+function effortTask(n) {
+  return `How many binary strings of length ${n} contain no three consecutive identical characters? `
+    + 'Derive the recurrence, then compute the exact integer. End your reply with the answer alone on the final line.';
+}
+
+// Not every model reports thinking_tokens -- one of the two configured models
+// returns the block without the count -- so the size falls back to the text
+// itself, and which one was used travels with the number.
+function thinkingSize(reply) {
+  const counted = reply.json?.usage?.output_tokens_details?.thinking_tokens;
+  if (Number.isFinite(counted)) return { size: counted, unit: 'thinking tokens' };
+  const blocks = Array.isArray(reply.json?.content) ? reply.json.content : [];
+  const written = blocks.filter((block) => block?.type === 'thinking').map((block) => String(block.thinking || '')).join('');
+  return { size: written.length, unit: 'thinking characters' };
+}
+
+function answerText(reply) {
+  const blocks = Array.isArray(reply.json?.content) ? reply.json.content : [];
+  return blocks.filter((block) => block?.type === 'text').map((block) => String(block.text || '')).join('');
+}
+
+// Counterbalanced, because a fixed order cannot be told apart from drift. Both
+// earlier hand-runs sent low, medium, high, max in that order every time; if the
+// endpoint speeds up or slows down over the couple of minutes a variant takes,
+// that alone manufactures a monotonic-looking result. One run came out ordered
+// in 3 of 3 variants and the next in 0 of 3, which is what a confound looks
+// like from the inside. Rotating the order per variant means a drift in either
+// direction can no longer produce a consistent ordering.
+function levelOrder(index) {
+  return effortLevels.map((_, offset) => effortLevels[(offset + index) % effortLevels.length]);
+}
+
+export function probeEfforts(claudeBin, model, capSeconds = 300, notice = () => {}) {
+  const measured = [];
+  for (const [index, variant] of effortVariants.entries()) {
+    for (const level of levelOrder(index)) {
+      const reply = completion(claudeBin, {
+        model,
+        max_tokens: 8192,
+        output_config: { effort: level },
+        messages: [{ role: 'user', content: effortTask(variant.n) }],
+      }, capSeconds);
+      if (reply.failed) return { status: 'unmeasured', evidence: `could not reach the endpoint: ${reply.failed}` };
+      if (reply.status !== 200) {
+        measured.push({ n: variant.n, level, rejected: reply.json?.error?.message?.slice(0, 80) || `HTTP ${reply.status}` });
+        notice(`${model} ${level} n=${variant.n}: rejected`);
+        continue;
+      }
+      const { size, unit } = thinkingSize(reply);
+      const right = answerText(reply).replace(/,/g, '').includes(variant.answer);
+      measured.push({ n: variant.n, level, size, unit, right });
+      notice(`${model} ${level} n=${variant.n}: ${size} ${unit}${right ? '' : ', wrong answer'}`);
+    }
+  }
+
+  const rejected = measured.filter((row) => row.rejected);
+  const accepted = effortLevels.filter((level) => measured.some((row) => row.level === level && !row.rejected));
+
+  // Judged on low < medium < high only. max is left out of the verdict because
+  // it did not hold: in one of three variants it produced less thinking than
+  // low. Reporting all four as an ordered scale would overstate what the
+  // numbers show.
+  const rising = effortVariants.filter((variant) => {
+    const at = (level) => measured.find((row) => row.n === variant.n && row.level === level && !row.rejected)?.size;
+    const [low, medium, high] = ['low', 'medium', 'high'].map(at);
+    return [low, medium, high].every(Number.isFinite) && low < medium && medium < high;
+  }).length;
+
+  const unit = measured.find((row) => row.unit)?.unit || 'thinking';
+  const order = effortVariants.map((_, index) => levelOrder(index)[0]).join('/');
+  const shown = effortLevels
+    .map((level) => `${level} ${measured.filter((row) => row.level === level).map((row) => row.rejected ? 'rejected' : row.size).join('/')}`)
+    .join(', ');
+  return {
+    accepted,
+    orderedThroughHigh: rising === effortVariants.length,
+    variantsRising: `${rising}/${effortVariants.length}`,
+    wrongAnswers: measured.filter((row) => row.right === false).length,
+    confidence: 'exact',
+    evidence: `${unit} over ${effortVariants.length} paired variants, each starting at a different level (${order}): ${shown}`
+      + (rejected.length ? `; rejected: ${rejected.map((row) => `${row.level} (${row.rejected})`).join(', ')}` : ''),
   };
 }

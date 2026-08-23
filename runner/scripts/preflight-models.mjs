@@ -239,3 +239,21 @@ export function recordModelFacts(model, facts, paths = {}) {
   writeFileSync(cacheFile, `${JSON.stringify(cache, null, 2)}\n`);
   return cache.models[model];
 }
+
+// Checked before an expensive probe spends anything. A model this endpoint does
+// not serve does not fail fast on its own -- the turn hangs -- so discovering it
+// from the write at the end would cost the whole run and measure nothing.
+export function assertModelsServed(models, paths = {}) {
+  const current = readModelCache(paths);
+  if (current.status !== 'fresh') {
+    throw new Error(`the model cache is ${current.status}, so the models cannot be checked before spending turns · ./start-livetest.sh --refresh-models`);
+  }
+  const unserved = models.filter((model) => !current.cache.models[model]);
+  if (unserved.length) {
+    throw new Error(
+      `this endpoint does not serve: ${unserved.join(', ')}\n`
+      + `  It serves: ${Object.keys(current.cache.models).join(', ')}`,
+    );
+  }
+  return current.cache;
+}

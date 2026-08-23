@@ -33,7 +33,8 @@ import {
   validateExecutionConfig,
 } from '../scripts/execution-policy.mjs';
 import { readModelCache, verifyConfiguredModels } from '../scripts/preflight-models.mjs';
-import { probeContextWindow, probeThinking, windowFromRejection } from '../scripts/model-probes.mjs';
+import { probeContextWindow, probeEfforts, probeThinking, windowLadder } from '../scripts/model-probes.mjs';
+import { windowFromRejection } from '../scripts/endpoint-limits.mjs';
 import { parseArguments as parseTimingArguments } from '../scripts/probe-turn-timing.mjs';
 import { repairArtifactName } from '../scripts/repair-artifact.mjs';
 import { assertDependencyRuntime, installProjectDependencies, pinRuntimeDependencies, stageHarmonyCli } from '../scripts/dependencies.mjs';
@@ -2791,7 +2792,7 @@ test('model probes rest on an observable difference, never on a request being ac
   const rejects = fakeEndpoint(`cat > /dev/null
 echo 'HTTP/2 401' >&2
 echo '{"error":{"message":"k3-256k supports only 256K context."}}'`);
-  assert.deepEqual(probeContextWindow(rejects, 'k3-256k'), {
+  assert.deepEqual(probeContextWindow(rejects, 'k3-256k', () => {}, [700]), {
     value: 262144,
     confidence: 'derived',
     evidence: 'k3-256k supports only 256K context.',
@@ -2801,8 +2802,8 @@ echo '{"error":{"message":"k3-256k supports only 256K context."}}'`);
   const silent = fakeEndpoint(`cat > /dev/null
 echo 'HTTP/2 429' >&2
 echo '{"error":{"message":"slow down"}}'`);
-  assert.match(probeContextWindow(silent, 'k3-256k').evidence, /rejected without naming a window: slow down/);
-  assert.equal(probeContextWindow(silent, 'k3-256k').status, 'unmeasured');
+  assert.match(probeContextWindow(silent, 'k3-256k', () => {}, [700]).evidence, /rejected without naming a window: slow down/);
+  assert.equal(probeContextWindow(silent, 'k3-256k', () => {}, [700]).status, 'unmeasured');
 
   // The thinking verdict comes from the reply, not from the field being
   // accepted: a relay that hid the block while the model still thought would
@@ -2837,12 +2838,15 @@ echo '{"content":[{"type":"thinking","thinking":"x"}],"usage":{"output_tokens_de
 echo 'HTTP/2 200' >&2
 echo '{"content":[{"type":"text","text":"ok"}]}'`);
   const spoken = [];
-  const huge = probeContextWindow(acceptsEverything, 'roomy', (line) => spoken.push(line));
+  const huge = probeContextWindow(acceptsEverything, 'roomy', (line) => spoken.push(line), [700, 2800]);
   assert.equal(huge.status, 'unmeasured');
-  assert.equal(huge.atLeastTokens, 6_400_000);
+  assert.equal(huge.atLeastTokens, 2800);
   assert.equal(spoken.length, 2, 'every accepted rung is announced because it costs money');
-  assert.match(spoken[0], /which is billed\. Growing the probe to 6,400,000\./);
+  assert.match(spoken[0], /which is billed\. Growing the probe to 2,800\./);
   assert.match(spoken[1], /No larger probe to try\./);
+  // The real ladder starts above both configured models so the first request is
+  // refused, which is the rung that costs nothing.
+  assert.deepEqual(windowLadder, [1_600_000, 6_400_000]);
 
   // An endpoint that cannot answer leaves the fact unmeasured; it never fails
   // the refresh, because the model names are what this cache has always been
@@ -2872,9 +2876,50 @@ test('the timing probe never picks which models to spend turns on', () => {
   // A model this endpoint does not serve has to be caught before the first
   // turn, not when the result is filed: such a turn does not fail fast, it
   // hangs, so finding out afterwards costs the whole run and measures nothing.
-  const source = readFileSync(join(root, 'scripts/probe-turn-timing.mjs'), 'utf8');
-  assert.ok(
-    source.indexOf('does not serve') < source.indexOf('for (let run = 1'),
-    'the served-model check runs before any sample',
-  );
+  for (const file of ['scripts/probe-turn-timing.mjs', 'scripts/probe-effort-scale.mjs']) {
+    const source = readFileSync(join(root, file), 'utf8');
+    assert.ok(
+      source.indexOf('assertModelsServed(') < source.indexOf('for (const model of'),
+      `${file} checks the models before spending anything`,
+    );
+  }
+});
+
+test('the effort probe counterbalances its levels so drift cannot fake an ordering', () => {
+  // Two hand-runs sent low, medium, high, max in that fixed order. One came out
+  // ordered in 3 of 3 variants and the next in 0 of 3. A fixed order cannot be
+  // told apart from the endpoint drifting over the couple of minutes a variant
+  // takes -- drift alone manufactures monotonicity -- so the level a variant
+  // starts at rotates.
+  const dir = mkdtempSync(join(tmpdir(), 'expo-fast-effort-'));
+  const asked = join(dir, 'asked.txt');
+  const launcher = join(dir, 'launcher');
+  writeFileSync(launcher, `#!/bin/sh
+body=$(cat)
+echo "$body" | sed -n 's/.*"effort":"\\([a-z]*\\)".*/\\1/p' >> ${asked}
+echo 'HTTP/2 200' >&2
+echo '{"content":[{"type":"thinking","thinking":"xx"},{"type":"text","text":"2692538"}],"usage":{"output_tokens_details":{"thinking_tokens":11}}}'
+`);
+  chmodSync(launcher, 0o755);
+
+  const measured = probeEfforts(launcher, 'any-model', 5);
+  const order = readFileSync(asked, 'utf8').trim().split('\n');
+  assert.equal(order.length, 12, 'four levels across three variants');
+  const starts = [order[0], order[4], order[8]];
+  assert.equal(new Set(starts).size, 3, 'each variant starts at a different level');
+  for (const slice of [order.slice(0, 4), order.slice(4, 8), order.slice(8, 12)]) {
+    assert.equal(new Set(slice).size, 4, 'every variant still covers all four levels');
+  }
+
+  // The fake replies identically every time, so nothing separates the levels
+  // and the probe must say so rather than report an ordering.
+  assert.equal(measured.orderedThroughHigh, false);
+  assert.equal(measured.variantsRising, '0/3');
+  assert.deepEqual(measured.accepted, ['low', 'medium', 'high', 'max']);
+  // The fake answers every variant with the one for n=30, so the eight replies
+  // belonging to the other two variants are counted wrong. Each variant carries
+  // its own answer, checked by brute force before use, which is what makes a
+  // wrong answer a fact about the model rather than about the question.
+  assert.equal(measured.wrongAnswers, 8);
+  rmSync(dir, { recursive: true, force: true });
 });

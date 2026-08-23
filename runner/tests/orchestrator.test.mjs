@@ -2182,7 +2182,24 @@ test('model preflight reads only a local cache and never the network', () => {
   assert.ok(readPath.includes('export function verifyConfiguredModels'), 'read path located');
   assert.doesNotMatch(readPath, /fetch\(|https?:\/\/|spawnSync|execSync|curl/);
   assert.match(preflight, /spawnSync\(claudeBin, \['--genius-list-models'\]/);
-  assert.match(readFileSync(join(root, '.local/claude-isolated'), 'utf8'), /--genius-list-models/);
+  const launcher = readFileSync(join(root, '.local/claude-isolated'), 'utf8');
+  assert.match(launcher, /--genius-list-models/);
+
+  // Raw completion mode exists so the offline probes can measure what this
+  // endpoint does with a field rather than trust what the field is called, and
+  // its one non-obvious property is that it must not use curl -f. A rejected
+  // request is the measurement: an over-long request comes back as HTTP 401 on
+  // one model and 400 on another, and the real context limit is in the error
+  // body that -f would discard. It stays out of band for the same reason the
+  // model list does, so no run path may reach it.
+  const completionMode = launcher.match(/--genius-completion" \]; then\n([\s\S]*?)\nfi\n/)?.[1];
+  assert.ok(completionMode, 'raw completion mode located');
+  assert.match(completionMode, /\/v1\/messages/);
+  assert.match(completionMode, /--data-binary @-/);
+  assert.doesNotMatch(completionMode, /curl -\S*f/);
+  for (const file of ['scripts/run-livetest.mjs', 'scripts/start-livetest.mjs', 'scripts/app-icon.mjs']) {
+    assert.doesNotMatch(readFileSync(join(root, file), 'utf8'), /--genius-completion/, file);
+  }
 });
 
 test('.env.example documents exactly the machine settings the runner reads', () => {

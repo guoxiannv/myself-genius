@@ -18,7 +18,7 @@
 - `direct`、`brief`、`repair` 三套 candidate 已合并为一套执行策略，`config/candidates.json` 已由 `config/execution.json` 取代。
 - 启动入口不再接受 `--candidate` 或根据请求复杂度自动分流。主回合与 repair 回合的 model/effort 均可由外部参数传入，配置文件只提供默认值。
 - 确定性门禁失败后在同一 session 继续 repair，单次运行最多 100 轮；达到上限、模型/进程失败、每轮 `--repair-timeout`、用户停止或系统限制均会终止。
-- 当前模型 prompt 保持不变，仍由 `scripts/run-livetest.mjs` 和复制到生成工程的 `AGENTS.md` 共同构成。
+- 当前模型 prompt 保持不变，仍由 `scripts/run-livetest.mjs` 和复制到生成工程的 `CONTRACT.md` 共同构成。
 - 首轮完成后可用 `--follow-up-file` 续跑原 Claude session；`follow-up-control.sh` 为 Remote UI 提供持久化 FIFO、编辑、删除和中断。worker 在 Agent 与最终 gate 后立即结束，不等待设备租约；Remote UI 再发布最新 Bundle。
 - follow-up/repair Agent 可调用固定工程范围的 `check`、`build`，具体实现与外层最终门禁共用 `scripts/verification.mjs`；不存在任意 shell 工具。
 - `--rebuild`、`--preview-only` 已从用户增量回合中拆开。follow-up 默认不自动重建 HAP，避免拖慢日常修改；请求最新手机安装包时再走 HAP/签名。`--rebuild --hap true` 强制 SDK pool 发布新 HAP 和新结果元数据，不复用旧 ready HAP。
@@ -90,7 +90,7 @@ Bash；identity gate 拒绝可见 runtime error overlay；launch 对同 manifest
 
 建议下一位 Agent 按以下顺序阅读：
 
-1. `AGENTS.md`
+1. `CONTRACT.md`
 2. 本文件 `HANDOFF.md`
 3. `EXPERIMENT-REPORT.md` 的“独立 cold-start-v1 复现实验（有效结论）”章节
 4. `experiments/cold-start-v1/rubric.json`

@@ -1,6 +1,6 @@
 # Genius 仓库开发约定
 
-本文件约束 Genius 仓库自身的开发。生成的产品工程由 `runner/AGENTS.md` 单独约束，
+本文件约束 Genius 仓库自身的开发。生成的产品工程由 `runner/CONTRACT.md` 单独约束，
 两者互不适用。
 
 ## 配置归属
@@ -29,7 +29,10 @@
 - 产品约束经 `--append-system-prompt-file` 注入 system prompt，不依赖 CLAUDE.md 自动
   加载，也不依赖模型自觉去读。三个 spawn 均设 `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`：
   生成工程位于仓库内，否则会继承到每一级祖先目录的 CLAUDE.md。
-- `runner/AGENTS.md` 会被逐字复制进每个生成工程，是产品提示词。**不要把协作规范写进去。**
+- `runner/CONTRACT.md` 会被逐字复制进每个生成工程（落地名同为 `CONTRACT.md`），是产品提示词。
+  **不要把协作规范写进去。** 它刻意不叫 CLAUDE.md 或 AGENTS.md：这两个名字会被 Claude Code
+  自动加载，在 `runner/` 下开发时就会把产品约束误当成仓库约束。`runner/` 因此不再有 CLAUDE.md，
+  生成工程也不再写入 CLAUDE.md——产品契约只经 `--append-system-prompt-file` 注入。
 - 除非任务明确要求调整生成行为，否则不要顺带修改模型 prompt。0→1 提示词由
   `tests/orchestrator.test.mjs` 的 SHA-256 断言保护；确需修改时更新哈希并在提交信息里
   说明原因。

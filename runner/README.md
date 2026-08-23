@@ -2,7 +2,7 @@
 
 `runner/` 是 Genius 仓库中的 Expo Harmony Go 冷启动生成编排。它从一份产品需求创建全新 Expo 工程，让模型实现产品，随后执行依赖解析、类型检查、源码与产物审计，并通过预装的 Harmony Go 壳启动验证。固定 SDK 池构建 unsigned HAP 仅作为显式启用的兼容能力。
 
-当前运行时不再依赖 `SKILL.md`。生成模型收到的产品约束由 `scripts/run-livetest.mjs` 与 `AGENTS.md` 组成；技术模板、运行合同和能力解析均是 runner 自身资源。
+当前运行时不再依赖 `SKILL.md`。生成模型收到的产品约束由 `scripts/run-livetest.mjs` 与 `CONTRACT.md` 组成；技术模板、运行合同和能力解析均是 runner 自身资源。
 
 ## 快速开始
 

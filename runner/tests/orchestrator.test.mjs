@@ -1930,7 +1930,7 @@ test('initial 0-to-1 product prompt remains byte-stable while follow-up tools ev
   writeFileSync(join(project, '.expo-fast/request.md'), readFileSync(join(root, 'prompts/learning-goals.md')));
   const digest = createHash('sha256').update(buildPrompt(project)).digest('hex');
   // Updated deliberately: the 0-to-1 prompt no longer tells the model to read
-  // AGENTS.md, because its contents now arrive as system prompt. Any other
+  // CONTRACT.md, because its contents now arrive as system prompt. Any other
   // change to this digest is unintended.
   assert.equal(digest, '5306d868709930160898f12ecbeaebc190266571bc0c622cd300758c547fa272');
   rmSync(project, { recursive: true, force: true });
@@ -2099,10 +2099,13 @@ test('the product contract is injected, not inherited from a CLAUDE.md walk', ()
   const icon = readFileSync(join(root, 'scripts/app-icon.mjs'), 'utf8');
 
   // The contract reaches the implementation and repair turns as system prompt.
-  // Relying on the model to read AGENTS.md, or on Claude Code loading
-  // project/CLAUDE.md, leaves it optional; passing the file does not.
-  assert.match(runner, /'--append-system-prompt-file', join\(project, 'AGENTS\.md'\)/);
-  assert.match(runner, /writeFileSync\(join\(project, 'AGENTS\.md'\)/, 'the injected file is still written');
+  // Relying on the model to read the contract, or on Claude Code loading a
+  // project CLAUDE.md, leaves it optional; passing the file does not. The
+  // contract is deliberately not named CLAUDE.md or AGENTS.md so that no
+  // Claude Code session auto-loads it as its own working instructions.
+  assert.match(runner, /'--append-system-prompt-file', join\(project, 'CONTRACT\.md'\)/);
+  assert.match(runner, /writeFileSync\(join\(project, 'CONTRACT\.md'\)/, 'the injected file is still written');
+  assert.doesNotMatch(runner, /join\(project, 'CLAUDE\.md'\)/, 'the generated project carries no CLAUDE.md of its own');
 
   // Every Claude Code spawn stops walking up for CLAUDE.md. Generated projects
   // live under the repository, so that walk reached every ancestor's file.
@@ -2118,8 +2121,8 @@ test('the product contract is injected, not inherited from a CLAUDE.md walk', ()
   const designSpawn = runner.slice(runner.indexOf('async function designTurn'), runner.indexOf('async function claudeTurn'));
   assert.doesNotMatch(designSpawn, /append-system-prompt-file/);
   assert.ok(
-    runner.indexOf('const designPromise = designTurn') < runner.indexOf("writeFileSync(join(project, 'AGENTS.md')"),
-    'design starts before AGENTS.md is written',
+    runner.indexOf('const designPromise = designTurn') < runner.indexOf("writeFileSync(join(project, 'CONTRACT.md')"),
+    'design starts before CONTRACT.md is written',
   );
   assert.doesNotMatch(icon, /append-system-prompt-file/);
 });

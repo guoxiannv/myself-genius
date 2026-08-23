@@ -310,7 +310,7 @@ async function designTurn(prompt, timeoutSeconds, role) {
 
 async function claudeTurn(project, trace, prompt, sessionId, resume = false, timeoutMinutes = 0, acceptDeadline = false, effort = executionDefaults.effort, model = executionDefaults.model, selfVerify = false, roleEnvironment = {}) {
   const allowedTools = [
-    'Read(./AGENTS.md)', 'Read(./package.json)', 'Read(./app.json)', 'Read(./index.js)', 'Read(./tsconfig.json)', 'Read(./App.tsx)', 'Read(./src/**)',
+    'Read(./CONTRACT.md)', 'Read(./package.json)', 'Read(./app.json)', 'Read(./index.js)', 'Read(./tsconfig.json)', 'Read(./App.tsx)', 'Read(./src/**)',
     'Read(./.expo-fast/design.html)',
     'Read(./.expo-fast/model-capability-index.txt)', 'Read(./.expo-fast/sdk-fingerprint.json)',
     'Read(./.expo-fast/verification-errors.txt)', 'Read(./.expo-fast/capability-selection.json)',
@@ -329,11 +329,12 @@ async function claudeTurn(project, trace, prompt, sessionId, resume = false, tim
   const runTurn = (turnSessionId, turnResume, turnPrompt, appendTrace = false) => {
     const sessionArgs = turnResume ? ['--resume', turnSessionId] : ['--session-id', turnSessionId];
     // The product contract reaches the model as system prompt rather than as
-    // memory. Claude Code loaded project/CLAUDE.md, which imports AGENTS.md, only
-    // because it walks up from the working directory; that also pulled in every
-    // CLAUDE.md above the generated project. Passing the file explicitly makes the
-    // contract independent of both that walk and of the model choosing to read it.
-    const args = ['-p', '--permission-mode', 'dontAsk', '--model', model, '--effort', effort, '--append-system-prompt-file', join(project, 'AGENTS.md'), '--mcp-config', mcpConfig, '--strict-mcp-config', '--tools', tools, '--allowedTools', allowedTools.join(','), '--output-format', 'stream-json', '--verbose', ...sessionArgs, turnPrompt];
+    // memory. A project CLAUDE.md would be loaded only because Claude Code walks
+    // up from the working directory, and that walk also pulled in every CLAUDE.md
+    // above the generated project. The contract is named CONTRACT.md so no walk
+    // can claim it, and passing the file explicitly makes it independent of both
+    // that walk and of the model choosing to read it.
+    const args = ['-p', '--permission-mode', 'dontAsk', '--model', model, '--effort', effort, '--append-system-prompt-file', join(project, 'CONTRACT.md'), '--mcp-config', mcpConfig, '--strict-mcp-config', '--tools', tools, '--allowedTools', allowedTools.join(','), '--output-format', 'stream-json', '--verbose', ...sessionArgs, turnPrompt];
     const started = Date.now();
     return new Promise((ok, fail) => {
       const child = spawn(claude, args, { cwd: project, env: { ...process.env, ...roleEnvironment, CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_ATTRIBUTION_HEADER: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -901,7 +902,7 @@ async function main() {
     progress('parallel preparation · cold-start template/capability catalog + HTML design');
     const prepareResult = await runAsync(node22, [helper, 'prepare', project, request]);
     metrics.stages.prepareMs = prepareResult.ms;
-    setRunState('generating_code', 'preparing', stateContext, { reset: true }); writeFileSync(join(project, 'AGENTS.md'), readFileSync(join(root, 'AGENTS.md'))); writeFileSync(join(project, 'CLAUDE.md'), '@AGENTS.md\n');
+    setRunState('generating_code', 'preparing', stateContext, { reset: true }); writeFileSync(join(project, 'CONTRACT.md'), readFileSync(join(root, 'CONTRACT.md')));
     const modelCapabilityIndex = writeModelCapabilityIndex(project, requestText);
     const experiment = { schemaVersion: 1, protocol: 'cold-start-v1', coldStart: true, sourceInheritance: false, requestSha256: sha256(requestText), templateAssetSha256: digestProductSource(join(root, 'templates/expo-harmony')), templateProductSha256: digestProductSource(project), capabilityCatalogSha256: modelCapabilityIndex.sourceSha256, modelCapabilityIndexSha256: modelCapabilityIndex.sha256, modelCapabilityIndexBytes: modelCapabilityIndex.bytes, requiredCapabilities: modelCapabilityIndex.requiredPackages, preparedAt: new Date().toISOString() };
     writeJson(join(project, '.expo-fast/experiment.json'), experiment);

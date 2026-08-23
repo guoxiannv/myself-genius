@@ -11,10 +11,10 @@ from unittest.mock import patch
 from urllib.parse import urlparse
 
 from scan_install.expo_gateway import ExpoPublicGateway
-from tests.test_expo_public_gateway import write_harmony_go_export
+from tests.python.test_expo_public_gateway import write_harmony_go_export
 
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "app.py"
+MODULE_PATH = Path(__file__).resolve().parents[2] / "app.py"
 SPEC = importlib.util.spec_from_file_location("remote_ui_expo_app", MODULE_PATH)
 remote_ui_app = importlib.util.module_from_spec(SPEC)
 assert SPEC is not None and SPEC.loader is not None

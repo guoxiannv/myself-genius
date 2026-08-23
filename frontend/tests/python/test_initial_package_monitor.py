@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "app.py"
+MODULE_PATH = Path(__file__).resolve().parents[2] / "app.py"
 SPEC = importlib.util.spec_from_file_location("remote_ui_initial_package_app", MODULE_PATH)
 remote_ui_app = importlib.util.module_from_spec(SPEC)
 assert SPEC is not None and SPEC.loader is not None

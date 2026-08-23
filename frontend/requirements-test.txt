@@ -1,0 +1,8 @@
+# 跑测试需要安装的依赖。与 requirements.txt 平级，互不假设包含关系：
+# 今天两份都含 Pillow 只是巧合，将来 pytest 一类只属于测试的包直接加在这里，
+# 运行时清单不受影响。
+#
+# tests/python/test_dependency_contract.py 会断言：
+#   1. 测试树里未被 try/except ImportError 保护的第三方 import 不超出本文件；
+#   2. 本文件与 requirements.txt 中同名的包，版本约束必须一致。
+Pillow

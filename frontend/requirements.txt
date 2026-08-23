@@ -1,7 +1,7 @@
-# Runtime and repository-validation dependencies.
+# 运行服务需要安装的依赖。
+# 跑测试需要的是 requirements-test.txt，两份文件平级，互不假设包含关系。
 Pillow
 imageio-ffmpeg
 qrcode
-aiortc>=1.13,<2
+aiortc>=1.14,<2
 harmony-hpack==1.1.2
-PyYAML

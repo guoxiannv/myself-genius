@@ -102,6 +102,9 @@ frontend/.venv/bin/python3 -m pip install -r frontend/requirements.txt
 npm --prefix frontend/web ci
 ```
 
+这是**起服务**要装的东西。跑 frontend 的测试不需要它们，入口和最小依赖见
+[`frontend/README.md`](frontend/README.md) 的「测试」一节。
+
 启动本地服务：
 
 ```bash

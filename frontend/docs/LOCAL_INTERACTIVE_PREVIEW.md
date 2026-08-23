@@ -178,21 +178,25 @@ tail -f data/logs/live-preview-latency.jsonl
 
 ## 验证
 
-在项目根目录执行：
+测试入口、依赖和放置规则统一见 [`../README.md`](../README.md) 的「测试」一节，这里不另写一份：
 
 ```bash
-python3 -m unittest discover -s tests -v
-cd web && npm run build
+frontend/scripts/run_tests.sh
+```
+
+前端 TypeScript 与生产构建是另一件事，它需要先装好 `web/node_modules`，不属于上面那条零配置路径：
+
+```bash
+cd web && npm ci && npm run build
 ```
 
 关键测试对应关系：
 
 | 能力 | 测试 |
 |---|---|
-| 输入载荷校验、坐标转换、JPEG 尺寸读取 | `tests/test_live_preview.py` |
-| HDC 点击、速度换算、滚动与设备级串行化 | `tests/test_live_preview.py` |
-| 实时画面和输入接口的运行归属保护 | `tests/test_live_preview_api.py` |
-| 配置优先级、PID 忽略和安全重启脚本 | `tests/test_runtime_safety.py` |
+| 输入载荷校验、坐标转换、JPEG 尺寸读取 | `tests/python/test_live_preview.py` |
+| HDC 点击、速度换算、滚动与设备级串行化 | `tests/python/test_live_preview.py` |
+| 实时画面和输入接口的运行归属保护 | `tests/python/test_live_preview_api.py` |
 | 前端 TypeScript 与生产构建 | `web` 的 `npm run build` |
 
 ## 当前边界

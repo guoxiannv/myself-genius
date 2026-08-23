@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "hpack_packager.py"
+MODULE_PATH = Path(__file__).resolve().parents[2] / "scripts" / "hpack_packager.py"
 SPEC = importlib.util.spec_from_file_location("hpack_packager", MODULE_PATH)
 hpack_packager = importlib.util.module_from_spec(SPEC)
 assert SPEC is not None and SPEC.loader is not None

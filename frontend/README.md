@@ -26,17 +26,29 @@
 - Expo HAP 完成后会按 release 模式签名，并在详情页的「安装 → 安装到 PC」中默认提供签名 HAP 整包下载；旧版系统安装链接与 ExpoGo 预览入口仍保留但默认隐藏。HAP 失败不会阻止已经生成的 bundle.js 开启预览发布
 - Expo 详情页会增量读取 `agent-trace.jsonl` 与各轮 `agent-repair-trace*.jsonl`，以折叠分组实时展示经过脱敏的 Claude Action 和 Assistant Message
 
+## 首次配置
+
+克隆仓库后按顺序完成（敏感文件均 gitignore，每人本机一份）：
+
+| 步骤 | 操作 | 说明 |
+|------|------|------|
+| 1 | `python3 -m venv .venv && .venv/bin/python3 -m pip install -r requirements.txt` | 在当前 `Genius/frontend` 重建环境；包含二维码、视频、WebRTC 与 HPack 依赖，不能复制旧目录的虚拟环境 |
+| 2 | 克隆并配置 `devkit_studio` | `HP_TMUX_RUNNER` 指向其 `scripts/tmux-runner.cjs`；需支持 `ARKPILOT_BUNDLE_NAME` 环境变量 |
+| 3 | `cp deploy/server.env.example deploy/server.env` | 填写 tmux-runner 路径、workspace、HPack 公网 URL、签名密码、Tunnel token |
+| 4 | `cp deploy/profile-pool.example.json deploy/profile-pool.json` | 按本机 `.p7b` 文件名改 `slots[].profile` |
+| 5 | 签名材料放入 `deploy/signing/` | 可用 `scripts/sync_deploy_signing_assets.sh` 同步 |
+| 6 | 安装 DevEco 工具链 | macOS 默认路径见 `deploy/server.env.example`；Linux 需改 `HDC_PATH` / `HP_HVIGORW` / `HP_DEVECO_JAVA_HOME` |
+| 7 | `.venv/bin/python3 scripts/preflight_verify.py` | 全部 `[OK]` 后再启动 |
+| 8 | Cloudflare | `version2.bitfun-platform.com` 指向 `127.0.0.1:8089`；Access 对 `/static/hpack/*` 配置 **Bypass**（手机拉 manifest 不能走登录） |
+
+**不要提交：** `deploy/server.env`、`deploy/profile-pool.json`、`deploy/signing/*`（除 `.gitkeep`）、`.env.local`
+
 ## 运行
+
+完成上面的[首次配置](#首次配置)后，日常启动只需要：
 
 ```bash
 cd frontend
-cp deploy/server.env.example deploy/server.env
-cp deploy/profile-pool.example.json deploy/profile-pool.json
-python3 -m venv .venv
-.venv/bin/python3 -m pip install -r requirements.txt
-# 编辑 deploy/server.env：填入路径、签名密码、CLOUDFLARE_TUNNEL_TOKEN
-# 可选：编辑 .env.local 覆盖本机单项配置
-.venv/bin/python3 scripts/preflight_verify.py
 scripts/restart_dev.sh
 ```
 
@@ -137,58 +149,66 @@ tmux 模式默认使用 `remote-ui-local` session，可通过
 
 以上 Expo 相对路径都以 `frontend/` 为基准解析，不依赖启动命令所在目录。
 
-### Expo Harmony Go 公网预览
+## 测试
 
-后端会常驻一个只监听 loopback 的静态 Gateway，默认地址是
-`http://127.0.0.1:3353`。Expo 任务完成并通过 Harmony Go 启动验证后，详情页会出现
-“开启外网预览”按钮。开启操作只把该 Run 的 `dist/harmony-go` 注册到 Gateway，不会为每个
-应用重复占用端口；关闭后对应的随机发布地址立即失效。
-
-没有 Tunnel 时可先本地验证：
+一条命令跑全套，从仓库任何位置调用都可以（脚本自己会切到 `frontend/`）：
 
 ```bash
-curl -fsS http://127.0.0.1:3353/health
+frontend/scripts/run_tests.sh
 ```
 
-配置 Cloudflare Tunnel 时，将 `version2app.bitfun-platform.com` 对应的 origin 指向：
+测试按「由谁执行」分成两条 lane：
 
-```text
-http://127.0.0.1:3353
+| lane | 位置 | 执行方式 |
+|---|---|---|
+| Python | `tests/python/` | 标准库 `unittest` |
+| Node | `tests/node/` | `node --test` |
+
+只跑其中一条用 `--python` 或 `--node`。
+
+### 依赖
+
+**跑测试不需要 `.venv`，也不需要 `requirements.txt` 里的运行时依赖。** 唯一需要安装的第三方包
+声明在 `requirements-test.txt`（今天只有 Pillow）。整套二十秒左右跑完，不联网，也不需要
+hdc / tmux / 模拟器 / node_modules。
+
+```bash
+python3 -m pip install -r frontend/requirements-test.txt
+# 或者直接指定一个已经装好 Pillow 的解释器
+PYTHON_BIN=python3.14 frontend/scripts/run_tests.sh
 ```
 
-发布后的 Harmony Go 服务地址形如：
+`requirements.txt` 与 `requirements-test.txt` 是平级的两份清单，互不假设包含关系：前者回答
+「起服务要装什么」，后者回答「跑测试要装什么」，今天两份都含 Pillow 只是巧合。将来 pytest 一类
+只属于测试的包直接加进 `requirements-test.txt`，运行时清单不受影响。
 
-```text
-https://version2app.bitfun-platform.com/p/<随机发布令牌>
-```
+这条边界由 `tests/python/test_dependency_contract.py` 断言，不靠文档维持：测试树里出现未声明的
+第三方 import 会直接失败，两份清单对同一个包写了不同的版本约束也会失败。
 
-当前 Harmony Go 不会为 catalog 请求附加 Cloudflare Access 登录凭据，因此 `/p/*` 需要在
-Cloudflare Access 中配置 Bypass；随机发布令牌负责避免可预测枚举。Gateway 只会读取
-`HP_EXPO_FAST_APP_ROOT` 下经过导出校验的 `dist/harmony-go`，不会暴露 Prompt 或工程源码。
+### 新增测试放哪
 
-### 生成的鸿蒙工程目录
+- Python 测试放 `tests/python/`，文件名 `test_*.py`；新建子目录必须同时建 `__init__.py`
+- Node 测试放 `tests/node/`，文件名必须以 `.test.mjs` 结尾
+- `web/` 的前端测试将来归 `web/` 工作区自己管，不进 `tests/`
 
-网页点击 Build 后，后端会把本次生成的 HarmonyOS 工程放到 `HP_TARGET_WORKSPACE` 下面。当前推荐配置是启用 Profile 池并设置 `HP_PROFILE_POOL_ISOLATE_WORKSPACE=1`，每个 run 都会独立生成一个目录：
+前两条不是约定而是硬性规则，`run_tests.sh` 会在跑任何测试之前检查。原因是这两种情况都会
+**少跑测试却报绿**：测试文件不归任何 lane 管，就没有任何命令会执行到它；Python 子目录缺
+`__init__.py`，`unittest discover` 会跳过整个目录，既不报错也不给警告。
 
-```text
-workspace/<run_id>/
-```
+### 结果不对时先看这里
 
-这个目录就是可用 DevEco Studio 打开的鸿蒙工程根目录，里面会包含 `AppScope/`、`entry/`、`build-profile.json5`、`.arkpilot/state/` 等文件。每次运行的记录文件在：
+| 看到 | 含义 |
+|---|---|
+| `OK (skipped=3)` | 正常。这 3 个 skip 来自 `tests/python/test_webrtc_preview.py`，未安装 aiortc 时自动跳过，不是失败 |
+| `No module named 'PIL'` | 缺 Pillow，见上面的安装命令 |
+| `[守卫] ...` 且一个测试都没跑 | 有测试文件不归任何 lane 管，或子目录缺 `__init__.py`；按提示修完再跑 |
 
-```text
-data/runs/<run_id>.json
-```
+判断标准是全绿，不是等于某个数字，所以这里不写死项数——具体项数以 `run_tests.sh` 最后的汇总行为准。
 
-其中 `workspace` 字段会记录该 run 对应的实际工程路径。
+### 覆盖范围
 
-如果关闭 workspace 隔离，或者未启用 Profile 池，服务会复用：
-
-```text
-workspace/current/
-```
-
-这种模式下新 Build 会清空并覆盖上一次的目标工程目录，不适合同一时间并发生成多个应用。
+现有用例覆盖 `app.py`、`scan_install/` 与 `scripts/`。需要留意 `scan_install/webrtc_preview.py`
+对应的 3 个用例在未安装 aiortc 时全部跳过，因此「全绿」不等于「全覆盖」。
 
 ## 公网访问
 
@@ -217,25 +237,61 @@ scripts/restart_dev.sh --foreground
 专用入口：
 
 - `scripts/run_dev.sh`：旧 Python-only UI + tunnel。仅保留用于排查后端自带页面，不作为 version2 推荐入口。
-- `scripts/run_verify.sh`：只启动 Python 后端，用于 API / HPack / HDC 后端单独调试。
+- `scripts/run_backend.sh`：只启动 Python 后端，用于 API / HPack / HDC 后端单独调试。
 - `scripts/run_tunnel.sh`：只启动 Cloudflare Tunnel，用于手动拆分调试。
 
-## 其他开发者首次配置
+## Expo Harmony Go 公网预览
 
-克隆仓库后按顺序完成（敏感文件均 gitignore，每人本机一份）：
+后端会常驻一个只监听 loopback 的静态 Gateway，默认地址是
+`http://127.0.0.1:3353`。Expo 任务完成并通过 Harmony Go 启动验证后，详情页会出现
+“开启外网预览”按钮。开启操作只把该 Run 的 `dist/harmony-go` 注册到 Gateway，不会为每个
+应用重复占用端口；关闭后对应的随机发布地址立即失效。
 
-| 步骤 | 操作 | 说明 |
-|------|------|------|
-| 1 | `python3 -m venv .venv && .venv/bin/python3 -m pip install -r requirements.txt` | 在当前 `Genius/frontend` 重建环境；包含二维码、视频、WebRTC 与 HPack 依赖，不能复制旧目录的虚拟环境 |
-| 2 | 克隆并配置 `devkit_studio` | `HP_TMUX_RUNNER` 指向其 `scripts/tmux-runner.cjs`；需支持 `ARKPILOT_BUNDLE_NAME` 环境变量 |
-| 3 | `cp deploy/server.env.example deploy/server.env` | 填写 tmux-runner 路径、workspace、HPack 公网 URL、签名密码、Tunnel token |
-| 4 | `cp deploy/profile-pool.example.json deploy/profile-pool.json` | 按本机 `.p7b` 文件名改 `slots[].profile` |
-| 5 | 签名材料放入 `deploy/signing/` | 可用 `scripts/sync_deploy_signing_assets.sh` 同步 |
-| 6 | 安装 DevEco 工具链 | macOS 默认路径见 `deploy/server.env.example`；Linux 需改 `HDC_PATH` / `HP_HVIGORW` / `HP_DEVECO_JAVA_HOME` |
-| 7 | `.venv/bin/python3 scripts/preflight_verify.py` | 全部 `[OK]` 后再启动 |
-| 8 | Cloudflare | `version2.bitfun-platform.com` 指向 `127.0.0.1:8089`；Access 对 `/static/hpack/*` 配置 **Bypass**（手机拉 manifest 不能走登录） |
+没有 Tunnel 时可先本地验证：
 
-**不要提交：** `deploy/server.env`、`deploy/profile-pool.json`、`deploy/signing/*`（除 `.gitkeep`）、`.env.local`
+```bash
+curl -fsS http://127.0.0.1:3353/health
+```
+
+配置 Cloudflare Tunnel 时，将 `version2app.bitfun-platform.com` 对应的 origin 指向：
+
+```text
+http://127.0.0.1:3353
+```
+
+发布后的 Harmony Go 服务地址形如：
+
+```text
+https://version2app.bitfun-platform.com/p/<随机发布令牌>
+```
+
+当前 Harmony Go 不会为 catalog 请求附加 Cloudflare Access 登录凭据，因此 `/p/*` 需要在
+Cloudflare Access 中配置 Bypass；随机发布令牌负责避免可预测枚举。Gateway 只会读取
+`HP_EXPO_FAST_APP_ROOT` 下经过导出校验的 `dist/harmony-go`，不会暴露 Prompt 或工程源码。
+
+## 生成的鸿蒙工程目录
+
+网页点击 Build 后，后端会把本次生成的 HarmonyOS 工程放到 `HP_TARGET_WORKSPACE` 下面。当前推荐配置是启用 Profile 池并设置 `HP_PROFILE_POOL_ISOLATE_WORKSPACE=1`，每个 run 都会独立生成一个目录：
+
+```text
+workspace/<run_id>/
+```
+
+这个目录就是可用 DevEco Studio 打开的鸿蒙工程根目录，里面会包含 `AppScope/`、`entry/`、`build-profile.json5`、`.arkpilot/state/` 等文件。每次运行的记录文件在：
+
+```text
+data/runs/<run_id>.json
+```
+
+其中 `workspace` 字段会记录该 run 对应的实际工程路径。
+
+如果关闭 workspace 隔离，或者未启用 Profile 池，服务会复用：
+
+```text
+workspace/current/
+```
+
+这种模式下新 Build 会清空并覆盖上一次的目标工程目录，不适合同一时间并发生成多个应用。
 
 ## HPack HAP 安装
 
@@ -319,26 +375,7 @@ PORT=8090 python3 app.py
 - `HP_HPACK_STATIC_ROOT` 对应的公网 URL 必须支持 HTTPS、`HEAD`、`Content-Length`，最好支持 `Range`。
 - 证书、Profile、p12、密码和 tunnel token 不要提交到仓库。
 
-## Media 接入约定
-
-默认会按下面顺序寻找可展示媒体：
-
-1. `data/artifacts/videos/<run_id>/` 下的 `.mp4/.webp/.gif/.png/.jpg`
-2. 目标工作目录内最近生成的 `.mp4/.webp/.gif/.png/.jpg`
-
-你后续可以让安装、截图、导出视频的流程把产物写到：
-
-```text
-data/artifacts/videos/<run_id>/demo.mp4
-```
-
-这样详情页右侧会自动展示。
-
-## 纯 HDC 截图链路
-
-项目里新增了一个独立脚本：
-
-`scripts/hdc_runtime_capture.py`
+## 实时交互预览
 
 详情页右侧模拟器使用独立的实时交互链路：WebRTC 可用时优先通过点对点 DataChannel 传输压缩 JPEG 和输入；建连失败时继续使用 REST 长轮询及归一化点击、滑动和滚轮操作。后端通过 HDC 控制设备，输入接口以 `Server-Timing` 暴露排队和 HDC 操作耗时。完整架构、限流参数、失败回退和测试口径见 [docs/LOCAL_INTERACTIVE_PREVIEW.md](docs/LOCAL_INTERACTIVE_PREVIEW.md)。
 
@@ -346,6 +383,11 @@ data/artifacts/videos/<run_id>/demo.mp4
 
 点击分段耗时记录在 `data/logs/live-preview-latency.jsonl`，日志达到大小上限后会保留一个轮转文件。WebRTC 候选类型、连接状态和点击到解码完成时延也写入该日志。
 
+## 纯 HDC 截图链路
+
+项目里新增了一个独立脚本：
+
+`scripts/hdc_runtime_capture.py`
 
 用途：
 
@@ -425,3 +467,18 @@ data/artifacts/videos/<run_id>/
   `/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony/toolchains/hdc`
 - 当前脚本不依赖 MCP，完全走 `hdc`
 - `--config` 现在只是可选覆盖项，不再是必需前置文件
+
+## Media 接入约定
+
+默认会按下面顺序寻找可展示媒体：
+
+1. `data/artifacts/videos/<run_id>/` 下的 `.mp4/.webp/.gif/.png/.jpg`
+2. 目标工作目录内最近生成的 `.mp4/.webp/.gif/.png/.jpg`
+
+你后续可以让安装、截图、导出视频的流程把产物写到：
+
+```text
+data/artifacts/videos/<run_id>/demo.mp4
+```
+
+这样详情页右侧会自动展示。

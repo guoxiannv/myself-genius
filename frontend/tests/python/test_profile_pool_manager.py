@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "profile_pool_manager.py"
+MODULE_PATH = Path(__file__).resolve().parents[2] / "scripts" / "profile_pool_manager.py"
 SPEC = importlib.util.spec_from_file_location("profile_pool_manager", MODULE_PATH)
 profile_pool_manager = importlib.util.module_from_spec(SPEC)
 assert SPEC is not None and SPEC.loader is not None

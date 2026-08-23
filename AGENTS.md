@@ -44,3 +44,4 @@
 分支：`frontend/*`、`runner/*`、`sdk/*`、`global/*`、`evaluation/*`。
 Issue 与 PR 标题：`[范围] 简短描述`。一个 Issue 可关联多个 PR。
 改动 runner 后运行 `cd runner && npm test`。
+改动 frontend 后运行 `frontend/scripts/run_tests.sh`。

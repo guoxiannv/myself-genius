@@ -52,7 +52,7 @@ store://enterprise/manifest?url=<经过 URL 编码的 HTTPS manifest 地址>
   - “安装到 PC”默认展示当前 HAP 整包下载入口。
   - 旧版系统安装链接、安装页以及 ExpoGo + 外网预览入口仍保留在代码中，但默认隐藏；需要回滚时可在前端构建前设置 `VITE_SHOW_LEGACY_PC_INSTALL=true`。
   - 明确告知用户不需要开发工具或开发者选项。
-- `tests/test_hpack_packager.py`
+- `tests/python/test_hpack_packager.py`
   - 覆盖 PC device type 缺失、双端 manifest 和安装页文案。
 
 ## 普通用户操作说明

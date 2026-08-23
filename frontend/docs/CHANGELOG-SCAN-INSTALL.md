@@ -40,7 +40,7 @@
 | `scripts/hpack_packager.py` | bundleName 校验 → `hpack pr` → 发布安装页 → 输出 `hpack-result.json` |
 | `scripts/profile_pool_manager.py` | Profile 池：acquire/release/validate；从 `.p7b` 解析 bundleName |
 | `scripts/preflight_verify.py` | 启动前检查：依赖、工具链、Profile 池、HPack 配置 |
-| `scripts/run_dev.sh` / `run_verify.sh` / `run_tunnel.sh` | 一键或分步启动 app + tunnel |
+| `scripts/run_dev.sh` / `run_backend.sh` / `run_tunnel.sh` | 一键或分步启动 app + tunnel |
 | `scripts/sync_deploy_signing_assets.sh` | 同步 cer/p12/p7b 到 `deploy/signing/` |
 | `deploy/server.env.example` | 服务器主配置模板 |
 | `deploy/profile-pool.example.json` | Profile 池结构示例 |

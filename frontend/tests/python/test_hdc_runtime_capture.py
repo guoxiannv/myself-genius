@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 MODULE_PATH = (
-    Path(__file__).resolve().parents[1] / "scripts" / "hdc_runtime_capture.py"
+    Path(__file__).resolve().parents[2] / "scripts" / "hdc_runtime_capture.py"
 )
 SPEC = importlib.util.spec_from_file_location("hdc_runtime_capture", MODULE_PATH)
 hdc_runtime_capture = importlib.util.module_from_spec(SPEC)

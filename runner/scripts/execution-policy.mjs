@@ -11,10 +11,10 @@ const designTimeoutCeiling = 55;
 // timeout ever falls back to a literal in code, so a field that goes missing
 // after an upgrade fails loudly instead of silently changing behavior.
 const roleFields = {
-  main: ['model', 'effort', 'contextWindowTokens', 'disableAdaptiveThinking'],
-  repair: ['model', 'effort', 'contextWindowTokens', 'disableAdaptiveThinking', 'limit'],
-  design: ['model', 'effort', 'contextWindowTokens', 'disableAdaptiveThinking', 'timeoutSeconds'],
-  appIcon: ['model', 'effort', 'contextWindowTokens', 'disableAdaptiveThinking', 'timeoutSeconds', 'briefTimeoutSeconds', 'enabled'],
+  main: ['model', 'effort', 'contextWindowTokens'],
+  repair: ['model', 'effort', 'contextWindowTokens', 'limit'],
+  design: ['model', 'effort', 'contextWindowTokens', 'timeoutSeconds'],
+  appIcon: ['model', 'effort', 'contextWindowTokens', 'timeoutSeconds', 'briefTimeoutSeconds', 'enabled'],
 };
 
 export const roleNames = Object.freeze(Object.keys(roleFields));
@@ -22,8 +22,14 @@ export const roleNames = Object.freeze(Object.keys(roleFields));
 // Reject a configuration that is incomplete, over-complete, or from the old
 // schema. Exported so the contract can be exercised without a file on disk.
 export function validateExecutionConfig(config) {
-  if (config?.schemaVersion !== 2) {
-    throw new Error(`config/execution.json schemaVersion must be 2, found ${JSON.stringify(config.schemaVersion)}. Version 1 declared model and effort at the top level; move them under roles.main and roles.repair.`);
+  if (config?.schemaVersion !== 3) {
+    throw new Error(
+      `config/execution.json schemaVersion must be 3, found ${JSON.stringify(config.schemaVersion)}.`
+      + ' Version 1 declared model and effort at the top level; move them under roles.main and roles.repair.'
+      + ' Version 2 declared disableAdaptiveThinking on every role; delete those four lines.'
+      + ' The variable it set leaves the request byte-for-byte identical whether it is 1, 0, or unset,'
+      + ' so the field named an intention nothing carried out.',
+    );
   }
   for (const name of roleNames) {
     const role = config.roles?.[name];
@@ -99,7 +105,6 @@ export function resolveRole(name, overrides = {}) {
     model: requireModel(`${name} model`, overrides.model || inherited),
     effort: requireEffort(`${name} effort`, overrides.effort || declared.effort),
     contextWindowTokens: requireInteger(`${name} contextWindowTokens`, declared.contextWindowTokens, Number.MAX_SAFE_INTEGER),
-    disableAdaptiveThinking: requireBoolean(`${name} disableAdaptiveThinking`, declared.disableAdaptiveThinking),
   };
 
   if (name === 'repair') {
@@ -123,23 +128,27 @@ export function resolveRole(name, overrides = {}) {
   return role;
 }
 
-// The environment a role's Claude Code process needs. Both variables are model
-// properties, not credentials, so they belong here rather than in llm.env:
+// The environment a role's Claude Code process needs. The window is a model
+// property rather than a credential, so it belongs here rather than in llm.env:
 // Claude Code applies CLAUDE_CODE_MAX_CONTEXT_TOKENS only to models it does not
 // recognize, and would otherwise assume a 200k window and auto-compact the turn.
-// claude-isolated refuses to start when llm.env sets either of them, because a
-// stale copy there would silently override everything passed here.
+// claude-isolated refuses to start when llm.env sets it, because a stale copy
+// there would silently override everything passed here.
 //
-// Neither variable reaches the request body, which is exactly why neither can be
-// trusted on its name. CLAUDE_CODE_MAX_CONTEXT_TOKENS only decides when this
-// process compacts; it is not the endpoint's hard limit, so a value above the
-// real window is never rejected, it just compacts too late. And measured against
-// Claude Code 2.1.241, CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING changes nothing at
-// all: the request is byte-for-byte identical with it set to 1, to 0, or unset.
+// It never reaches the request body, which is exactly why it cannot be trusted
+// on its name: it only decides when this process compacts, and is not the
+// endpoint's hard limit, so a value above the real window is never rejected --
+// it just compacts too late. That is what the offline probes and the run-path
+// warning exist to catch.
+//
+// CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING used to be injected here too, from a
+// per-role field. Measured against Claude Code 2.1.241, the request is
+// byte-for-byte identical with it set to 1, to 0, or unset, so both the field
+// and the injection are gone. Nothing about the turns changed by removing them,
+// which is the whole point.
 export function roleEnv(role) {
   return {
     CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(role.contextWindowTokens),
-    CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING: role.disableAdaptiveThinking ? '1' : '0',
   };
 }
 

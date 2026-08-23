@@ -1868,14 +1868,20 @@ test('single execution policy uses external model controls and caps deterministi
   // model's name: the k3 model rejects at 262144 (256*1024) and the design model
   // at 1048576 (1024*1024). Rounding either back to a marketing figure gives up
   // real context, and nothing in this repo would report the loss.
+  //
+  // No role declares disableAdaptiveThinking any more. It set a variable that
+  // leaves the request byte-for-byte identical whether it is 1, 0, or unset, so
+  // it named an intention nothing carried out. A field like that is what this
+  // whole effort is about; keeping it would have been the disease writing the
+  // cure.
   assert.deepEqual(config, {
-    schemaVersion: 2,
+    schemaVersion: 3,
     roles: {
-      main: { model: 'k3-256k', effort: 'low', contextWindowTokens: 262144, disableAdaptiveThinking: false },
-      repair: { model: 'k3-256k', effort: 'medium', contextWindowTokens: 262144, disableAdaptiveThinking: false, limit: 100 },
-      design: { model: 'deepseek-v4-flash', effort: 'low', contextWindowTokens: 1048576, disableAdaptiveThinking: true, timeoutSeconds: 45 },
+      main: { model: 'k3-256k', effort: 'low', contextWindowTokens: 262144 },
+      repair: { model: 'k3-256k', effort: 'medium', contextWindowTokens: 262144, limit: 100 },
+      design: { model: 'deepseek-v4-flash', effort: 'low', contextWindowTokens: 1048576, timeoutSeconds: 45 },
       appIcon: {
-        model: null, effort: 'low', contextWindowTokens: 262144, disableAdaptiveThinking: true,
+        model: null, effort: 'low', contextWindowTokens: 262144,
         timeoutSeconds: 180, briefTimeoutSeconds: 180, enabled: true,
       },
     },
@@ -2006,23 +2012,35 @@ test('an incomplete execution configuration fails loudly instead of falling back
   unknownRole.roles.smoke = { model: 'x' };
   assert.throws(() => validateExecutionConfig(unknownRole), /unknown role: smoke/);
 
-  // The version-1 layout must be rejected with migration guidance, never
-  // silently reinterpreted.
+  // Every older layout must be rejected with migration guidance, never silently
+  // reinterpreted. Version 2 is the one that carried the dead field, so its
+  // message has to name it -- a config that still declares it is not merely out
+  // of date, it is asking for something that never happened.
   assert.throws(
     () => validateExecutionConfig({ schemaVersion: 1, model: 'k3-256k', effort: 'low', repairModel: 'k3-256k', repairEffort: 'medium', repairLimit: 100 }),
-    /schemaVersion must be 2/,
+    /schemaVersion must be 3/,
   );
+  const withDeadField = clone();
+  withDeadField.schemaVersion = 2;
+  assert.throws(() => validateExecutionConfig(withDeadField), /delete those four lines/);
 });
 
-test('role environment carries model window and thinking, and no model name survives in code', () => {
-  // Both variables are model properties rather than credentials, so they are
-  // injected per spawn from configuration instead of living in llm.env.
+test('role environment carries the model window and nothing that does not work', () => {
+  // The window is a model property rather than a credential, so it is injected
+  // per spawn from configuration instead of living in llm.env.
   assert.deepEqual(roleEnv(resolveRole('design')), {
     CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(executionConfig.roles.design.contextWindowTokens),
-    CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING: '1',
   });
-  assert.equal(roleEnv(resolveRole('main')).CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING, '0');
-  assert.deepEqual(roleOwnedEnvironmentKeys, ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING']);
+  assert.deepEqual(roleOwnedEnvironmentKeys, ['CLAUDE_CODE_MAX_CONTEXT_TOKENS']);
+
+  // CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING is gone from every spawn. The launcher
+  // stops guarding llm.env against it too -- that follows from the assertion
+  // further down that its list equals roleOwnedEnvironmentKeys -- because
+  // guarding a variable that changes nothing teaches the next reader that the
+  // guard is theatre, and the guard on the one that matters is not.
+  for (const role of roleNames) {
+    assert.deepEqual(Object.keys(roleEnv(resolveRole(role, { inheritModel: 'any' }))), ['CLAUDE_CODE_MAX_CONTEXT_TOKENS'], role);
+  }
 
   // Regression guard for the failure that started this refactor: a model name
   // hardcoded in a script silently disagrees with the configured endpoint.

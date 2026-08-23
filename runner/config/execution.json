@@ -1,31 +1,27 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "roles": {
     "main": {
       "model": "k3-256k",
       "effort": "low",
-      "contextWindowTokens": 262144,
-      "disableAdaptiveThinking": false
+      "contextWindowTokens": 262144
     },
     "repair": {
       "model": "k3-256k",
       "effort": "medium",
       "contextWindowTokens": 262144,
-      "disableAdaptiveThinking": false,
       "limit": 100
     },
     "design": {
       "model": "deepseek-v4-flash",
       "effort": "low",
       "contextWindowTokens": 1048576,
-      "disableAdaptiveThinking": true,
       "timeoutSeconds": 45
     },
     "appIcon": {
       "model": null,
       "effort": "low",
       "contextWindowTokens": 262144,
-      "disableAdaptiveThinking": true,
       "timeoutSeconds": 180,
       "briefTimeoutSeconds": 180,
       "enabled": true

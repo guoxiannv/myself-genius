@@ -18,10 +18,11 @@
   结构性规则（例如某角色缺省时继承 main）留在代码里，配置用 `null` 表达。
 - **缺字段就报错，不静默兜底。** `execution-policy.mjs` 校验合并后的结果，任一字段缺失
   即抛错。这同时让配置文件的升级失败得明确可见，而不是悄悄改变行为。
-- **`CLAUDE_CODE_MAX_CONTEXT_TOKENS` 与 `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING`
-  归 `execution.json`。** 它们是模型属性而非凭据，由编排层按角色注入。`claude-isolated`
-  会拒绝在 `llm.env` 里声明它们，`start-livetest` 会拒绝它们出现在环境里——因为 `llm.env`
-  最后被 source，残留一份就会静默覆盖按角色注入的值且不报任何错。
+- **`CLAUDE_CODE_MAX_CONTEXT_TOKENS` 归 `execution.json`。** 它是模型属性而非凭据，由编排层
+  按角色注入。`claude-isolated` 会拒绝在 `llm.env` 里声明它，`start-livetest` 会拒绝它出现在
+  环境里——因为 `llm.env` 最后被 source，残留一份就会静默覆盖按角色注入的值且不报任何错。
+  `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING` 曾经也归这里，实测它对请求体逐字节无影响，
+  字段与注入都已移除。
 - 新增任何环境变量时，同步更新 `runner/.env.example`；测试断言两者双向一致。
 
 ## 配置的对错

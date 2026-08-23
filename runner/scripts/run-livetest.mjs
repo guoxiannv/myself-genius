@@ -338,9 +338,10 @@ async function designTurn(prompt, timeoutSeconds, role) {
   const { args, env: roleEnvironment } = designTurnInvocation(role, prompt);
   const started = Date.now(); let trace = '';
   const outcome = await new Promise((resolveOutcome, rejectOutcome) => {
-    // Thinking is requested in the request body, not through a header, so the
-    // former X-Genius-Disable-Thinking hint could never reach a relay. The
-    // design role's disableAdaptiveThinking now carries that intent.
+    // Thinking is requested in the request body, and no knob Claude Code exposes
+    // reaches that field, so this turn thinks whatever the endpoint decides. The
+    // former X-Genius-Disable-Thinking header and the later
+    // disableAdaptiveThinking field both claimed otherwise; both are gone.
     const child = spawn(claude, args, { cwd: root, env: { ...process.env, ...roleEnvironment }, stdio: ['ignore', 'pipe', 'pipe'] });
     const liveState = { pending: '' }; let timedOut = false; let settled = false; let killTimer;
     const settle = (fn, value) => { if (settled) return; settled = true; clearTimeout(timer); clearTimeout(killTimer); fn(value); };

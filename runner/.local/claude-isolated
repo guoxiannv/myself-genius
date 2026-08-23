@@ -26,9 +26,11 @@ unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL ANTHROPIC_MODEL
 # reporting it. Inspect the file rather than the resulting environment, so that
 # the orchestrator's own injection passes through untouched.
 # Keep this list equal to roleOwnedEnvironmentKeys in scripts/execution-policy.mjs;
-# tests/orchestrator.test.mjs asserts the two agree.
+# tests/orchestrator.test.mjs asserts the two agree. It lost
+# CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING when that field was removed: guarding a
+# variable that changes nothing only teaches people the guard is theatre.
 if [ -f "$RUNNER_LOCAL/llm.env" ]; then
-  for owned in CLAUDE_CODE_MAX_CONTEXT_TOKENS CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING; do
+  for owned in CLAUDE_CODE_MAX_CONTEXT_TOKENS; do
     if grep -qE "^[[:space:]]*(export[[:space:]]+)?$owned=" "$RUNNER_LOCAL/llm.env"; then
       echo "claude-isolated: llm.env sets $owned, but config/execution.json owns it." >&2
       echo "  Remove that line from $RUNNER_LOCAL/llm.env." >&2

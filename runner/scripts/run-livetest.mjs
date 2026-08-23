@@ -22,6 +22,7 @@ import { acquirePreviewDevice, configuredPreviewPools } from './preview-device-p
 import { auditImplementationTrace } from './trace-scope.mjs';
 import { writeRunState } from './run-state.mjs';
 import { executionDefaults, resolveExecution, resolveExecutionRoles, resolveRole, roleEnv } from './execution-policy.mjs';
+import { windowFromApiError } from './endpoint-limits.mjs';
 import { repairArtifactName } from './repair-artifact.mjs';
 import { readExistingHapResult, runHapPoolBuild } from './hap-build.mjs';
 import { verifyImplementation } from './verification.mjs';
@@ -200,6 +201,31 @@ function usableDesignHtml(path) {
 export function buildDesignPrompt(request) {
   return `Create a polished visual design reference for the Expo React Native app below. Do not analyze, reason, explain, or plan: immediately emit the finished HTML. Make one decisive design, not a generic dashboard template.\n\nUSER REQUEST:\n${request.trim()}\n\nYour first output character must be <. Return exactly one self-contained HTML document and then stop. Do not call tools and do not write files. Keep the complete document around 4-6 KB so it finishes quickly. Use semantic HTML and embedded CSS to show the primary screen plus compact representations of other requested destinations/states. Make the composition feel specific to this product: derive its visual metaphor, information hierarchy, density, palette, typography scale, spacing, radii, surfaces, and navigation from the request. Avoid the familiar purple-gradient SaaS dashboard, interchangeable KPI-card grids, repeated KPI summaries, decorative clutter, and phone list rows merely stretched across a PC window. Include realistic copy and populated states. Put reusable visual values in :root CSS custom properties so another model can translate them to React Native.\n\nDesign and mentally check these exact logical viewport canvases: phone 390x844, compact PC/tablet 1024x640, and wide desktop 1440x900. CSS media queries are the layout source of truth: phone is width <640, tablet/compact PC is 640-1279, and wide desktop is >=1280. The 1024x640 composition is a primary PC preview target, not an afterthought: use a top horizontal navigation and a balanced one- or two-column content composition without large accidental blank regions. At >=1280 use a fixed-width left sidebar and a flexible genuinely multi-column main area. At <640 use bottom navigation and one content column when there are multiple destinations. Make flex directions, wrapping, maximum content widths, and card widths explicit at every breakpoint; never use a 900px desktop breakpoint, fixed full-screen content height, or vertical stretching merely to fill the viewport.\n\nInclude one tiny inline script marked data-genius-viewport-monitor that observes matchMedia('(max-width: 639px)') and matchMedia('(min-width: 1280px)'), listens for media/resize changes, and updates document.documentElement.dataset.viewport to phone, tablet, or desktop plus dataset.logicalWidth and dataset.logicalHeight. The script only exposes the active viewport for inspection; do not use it to imperatively restyle elements or duplicate the CSS breakpoint logic.\n\nFor icons, use recognizable Lucide icon names via elements such as <i data-lucide="plus"></i>; load exactly https://unpkg.com/lucide@0.468.0/dist/umd/lucide.js and call lucide.createIcons() instead of drawing bespoke SVG. Use no raster assets and no other external dependency. Return only the HTML, with no Markdown fences, explanation, or additional text.`;
 }
+// A refusal for exceeding the context window is the endpoint telling us, free
+// and unprompted, what its real limit is. That is the one number no startup
+// check can obtain: CLAUDE_CODE_MAX_CONTEXT_TOKENS never leaves this process,
+// so the endpoint has no way to correct a wrong value and no run has ever been
+// able to notice one. When the number does arrive, it gets said out loud.
+//
+// Reported only, never written back. The fact table has one author, the offline
+// probes, and a run path that edited it would leave nobody able to say how any
+// number in it was measured -- and two runs writing at once would settle it by
+// whichever finished last.
+function reportEndpointWindow(row, roleEnvironment, once) {
+  if (once.reported) return;
+  const refused = windowFromApiError(row);
+  if (!refused) return;
+  once.reported = true;
+  const compactsAt = Number(roleEnvironment?.CLAUDE_CODE_MAX_CONTEXT_TOKENS) || 0;
+  console.error(
+    '[expo-fast] the endpoint refused a request for exceeding its context window.\n'
+    + `  it says ${refused.value}${refused.confidence === 'derived' ? ' (derived from a magnitude, not stated exactly)' : ''}`
+    + `${refused.httpStatus ? `, over HTTP ${refused.httpStatus}` : ''}; this run compacts at ${compactsAt || 'an unset value'}.\n`
+    + '  re-measure the endpoint with ./start-livetest.sh --refresh-models\n'
+    + `  endpoint said: ${refused.evidence}`,
+  );
+}
+
 // What the design turn counts as a finished document, shared with the timing
 // probe so that "complete" means one thing. A probe with its own idea of
 // complete would report a production rate nobody experiences.
@@ -324,6 +350,11 @@ async function designTurn(prompt, timeoutSeconds, role) {
     child.on('error', (error) => settle(rejectOutcome, error));
     child.on('exit', (code) => settle(resolveOutcome, { timedOut, exitCode: code }));
   });
+  const refusal = { reported: false };
+  for (const line of trace.split(/\r?\n/)) {
+    if (!line.includes('api_error')) continue;
+    try { reportEndpointWindow(JSON.parse(line), roleEnvironment, refusal); } catch { /* not a stream record */ }
+  }
   const { html, usable } = designHtmlFromTrace(trace);
   return { ms: Date.now() - started, status: usable ? 'ready' : 'fallback', timedOut: outcome.timedOut, exitCode: outcome.exitCode, html, trace };
 }
@@ -360,10 +391,12 @@ async function claudeTurn(project, trace, prompt, sessionId, resume = false, tim
       const child = spawn(claude, args, { cwd: project, env: { ...process.env, ...roleEnvironment, CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_ATTRIBUTION_HEADER: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
       const output = createWriteStream(trace, { flags: appendTrace ? 'a' : 'w' });
       const traceState = { pending: '' };
+      const refusal = { reported: false };
       let stderrText = '';
       child.stdout.on('data', (chunk) => {
         const records = normalizeClaudeTraceChunk(chunk, traceState);
         writeTraceRecords(output, records);
+        for (const record of records) if (record.row) reportEndpointWindow(record.row, roleEnvironment, refusal);
         if (liveClaude) {
           for (const record of records) {
             if (record.row) {

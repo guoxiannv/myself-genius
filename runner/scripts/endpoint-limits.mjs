@@ -22,3 +22,24 @@ export function windowFromRejection(message) {
   if (magnitude) return { value: Number(magnitude[1]) * 1024, confidence: 'derived' };
   return null;
 }
+
+// The same measurement arriving unasked. A turn refused for being over the
+// window is the one moment the endpoint volunteers its real limit on a run
+// path, and it costs nothing because a rejected request is not billed.
+//
+// Claude Code surfaces the endpoint's text twice: on an assistant event flagged
+// is_api_error_message, and on the terminal result event, which also carries
+// api_error_status. Only those two are read. Scanning the whole trace would
+// eventually match a model that wrote "256K context" in its own output, and a
+// warning that cries wolf is worse than none.
+export function windowFromApiError(event) {
+  const failed = event?.is_error === true || event?.is_api_error_message === true;
+  if (!failed) return null;
+  const said = typeof event.result === 'string'
+    ? event.result
+    : (Array.isArray(event.message?.content) ? event.message.content : [])
+      .filter((block) => block?.type === 'text').map((block) => String(block.text || '')).join(' ');
+  const parsed = windowFromRejection(said);
+  if (!parsed) return null;
+  return { ...parsed, httpStatus: Number(event.api_error_status) || null, evidence: said.trim().slice(0, 300) };
+}

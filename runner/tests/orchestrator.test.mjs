@@ -34,7 +34,7 @@ import {
 } from '../scripts/execution-policy.mjs';
 import { readModelCache, verifyConfiguredModels } from '../scripts/preflight-models.mjs';
 import { probeContextWindow, probeEfforts, probeThinking, windowLadder } from '../scripts/model-probes.mjs';
-import { windowFromRejection } from '../scripts/endpoint-limits.mjs';
+import { windowFromApiError, windowFromRejection } from '../scripts/endpoint-limits.mjs';
 import { parseArguments as parseTimingArguments } from '../scripts/probe-turn-timing.mjs';
 import { repairArtifactName } from '../scripts/repair-artifact.mjs';
 import { assertDependencyRuntime, installProjectDependencies, pinRuntimeDependencies, stageHarmonyCli } from '../scripts/dependencies.mjs';
@@ -2883,6 +2883,45 @@ test('the timing probe never picks which models to spend turns on', () => {
       `${file} checks the models before spending anything`,
     );
   }
+});
+
+test('a run reports the endpoint contradicting the configured window, and only then', () => {
+  // The only moment this endpoint volunteers its real limit on a run path is
+  // when it refuses a request for exceeding it, and that refusal is free.
+  // Claude Code surfaces the text on the terminal result event, which also
+  // carries the HTTP status.
+  const refused = windowFromApiError({
+    type: 'result', is_error: true, api_error_status: 400,
+    result: "API Error: 400 This model's maximum context length is 1048576 tokens. However, you requested 1624100 tokens.",
+  });
+  assert.equal(refused.value, 1048576);
+  assert.equal(refused.confidence, 'exact');
+  assert.equal(refused.httpStatus, 400);
+
+  // ...and on the assistant event that Claude Code flags as an API error.
+  const alsoRefused = windowFromApiError({
+    type: 'assistant', is_api_error_message: true,
+    message: { content: [{ type: 'text', text: 'API Error: 401 k3-256k supports only 256K context.' }] },
+  });
+  assert.equal(alsoRefused.value, 262144);
+  assert.equal(alsoRefused.confidence, 'derived');
+
+  // The guard that matters: a model writing about context windows in its own
+  // output must not read as the endpoint refusing anything. Scanning the trace
+  // for the text alone would fire here, and a warning that cries wolf is worse
+  // than no warning.
+  assert.equal(windowFromApiError({
+    type: 'assistant',
+    message: { content: [{ type: 'text', text: 'This model supports only 256K context, so keep the file short.' }] },
+  }), null);
+  assert.equal(windowFromApiError({ type: 'result', is_error: false, result: 'maximum context length is 1048576' }), null);
+  assert.equal(windowFromApiError({ type: 'result', is_error: true, result: 'API Error: 429 slow down' }), null);
+
+  // Reported, never written back: the fact table has one author, so a run that
+  // edited it would leave nobody able to say how a number in it was measured.
+  const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
+  assert.match(runner, /reportEndpointWindow\(record\.row, roleEnvironment, refusal\)/);
+  assert.doesNotMatch(runner, /recordModelFacts|refreshModelCache/);
 });
 
 test('the effort probe counterbalances its levels so drift cannot fake an ordering', () => {

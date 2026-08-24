@@ -23,6 +23,7 @@ import { auditImplementationTrace } from './trace-scope.mjs';
 import { writeRunState } from './run-state.mjs';
 import { executionDefaults, resolveExecution, resolveExecutionRoles, resolveRole, roleEnv } from './execution-policy.mjs';
 import { windowFromApiError } from './endpoint-limits.mjs';
+import { admissionWitness, isAdmissionRefused, refusalFromText, refusedError } from './admission.mjs';
 import { repairArtifactName } from './repair-artifact.mjs';
 import { readExistingHapResult, runHapPoolBuild } from './hap-build.mjs';
 import { verifyImplementation } from './verification.mjs';
@@ -226,6 +227,13 @@ function reportEndpointWindow(row, roleEnvironment, once) {
   );
 }
 
+// Whether this run has left a request of its own running upstream. The design
+// turn's deadline kills the local client and nothing more, so between that kill
+// and whenever the endpoint finishes the document, one slot is held by a request
+// nobody is reading any more. A launch refused in that window has a most likely
+// cause worth naming, and this is the only way to know it applies.
+let designSlotLeaked = false;
+
 // What a design turn actually produced, read back from its own trace. Shared
 // with the timing probe so that "complete" means one thing; a probe with its own
 // idea of complete would report a production rate nobody experiences.
@@ -340,8 +348,19 @@ function buildPrompt(project) {
   return `Build this Expo React Native product from scratch in the current freshly prepared Harmony Go technical scaffold. No prior product implementation is present.\n\nUSER REQUEST:\n${request}\n\nRead only package.json, app.json, index.js, tsconfig.json, App.tsx, src/**, ${hasDesign ? '.expo-fast/design.html, ' : ''}.expo-fast/model-capability-index.txt, and .expo-fast/sdk-fingerprint.json. These paths are permission-whitelisted and authoritative; do not attempt any other path, SDK scan, or web access. The model capability index is a deterministic projection of the local compatibility catalog: REQUIRED rows are request-matched AVAILABLE capabilities and must be represented in the brief, package dependencies, and working code; other AVAILABLE rows are optional; UNAVAILABLE rows must never be imported. ${extra}\n\n${designInstruction}\n\nImplement the complete requested product now; do not collapse requested behavior into placeholders. Derive acceptance rules directly from the user request. Work in vertical slices, not a bottom-up library pass. Write .expo-fast/brief.json, then immediately replace starter App.tsx/app-shell, expose every requested destination, and implement a real primary state mutation. Keep the app runnable as you add data/persistence, complete screens, secondary actions, charts, and polish. Write each complete file as soon as it is ready; never leave entry composition or requested screens until the end.\n\nKeep the implementation compact: prefer 6-10 cohesive product files and avoid rewriting an already complete file unless integration requires it. Build the product's visual system from the design reference while reusing generic UI primitives only where they fit. Avoid commentary, long comments, duplicate wrappers, and one-file-per-small-component architecture. Treat useWindowDimensions().width as logical layout width; never infer breakpoints from physical pixels or emulator resolution. Use phone <640, tablet 640–1279, and desktop >=1280. For apps with multiple top-level destinations, phone uses bottom navigation and a single content column, tablet uses top horizontal navigation and one or two content columns as space allows, and desktop uses a fixed-width left sidebar plus a flexible main area as siblings inside the same horizontal root container. Never place the desktop sidebar before or outside that row container. Desktop dashboard/list cards must form a real multi-column layout, such as wrapping cards with about 48% basis. Do not invent tabs for a single-destination app; still preserve the same responsive content rules. Add stable literal testID and accessibilityLabel values to tabs, primary actions, and state summaries that change after actions.\n\nUse src/components/icons.tsx as the local Lucide icon system with one consistent 2.2 default stroke width. Prefer an existing icon matching each Lucide name from the design; when extending it, reproduce canonical Lucide 24px path geometry. Every production icon and chart must use inline react-native-svg primitives; never use emoji, text glyphs, Unicode symbols, or an external icon runtime. Resolve native product behavior through the capability index. For bulk non-sensitive local app state, use REQUIRED AsyncStorage; hydrate before writes, seed only when storage is empty, namespace keys with the app slug, and persist every mutation.\n\nUse no package unless it has a REQUIRED or AVAILABLE row in the capability index and declare it in package.json dependencies at that exact version. Preserve all scaffold dependencies and every other package.json field. Do not create prose Spec/Plan, additional HTML, ArkTS, native files, tests, docs, or subagents. Do not edit the design artifact or other infrastructure. Do not run shell, install, Expo, lint, test, typecheck, grep, or build commands; the orchestrator owns verification. After the whole app is connected, spend the remaining pass on behavior and visual fidelity, then stop.`;
 }
 
+// A refused design turn stays a fallback: this turn is optional by contract, and
+// pomodoro-01 showed the implementation turn deriving a correct layout with no
+// reference at all. What changes is that the refusal is named rather than
+// counted as "produced nothing", because those are different facts and only one
+// of them is about us.
 async function designTurn(prompt, timeoutSeconds, role) {
   if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 55) throw new Error(`invalid design timeout: ${timeoutSeconds}`);
+  const { refusal, ...turn } = await launchDesignTurn(prompt, timeoutSeconds, role);
+  if (!refusal) return turn;
+  return { ...turn, status: 'fallback', html: '', admissionRefused: true, refusal };
+}
+
+async function launchDesignTurn(prompt, timeoutSeconds, role) {
   const { args, env: roleEnvironment } = designTurnInvocation(role, prompt);
   const started = Date.now(); let trace = '';
   const outcome = await new Promise((resolveOutcome, rejectOutcome) => {
@@ -358,16 +377,20 @@ async function designTurn(prompt, timeoutSeconds, role) {
     child.on('error', (error) => settle(rejectOutcome, error));
     child.on('exit', (code) => settle(resolveOutcome, { timedOut, exitCode: code }));
   });
-  const refusal = { reported: false };
+  const reported = { reported: false };
+  const witness = admissionWitness();
   for (const line of trace.split(/\r?\n/)) {
-    if (!line.includes('api_error')) continue;
-    try { reportEndpointWindow(JSON.parse(line), roleEnvironment, refusal); } catch { /* not a stream record */ }
+    let row;
+    try { row = JSON.parse(line); } catch { continue; /* stderr text, not a stream record */ }
+    witness.observe(row);
+    if (line.includes('api_error')) reportEndpointWindow(row, roleEnvironment, reported);
   }
   const { html, usable, thinkingBlocks } = readDesignTrace(trace);
-  return { ms: Date.now() - started, status: usable ? 'ready' : 'fallback', timedOut: outcome.timedOut, exitCode: outcome.exitCode, thinkingBlocks, html, trace };
+  const refusal = outcome.exitCode !== 0 && !outcome.timedOut ? witness.refused() : null;
+  return { ms: Date.now() - started, status: usable ? 'ready' : 'fallback', timedOut: outcome.timedOut, exitCode: outcome.exitCode, thinkingBlocks, html, trace, refusal };
 }
 
-async function claudeTurn(project, trace, prompt, sessionId, resume = false, timeoutMinutes = 0, acceptDeadline = false, effort = executionDefaults.effort, model = executionDefaults.model, selfVerify = false, roleEnvironment = {}) {
+async function claudeTurn(project, trace, prompt, sessionId, resume = false, timeoutMinutes = 0, acceptDeadline = false, effort = executionDefaults.effort, model = executionDefaults.model, selfVerify = false, roleEnvironment = {}, { label = 'the implementation turn' } = {}) {
   const allowedTools = [
     'Read(./CONTRACT.md)', 'Read(./package.json)', 'Read(./app.json)', 'Read(./index.js)', 'Read(./tsconfig.json)', 'Read(./App.tsx)', 'Read(./src/**)',
     'Read(./.expo-fast/design.html)',
@@ -399,12 +422,13 @@ async function claudeTurn(project, trace, prompt, sessionId, resume = false, tim
       const child = spawn(claude, args, { cwd: project, env: { ...process.env, ...roleEnvironment, CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_ATTRIBUTION_HEADER: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
       const output = createWriteStream(trace, { flags: appendTrace ? 'a' : 'w' });
       const traceState = { pending: '' };
-      const refusal = { reported: false };
+      const reported = { reported: false };
+      const witness = admissionWitness();
       let stderrText = '';
       child.stdout.on('data', (chunk) => {
         const records = normalizeClaudeTraceChunk(chunk, traceState);
         writeTraceRecords(output, records);
-        for (const record of records) if (record.row) reportEndpointWindow(record.row, roleEnvironment, refusal);
+        for (const record of records) if (record.row) { witness.observe(record.row); reportEndpointWindow(record.row, roleEnvironment, reported); }
         if (liveClaude) {
           for (const record of records) {
             if (record.row) {
@@ -421,9 +445,18 @@ async function claudeTurn(project, trace, prompt, sessionId, resume = false, tim
         if (timer) clearTimeout(timer);
         writeTraceRecords(output, flushClaudeTraceChunk(traceState));
         output.end(() => {
-          if (timedOut && acceptDeadline) ok({ deadlineReached: true, exitCode: code, stderrText, ms: Date.now() - started });
-          else if (timedOut) fail(new Error(`claude exceeded ${timeoutMinutes} minute limit; partial trace saved to ${trace}`));
-          else ok({ deadlineReached: false, exitCode: code, stderrText, ms: Date.now() - started });
+          if (timedOut && acceptDeadline) return ok({ deadlineReached: true, exitCode: code, stderrText, ms: Date.now() - started });
+          if (timedOut) return fail(new Error(`claude exceeded ${timeoutMinutes} minute limit; partial trace saved to ${trace}`));
+          // Guard 1 and guard 2. witness.refused() is already silent once
+          // anything was generated; the stderr reading is the looser path for a
+          // refusal that never reached the event stream, so it repeats the
+          // produced-nothing condition rather than trusting a pattern match
+          // alone.
+          const refusal = code !== 0
+            ? witness.refused() || (witness.produced() ? null : refusalFromText(stderrText))
+            : null;
+          if (refusal) return fail(refusedError(label, refusal, { afterDesignKill: designSlotLeaked }));
+          return ok({ deadlineReached: false, exitCode: code, stderrText, ms: Date.now() - started });
         });
       });
     });
@@ -984,7 +1017,11 @@ async function main() {
     writeJson(join(project, '.expo-fast/experiment.json'), metrics.experiment);
     metrics.stages.seedModulesMs = seedResult.ms;
     progress(`dependencies prepared · ${metrics.stages.seedModulesMs}ms`);
-    progress(`HTML design ${metrics.design.status} · ${metrics.design.ms}ms${metrics.design.timedOut ? ' · deadline reached' : ''}`);
+    // A killed design turn leaves its own request running upstream, holding a
+    // slot the turns after it have to launch against. Recorded here so a refusal
+    // later in the run can name the most likely thing it collided with.
+    designSlotLeaked = Boolean(metrics.design.timedOut);
+    progress(`HTML design ${metrics.design.status} · ${metrics.design.ms}ms${metrics.design.timedOut ? ' · deadline reached, its upstream request still holds a slot' : ''}${metrics.design.admissionRefused ? ` · never started: ${metrics.design.refusal.says}` : ''}`);
     sessionId = randomUUID(); metrics.sessionId = sessionId;
     appIconAbortController = new AbortController();
     appIconModel = resolveRole('appIcon', { inheritModel: model }).model;
@@ -1004,7 +1041,7 @@ async function main() {
     progress(`implementation turn · session=${sessionId} · model=${model} · effort=${effort}`);
     let implementationTurn;
     try {
-      implementationTurn = await claudeTurn(project, join(project, '.expo-fast/agent-trace.jsonl'), buildPrompt(project), sessionId, false, Number(o.claudeTimeoutMinutes || 0), o.acceptClaudeDeadline === 'true', effort, model, false, roleEnv(mainRole));
+      implementationTurn = await claudeTurn(project, join(project, '.expo-fast/agent-trace.jsonl'), buildPrompt(project), sessionId, false, Number(o.claudeTimeoutMinutes || 0), o.acceptClaudeDeadline === 'true', effort, model, false, roleEnv(mainRole), { label: 'the implementation turn' });
     } catch (error) {
       appIconAbortController.abort();
       throw error;
@@ -1035,7 +1072,7 @@ async function main() {
     if (!followUpText) throw new Error('follow-up request is empty');
     setRunState('generating_code', 'follow_up', { ...stateContext, revision: currentRevision.number, sessionId });
     progress(`follow-up turn · revision=${currentRevision.number} · session=${sessionId} · model=${model} · effort=${effort}`);
-    const followUpTurn = await claudeTurn(project, implementationTrace, buildFollowUpPrompt(followUpText), sessionId, true, Number(o.claudeTimeoutMinutes || 0), false, effort, model, true, roleEnv(mainRole));
+    const followUpTurn = await claudeTurn(project, implementationTrace, buildFollowUpPrompt(followUpText), sessionId, true, Number(o.claudeTimeoutMinutes || 0), false, effort, model, true, roleEnv(mainRole), { label: 'the follow-up turn' });
     if (followUpTurn.sessionId && followUpTurn.sessionId !== sessionId) {
       sessionId = followUpTurn.sessionId;
       metrics.sessionId = sessionId;
@@ -1092,7 +1129,7 @@ async function main() {
       (metrics.repairAttempts ||= []).push(attemptMetrics);
       if (currentRevision) currentRevision.repairAttempts.push(attemptMetrics);
       try {
-        const repairTurn = await claudeTurn(project, repairTrace, `Deterministic verification failed on repair cycle ${repairAttempt}. Read only .expo-fast/verification-errors.txt and the whitelisted current product source or deterministic diagnostic files needed to understand it. Fix only reported product problems in App.tsx/src/**, .expo-fast/brief.json, or package.json dependencies. Any dependency must use its exact catalog.available version; preserve all scaffold dependencies and other package.json fields. Use expo_fast.check after edits, fix every reported diagnostic, then use expo_fast.build once before stopping. Do not attempt any other path or run arbitrary shell commands.`, sessionId, true, Number(o.repairTimeoutMinutes ?? 0), false, repairEffort, repairModel, true, roleEnv(repairRole));
+        const repairTurn = await claudeTurn(project, repairTrace, `Deterministic verification failed on repair cycle ${repairAttempt}. Read only .expo-fast/verification-errors.txt and the whitelisted current product source or deterministic diagnostic files needed to understand it. Fix only reported product problems in App.tsx/src/**, .expo-fast/brief.json, or package.json dependencies. Any dependency must use its exact catalog.available version; preserve all scaffold dependencies and other package.json fields. Use expo_fast.check after edits, fix every reported diagnostic, then use expo_fast.build once before stopping. Do not attempt any other path or run arbitrary shell commands.`, sessionId, true, Number(o.repairTimeoutMinutes ?? 0), false, repairEffort, repairModel, true, roleEnv(repairRole), { label: `repair cycle ${repairAttempt}` });
         attemptMetrics.ms = repairTurn.ms;
         attemptMetrics.status = 'completed';
         attemptMetrics.completedAt = new Date().toISOString();
@@ -1269,6 +1306,17 @@ async function main() {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((e) => {
     try {
+      // A run that died because a launch was refused says so in writing, not
+      // only on stderr. Otherwise the evidence would be lost on exactly the runs
+      // that carry it: result.json is written when a run gets far enough to have
+      // results, and this one did not. Counting these is what makes "the
+      // upstream is short of capacity" a number instead of an impression.
+      if (isAdmissionRefused(e) && activeMetrics && activeResultPath) {
+        activeMetrics.status = 'admission-refused';
+        activeMetrics.admissionRefusal = e.admissionRefusal;
+        activeMetrics.error = String(e.message).slice(0, 4000);
+        writeJson(activeResultPath, activeMetrics);
+      }
       if (activeRunState?.action === 'follow-up' && activeMetrics && activeRevision?.status === 'running') {
         activeRevision.status = 'failed';
         activeRevision.completedAt = new Date().toISOString();

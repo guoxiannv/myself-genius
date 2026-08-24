@@ -38,6 +38,15 @@ import { modelCapability, readModelCache } from '../scripts/model-facts.mjs';
 import { probeContextWindow, probeEfforts, probeThinking, windowLadder } from '../scripts/model-probes.mjs';
 import { bodyText, captureRequest, mcpNames, systemText, toolNames } from '../scripts/request-body-probe.mjs';
 import { windowFromApiError, windowFromRejection } from '../scripts/endpoint-limits.mjs';
+import {
+  ADMISSION_REFUSED,
+  admissionRefusal,
+  admissionWitness,
+  isAdmissionRefused,
+  producedContent,
+  refusalFromText,
+  refusedError,
+} from '../scripts/admission.mjs';
 import { parseArguments as parseTimingArguments } from '../scripts/probe-turn-timing.mjs';
 import { repairArtifactName } from '../scripts/repair-artifact.mjs';
 import { assertDependencyRuntime, installProjectDependencies, pinRuntimeDependencies, stageHarmonyCli } from '../scripts/dependencies.mjs';
@@ -3034,47 +3043,185 @@ test('a run reports the endpoint contradicting the configured window, and only t
   // Reported, never written back: the fact table has one author, so a run that
   // edited it would leave nobody able to say how a number in it was measured.
   const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
-  assert.match(runner, /reportEndpointWindow\(record\.row, roleEnvironment, refusal\)/);
+  assert.match(runner, /reportEndpointWindow\(record\.row, roleEnvironment, reported\)/);
   assert.doesNotMatch(runner, /recordModelFacts|refreshModelCache/);
 });
 
-test('the effort probe counterbalances its levels so drift cannot fake an ordering', () => {
-  // Two hand-runs sent low, medium, high, max in that fixed order. One came out
-  // ordered in 3 of 3 variants and the next in 0 of 3. A fixed order cannot be
-  // told apart from the endpoint drifting over the couple of minutes a variant
-  // takes -- drift alone manufactures monotonicity -- so the level a variant
-  // starts at rotates.
-  const dir = temporaryDirectory('expo-fast-effort-');
-  const asked = join(dir, 'asked.txt');
-  const launcher = join(dir, 'launcher');
-  writeFileSync(launcher, `#!/bin/sh
-body=$(cat)
-echo "$body" | sed -n 's/.*"effort":"\\([a-z]*\\)".*/\\1/p' >> ${asked}
-echo 'HTTP/2 200' >&2
-echo '{"content":[{"type":"thinking","thinking":"xx"},{"type":"text","text":"2692538"}],"usage":{"output_tokens_details":{"thinking_tokens":11}}}'
-`);
-  chmodSync(launcher, 0o755);
+// A refusal quoted from pomodoro-03's session record, and its 503 aftershock
+// quoted from the #152 probe run. Both are the endpoint's own words as Claude
+// Code relayed them.
+const concurrencyRefusal = "Failed to authenticate. API Error: 403 You've reached your concurrent request limit. Please wait for your ongoing requests to finish and try again. (request id: 202608221128235306310738268d9d6VMWfEhig)";
+const noChannelRefusal = 'API Error: 503 分组 svip 下模型 k3-256k 无可用渠道（distributor） (request id: 202608231159571422616008268d9d6xXmjoelQ). This is a server-side issue, usually temporary — try again in a moment.';
 
-  const measured = probeEfforts(launcher, 'any-model', 5);
-  const order = readFileSync(asked, 'utf8').trim().split('\n');
-  assert.equal(order.length, 12, 'four levels across three variants');
-  const starts = [order[0], order[4], order[8]];
-  assert.equal(new Set(starts).size, 3, 'each variant starts at a different level');
-  for (const slice of [order.slice(0, 4), order.slice(4, 8), order.slice(8, 12)]) {
-    assert.equal(new Set(slice).size, 4, 'every variant still covers all four levels');
-  }
+test('admission reads only the two refusals this endpoint was measured to send', () => {
+  // The 403 is the admission answer itself: it arrives before generation, costs
+  // no tokens, and is the only thing that may be waited on.
+  const refused = admissionRefusal({ type: 'assistant', is_api_error_message: true, api_error_status: 403, message: { content: [{ type: 'text', text: concurrencyRefusal }] } });
+  assert.equal(refused.kind, 'concurrency');
+  assert.equal(refused.httpStatus, 403);
+  assert.match(refused.evidence, /concurrent request limit/);
 
-  // The fake replies identically every time, so nothing separates the levels
-  // and the probe must say so rather than report an ordering.
-  assert.equal(measured.orderedThroughHigh, false);
-  assert.equal(measured.variantsRising, '0/3');
-  assert.deepEqual(measured.accepted, ['low', 'medium', 'high', 'max']);
-  // The fake answers every variant with the one for n=30, so the eight replies
-  // belonging to the other two variants are counted wrong. Each variant carries
-  // its own answer, checked by brute force before use, which is what makes a
-  // wrong answer a fact about the model rather than about the question.
-  assert.equal(measured.wrongAnswers, 8);
-  rmSync(dir, { recursive: true, force: true });
+  // The terminal result event carries the same thing in another shape, and the
+  // status can be missing from the field while still being in the text.
+  assert.equal(admissionRefusal({ type: 'result', is_error: true, result: concurrencyRefusal }).kind, 'concurrency');
+
+  // After one 403 the same model answered 503 for about 400 seconds. Two stages
+  // of one event, so both are recognized -- and the raw endpoint body, which
+  // names the code rather than the Chinese message, reads the same way.
+  assert.equal(admissionRefusal({ type: 'result', is_error: true, api_error_status: 503, result: noChannelRefusal }).kind, 'no-channel');
+  assert.equal(refusalFromText('{"code":"model_not_found","type":"new_api_error","message":"..."}').kind, 'no-channel');
+
+  // Everything else stays fatal, because recognizing too much is how a gate
+  // starts hiding real faults. Narrower than needed only costs today's behaviour.
+  assert.equal(admissionRefusal({ type: 'result', is_error: true, api_error_status: 401, result: 'API Error: 401 invalid api key' }), null);
+  assert.equal(admissionRefusal({ type: 'result', is_error: true, result: 'API Error: 429 slow down' }), null);
+  assert.equal(admissionRefusal({ type: 'result', is_error: true, result: 'API Error: 403 your credit balance is exhausted' }), null);
+
+  // A model writing about rate limits in its own reply is not a refusal. Nothing
+  // Claude Code did not flag as an API error is read at all.
+  assert.equal(admissionRefusal({ type: 'assistant', message: { content: [{ type: 'text', text: "The app shows You've reached your concurrent request limit when the queue is full." }] } }), null);
+
+  // A shape whose status disagrees with the status it was measured under is not
+  // that shape. This is the seam a relay change would show up on, and it should
+  // show up as a fatal error rather than as a wait.
+  assert.equal(admissionRefusal({ type: 'result', is_error: true, api_error_status: 500, result: "API Error: 500 You've reached your concurrent request limit" }), null);
+});
+
+test('a refusal only counts while nothing has been generated', () => {
+  // Guard 1. A turn that produced anything and then failed is a failure, not a
+  // turn that never started -- and relaunching it could also mean writing over
+  // files it had already written.
+  const afterContent = admissionWitness();
+  afterContent.observe({ type: 'assistant', message: { model: 'k3-256k', content: [{ type: 'text', text: 'Writing App.tsx' }] } });
+  afterContent.observe({ type: 'result', is_error: true, api_error_status: 403, result: concurrencyRefusal });
+  assert.equal(afterContent.refused(), null);
+  assert.equal(afterContent.produced(), true);
+
+  const beforeAnything = admissionWitness();
+  beforeAnything.observe({ type: 'system', subtype: 'init', session_id: 'abc', model: 'k3-256k' });
+  beforeAnything.observe({ type: 'assistant', is_api_error_message: true, api_error_status: 403, message: { model: '<synthetic>', content: [{ type: 'text', text: concurrencyRefusal }], usage: { output_tokens: 0 } } });
+  assert.equal(beforeAnything.refused().kind, 'concurrency');
+  assert.equal(beforeAnything.produced(), false);
+
+  // Everything the model can emit counts as generation, including the reasoning
+  // and tool calls that precede any text.
+  assert.equal(producedContent({ type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'hm' }] } }), true);
+  assert.equal(producedContent({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Write' }] } }), true);
+  assert.equal(producedContent({ type: 'assistant', message: { content: [], usage: { output_tokens: 12 } } }), true);
+  assert.equal(producedContent({ type: 'assistant', is_api_error_message: true, message: { content: [{ type: 'text', text: concurrencyRefusal }] } }), false);
+});
+
+test('a refused launch is reported as what it is, and nothing waits for room', () => {
+  // #139 first proposed waiting out the refusal. It is not implemented, and this
+  // is where that decision is pinned: from inside the process the two causes of
+  // an identical refusal -- our own killed design turn still holding a slot,
+  // versus somebody else's traffic or a channel outage -- cannot be told apart.
+  // One is bounded by a measured 27-81s, the other by nothing observable, so any
+  // wait would be a number with no basis, and waiting would rewrite "the
+  // upstream is out of capacity" as "this run was slow".
+  const source = readFileSync(join(root, 'scripts/admission.mjs'), 'utf8');
+  assert.doesNotMatch(source, /setTimeout|setInterval|await sleep|budgetSeconds/);
+
+  const refusal = admissionRefusal({ type: 'result', is_error: true, api_error_status: 403, result: concurrencyRefusal });
+  const reported = refusedError('the implementation turn', refusal);
+  assert.equal(reported.code, ADMISSION_REFUSED);
+  assert.ok(isAdmissionRefused(reported));
+  assert.match(reported.message, /^the implementation turn never started: the upstream is at its concurrent request limit \(HTTP 403\)/);
+
+  // The one interpretation the report is allowed to make, because it is an
+  // observation: nothing was generated, so no model turn failed here.
+  assert.match(reported.message, /no model turn failed here/);
+  assert.match(reported.message, /nothing here can know how long that would take/);
+  assert.match(reported.message, /endpoint said: Failed to authenticate/);
+  assert.equal(reported.admissionRefusal.turn, 'the implementation turn');
+
+  // And no cause is invented. "quota-limited" was the first name this carried,
+  // which is both a guess and the name that belongs to the shape the reader
+  // keeps fatal -- a real credit exhaustion.
+  assert.doesNotMatch(reported.message, /quota|配额|timed out/i);
+});
+
+test('a refusal right after a design kill names the request the run left running', () => {
+  // Not a guess: the run knows whether it killed its own design turn, and
+  // killing the local client provably does not cancel the request behind it.
+  // Naming the likely collision is the difference between a report someone can
+  // act on and one that only says the endpoint said no.
+  const refusal = admissionRefusal({ type: 'result', is_error: true, api_error_status: 403, result: concurrencyRefusal });
+  const afterKill = refusedError('the implementation turn', refusal, { afterDesignKill: true });
+  assert.match(afterKill.message, /killed its own design turn/);
+  assert.match(afterKill.message, /keeps generating and keeps the slot/);
+  assert.equal(afterKill.admissionRefusal.afterDesignKill, true);
+
+  // Without that condition the sentence is absent rather than hedged.
+  assert.doesNotMatch(refusedError('the implementation turn', refusal).message, /design turn/);
+
+  // A no-channel refusal has two readings and the endpoint does not separate
+  // them, so the report names both instead of picking one.
+  const noChannel = refusedError('the app-icon turn', admissionRefusal({ type: 'result', is_error: true, api_error_status: 503, result: noChannelRefusal }));
+  assert.match(noChannel.message, /no longer served at all/);
+  assert.match(noChannel.message, /--refresh-models/);
+});
+
+test('no model launch can bypass the admission gate', () => {
+  // #139's three spawn points. Structural rather than behavioural on purpose:
+  // the failure this prevents is a later edit adding a fourth launch that skips
+  // the gate, and by the time that shows up in a run it has already cost one.
+  const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
+  const icon = readFileSync(join(root, 'scripts/app-icon.mjs'), 'utf8');
+
+  // Every launch classifies its own failure, so a refusal never reaches the
+  // caller as an anonymous non-zero exit.
+  assert.match(runner, /refusedError\(label, refusal, \{ afterDesignKill: designSlotLeaked \}\)/);
+  assert.match(icon, /refusedError\('the app-icon turn', refusal\)/);
+
+  // And no launch is ever repeated. The failure this prevents is a later edit
+  // adding the retry #139 ruled out, which would arrive looking like a kindness.
+  assert.doesNotMatch(runner, /attemptNumber|relaunch/i);
+  assert.doesNotMatch(icon, /attemptNumber|relaunch/i);
+  assert.equal((runner.match(/await runTurn\(/g) || []).length, 2, 'one launch per turn, plus the resume fallback');
+  assert.equal((icon.match(/await modelRunner\(/g) || []).length, 1);
+});
+
+test('a refused app-icon turn falls back to the template and says why', async () => {
+  // This turn always overlaps the implementation turn -- it waits for the brief
+  // that turn writes -- so one run asks for two concurrent slots by
+  // construction. The template icon is a working fallback, so a refusal here is
+  // not fatal; what changes is that it is no longer indistinguishable from a
+  // model that returned nonsense.
+  const project = temporaryDirectory('expo-fast-app-icon-refused-');
+  mkdirSync(join(project, '.expo-fast'), { recursive: true });
+  writeFileSync(join(project, '.expo-fast/brief.json'), '{"spec":{"product":"番茄钟"}}\n');
+  let launches = 0;
+  const fallback = await generateAppIconAfterBrief({
+    project,
+    request: '番茄钟',
+    model: 'test-model',
+    modelRunner: async () => {
+      launches += 1;
+      throw refusedError('the app-icon turn', admissionRefusal({ type: 'result', is_error: true, api_error_status: 403, result: concurrencyRefusal }));
+    },
+  });
+
+  assert.equal(launches, 1, 'refused once is refused; nothing launches again');
+  assert.equal(fallback.status, 'fallback');
+  assert.equal(fallback.admissionRefused, true);
+  assert.equal(fallback.refusal.kind, 'concurrency');
+  assert.match(fallback.reason, /never started: the upstream is at its concurrent request limit/);
+  assert.equal(JSON.parse(readFileSync(join(project, '.expo-fast/app-icon/result.json'), 'utf8')).admissionRefused, true);
+
+  // A model failure keeps reading as a model failure, with no refusal attached.
+  const broken = temporaryDirectory('expo-fast-app-icon-broken-');
+  mkdirSync(join(broken, '.expo-fast'), { recursive: true });
+  writeFileSync(join(broken, '.expo-fast/brief.json'), '{"spec":{"product":"番茄钟"}}\n');
+  const failed = await generateAppIconAfterBrief({
+    project: broken,
+    request: '番茄钟',
+    model: 'test-model',
+    modelRunner: async () => { throw new Error('Claude icon turn exited 1: boom'); },
+  });
+  assert.equal(failed.status, 'fallback');
+  assert.equal(failed.admissionRefused, undefined);
+  assert.equal(failed.refusal, undefined);
 });
 
 test('a cheap refresh keeps the facts that cost real turns to measure', () => {
@@ -3122,6 +3269,63 @@ esac
   const afterMove = refreshModelCache(launcher, paths);
   assert.equal(afterMove.models[configured].referenceTurn, undefined, 'a different endpoint drops the old facts');
   assert.equal(afterMove.models.bystander.efforts, undefined);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a refresh caught inside a refusal window keeps the facts instead of erasing them', () => {
+  // One concurrency event makes this endpoint answer 503 no-channel to
+  // everything for minutes (#139), and setup-harmony-pool.sh runs
+  // --refresh-models on every pool build. A refresh that lands in that window
+  // measures nothing, and must not be allowed to write that on top of a real
+  // measurement: the model is still served -- the list says so -- and the number
+  // it would overwrite cost real turns.
+  const dir = temporaryDirectory('expo-fast-refusal-refresh-');
+  const llmEnvPath = join(dir, 'llm.env');
+  const cachePath = join(dir, 'models-cache.json');
+  const paths = { llmEnvPath, cachePath };
+  writeFileSync(llmEnvPath, 'export ANTHROPIC_BASE_URL="https://relay.example"\n');
+
+  const configured = executionConfig.roles.main.model;
+  const launcher = join(dir, 'launcher');
+  writeFileSync(launcher, `#!/bin/sh
+case "$1" in
+  --genius-list-models) echo '{"data":[{"id":"${configured}"}]}' ;;
+  --version) echo '2.1.241 (Claude Code)' ;;
+  *) cat > /dev/null; echo 'HTTP/2 503' >&2; echo '{"code":"model_not_found","type":"new_api_error","message":"分组 svip 下模型 ${configured} 无可用渠道（distributor）"}' ;;
+esac
+`);
+  chmodSync(launcher, 0o755);
+
+  const measured = { value: 262144, confidence: 'derived', measuredAt: '2026-08-23T00:00:00.000Z' };
+  writeFileSync(cachePath, JSON.stringify({
+    schemaVersion: 2, probeSuiteVersion: 1, claudeCodeVersion: '2.1.241',
+    llmEnvMtimeMs: Math.trunc(statSync(llmEnvPath).mtimeMs), llmEnvSize: statSync(llmEnvPath).size,
+    fetchedAt: '2026-08-23T00:00:00.000Z',
+    models: { [configured]: { contextWindowTokens: measured } },
+  }));
+
+  const said = [];
+  const refreshed = refreshModelCache(launcher, paths, { notice: (line) => said.push(line) });
+  assert.deepEqual(refreshed.models[configured].contextWindowTokens, measured, 'a refusal does not erase a measurement');
+  assert.ok(said.some((line) => /keeps what was measured before/.test(line)), 'and it says which fields it left alone');
+
+  // The model is still listed, so nothing here decides it is unserved either.
+  // That reading of the same 503 is the one start-livetest already refuses,
+  // before a turn is spent.
+  assert.ok(Object.keys(refreshed.models).includes(configured));
+
+  // A probe that failed for any other reason still records that it could not
+  // tell. Only a refusal is exempt, because only a refusal measured nothing.
+  writeFileSync(launcher, `#!/bin/sh
+case "$1" in
+  --genius-list-models) echo '{"data":[{"id":"${configured}"}]}' ;;
+  --version) echo '2.1.241 (Claude Code)' ;;
+  *) cat > /dev/null; echo 'HTTP/2 500' >&2; echo '{"error":{"message":"internal error"}}' ;;
+esac
+`);
+  chmodSync(launcher, 0o755);
+  const afterRealFailure = refreshModelCache(launcher, paths);
+  assert.equal(afterRealFailure.models[configured].contextWindowTokens.status, 'unmeasured');
   rmSync(dir, { recursive: true, force: true });
 });
 

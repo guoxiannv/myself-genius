@@ -12,7 +12,9 @@ own configured model at low effort with a hard deadline below one minute. That d
 a budget rather than an estimate: the turn is expected to sometimes exceed it, and failure
 is a non-blocking fallback. The turn also thinks, and cannot be told not to -- no Claude
 Code knob reaches the `thinking` field of the request body, measured against Claude Code
-2.1.241. Valid output is saved as `.expo-fast/design.html`.
+2.1.241. Valid output is saved as `.expo-fast/design.html`. Killing the turn on its
+deadline stops the local client only: the endpoint keeps generating and keeps the
+concurrency slot, so the turns behind it may be refused a launch because of it.
 The main implementation turn keeps its normal reasoning and translates the reference
 into native React Native layout and local Lucide path geometry.
 
@@ -22,6 +24,29 @@ failures resume the same model session for another repair until the `repair.limi
 declared in `config/execution.json` is reached, at which point the last diagnosis is kept
 and the run ends. Process/model failures, per-turn deadlines, user cancellation, and
 system limits remain terminal conditions.
+
+A launch the upstream refuses is reported as that and not as a model failure. The endpoint
+answers "may this turn start" at launch, before any generation and at no token cost:
+`403 concurrent request limit`, or the `503` no-channel answer the same event produces for
+minutes afterwards. Both are recognized by shape; quota exhaustion, authentication
+failures, and every other 403/429/503 are reported as themselves. A refusal arriving after
+any assistant content is a turn that ran and then failed, which is a different diagnosis.
+The run ends as `admission-refused` in `result.json`, with the endpoint's own words, which
+makes "the upstream is short of capacity" a counted event rather than an impression.
+
+Nothing waits for room and nothing relaunches. The refusal is identical whether the slot
+being held is this run's own -- a design turn killed on its deadline leaves its upstream
+generation running, bounded by the 27-81s such a document takes -- or somebody else's
+traffic, bounded by nothing observable. Since the process cannot tell those apart, any wait
+would be a number with no stated basis, and waiting would rewrite a capacity shortage as a
+slow run. One run asks for at least two concurrent slots by construction, because the
+app-icon turn waits for the brief the implementation turn writes and therefore overlaps it.
+When a refusal follows this run's own design kill, the report names that request as the
+most likely collision.
+
+A refused design or app-icon turn stays non-blocking: both are optional and their fallbacks
+are working ones, so the refusal is recorded beside the fallback instead of ending the run.
+A refused implementation, follow-up, or repair turn ends it.
 
 The initial 0→1 turn keeps the established product prompt and `Read`/`Write`/`Edit`
 tool surface. Repair and user follow-up turns additionally receive two project-bound MCP
@@ -135,7 +160,8 @@ Evidence written per run:
   design.html             # optional low-effort visual reference
   design-trace.jsonl
   app-icon/
-    result.json           # ready/fallback status, timing, model, source, asset paths
+    result.json           # ready/fallback status, timing, model, source, asset paths,
+                          # and whether the upstream refused the launch
     background.svg
     foreground.svg
     icon.svg

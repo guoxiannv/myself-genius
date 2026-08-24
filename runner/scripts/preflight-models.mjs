@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { resolveExecutionRoles, resolveRole } from './execution-policy.mjs';
 import { probeContextWindow, probeThinking } from './model-probes.mjs';
 import { cacheSchemaVersion, fingerprintLlmEnv, llmEnvPath, cachePath, probeSuiteVersion, readModelCache } from './model-facts.mjs';
+import { refusalFromText } from './admission.mjs';
 
 // Verifying a configuration against the measured facts. The facts themselves,
 // and reading them, live in model-facts.mjs, which imports nothing from here --
@@ -153,7 +154,7 @@ export function refreshModelCache(claudeBin, paths = {}, options = {}) {
   const measured = Object.fromEntries(models.map((model) => [model, { ...(carried[model] || {}) }]));
   for (const model of wanted) {
     notice(`probing ${model}`);
-    measured[model] = { ...(carried[model] || {}), ...probeModel(claudeBin, model, notice) };
+    measured[model] = keepFactsThroughARefusal(carried[model], probeModel(claudeBin, model, notice), model, notice);
   }
   const cache = {
     schemaVersion: cacheSchemaVersion,
@@ -184,6 +185,30 @@ function claudeCodeVersion(claudeBin) {
   const shown = spawnSync(claudeBin, ['--version'], { encoding: 'utf8', timeout: 30_000 });
   if (shown.status !== 0) return null;
   return shown.stdout.match(/\b\d+(?:\.\d+)+[\w.-]*/)?.[0] ?? null;
+}
+
+// One concurrency event makes this endpoint answer 503 no-channel to everything
+// for minutes afterwards (#139), and a probe that lands inside that window
+// measures nothing. It must not be allowed to say so on top of a real
+// measurement: overwriting a fact with "unmeasured" would let one traffic
+// accident erase numbers that cost real turns to produce, and the erasure would
+// be invisible afterwards. A refusal is not a measurement, so nothing is written
+// for it -- and the refresh says which fields it left alone.
+function keepFactsThroughARefusal(carried, fresh, model, notice) {
+  const merged = { ...(carried || {}), ...fresh };
+  const kept = [];
+  for (const [name, fact] of Object.entries(fresh)) {
+    if (fact?.status !== 'unmeasured') continue;
+    if (!refusalFromText(String(fact.evidence || ''))) continue;
+    const previous = carried?.[name];
+    if (!previous || previous.status === 'unmeasured') continue;
+    merged[name] = previous;
+    kept.push(name);
+  }
+  if (kept.length) {
+    notice(`${model}: the endpoint refused the probe, so ${kept.join(', ')} keeps what was measured before`);
+  }
+  return merged;
 }
 
 function probeModel(claudeBin, model, notice) {

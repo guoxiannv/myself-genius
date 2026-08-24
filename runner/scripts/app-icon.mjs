@@ -9,6 +9,7 @@ import {
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { resolveRole, roleEnv } from './execution-policy.mjs';
+import { admissionRefusal, isAdmissionRefused, producedContent, refusalFromText, refusedError } from './admission.mjs';
 
 // config/execution.json is the only source for this role's model, effort, and
 // timeouts. It does not hold the window: it names where that number comes from,
@@ -324,6 +325,21 @@ function structuredIconOutput(stdout) {
   throw new Error('Claude icon turn returned no structured output');
 }
 
+// Whether this turn was refused rather than failed. The icon turn asks for
+// --output-format json, so it has no event stream to read: the envelope is the
+// only structured evidence there is, and when even that will not parse, the raw
+// output is. Guard 1 holds on both paths -- a refusal only counts when nothing
+// was generated, and this turn produces its whole product in one reply.
+function iconAdmissionRefusal(stdout, stderr) {
+  try {
+    const envelope = JSON.parse(stdout);
+    if (producedContent(envelope)) return null;
+    const structured = admissionRefusal(envelope);
+    if (structured) return structured;
+  } catch { /* not a JSON envelope; fall through to the text reading */ }
+  return refusalFromText(`${stdout}\n${stderr}`);
+}
+
 export async function runIconModel({
   project,
   claude = process.env.CLAUDE_BIN || 'claude',
@@ -392,7 +408,11 @@ export async function runIconModel({
       signal?.removeEventListener('abort', onAbort);
       if (signal?.aborted) return reject(new Error('App icon generation was aborted'));
       if (timedOut) return reject(new Error(`App icon generation exceeded ${timeoutSeconds}s`));
-      if (code !== 0) return reject(new Error(`Claude icon turn exited ${code}: ${stderr || stdout}`));
+      if (code !== 0) {
+        const refusal = iconAdmissionRefusal(stdout, stderr);
+        if (refusal) return reject(refusedError('the app-icon turn', refusal));
+        return reject(new Error(`Claude icon turn exited ${code}: ${stderr || stdout}`));
+      }
       try {
         resolvePromise({ output: structuredIconOutput(stdout), stdout, stderr });
       } catch (error) {
@@ -449,6 +469,10 @@ export async function generateAppIconAfterBrief({
     const selected = selectIconContext(brief, request);
     source = selected.source;
     const inputSha256 = createHash('sha256').update(selected.text).digest('hex');
+    // This turn always overlaps the implementation turn: it waits for the brief
+    // that turn writes, so one run asks the endpoint for two concurrent slots by
+    // construction (#139). Being refused therefore has a specific meaning here,
+    // and it is reported rather than folded into the template fallback.
     const modelStarted = Date.now();
     const turn = await modelRunner({
       project,
@@ -481,6 +505,9 @@ export async function generateAppIconAfterBrief({
     writeJson(resultPath, result);
     return result;
   } catch (error) {
+    // Still the template icon, and still non-blocking -- but a launch the
+    // upstream refused is recorded as that rather than as an anonymous fallback.
+    // The two are different facts, and only one of them is about this project.
     const result = {
       schemaVersion: 1,
       status: 'fallback',
@@ -490,6 +517,7 @@ export async function generateAppIconAfterBrief({
       startedAt,
       completedAt: new Date().toISOString(),
       durationMs: Date.now() - started,
+      ...(isAdmissionRefused(error) ? { admissionRefused: true, refusal: error.admissionRefusal } : {}),
       reason: String(error?.message || error).slice(0, 4000),
     };
     writeJson(resultPath, result);

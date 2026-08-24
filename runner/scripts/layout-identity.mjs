@@ -30,11 +30,10 @@ export function buildIdentityNodeId(stamp) {
   return `${BUILD_IDENTITY_NODE_ID_PREFIX}${stamp}`;
 }
 // A direct-HAP install has no host to vouch for it, so the build stamps itself
-// into its own accessibility tree. Measured on device: uitest dumpLayout carries
-// a React Native testID on both `id` and `key`, and drops zero-sized, off-screen
-// and display:none nodes outright -- hence the 1x1 absolutely positioned node the
-// orchestrator injects. Presence in the tree is the whole claim; visibility is
-// deliberately not required.
+// into its own accessibility tree; buildIdentityModule in hap-build.mjs shapes
+// the node so a dumpLayout keeps it. Read from `id` or `key` because uitest
+// reports a React Native testID on both. Presence in the tree is the whole
+// claim; visibility is deliberately not required.
 export function observedBuildStamps(layout) {
   const stamped = collect(layout, (node) => {
     const identity = node.attributes?.id || node.attributes?.key;

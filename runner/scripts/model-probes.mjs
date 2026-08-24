@@ -76,21 +76,6 @@ export function probeContextWindow(claudeBin, model, notice = () => {}, ladder =
   };
 }
 
-// Two small requests that differ in one field, read on both sides.
-//
-// The reply side decides the verdict: a thinking block, and the thinking_tokens
-// the endpoint reports for it. That is the observable difference the rule above
-// demands -- a relay that merely hid the block while the model still thought
-// would leave the token count behind, and this would catch it.
-//
-// The request side says how far the field got, which the reply alone cannot
-// tell. Measured on this relay, turning thinking off also shrinks the prompt
-// the endpoint counts, by a per-model amount that does not vary with the
-// message: 68 tokens on k3-256k and 79 on deepseek-v4-flash, over three message
-// lengths each. Nothing a relay does to a reply can shorten the prompt it
-// billed, so this separates "the model was told not to think" from "the block
-// was stripped on the way back". It costs no extra turn -- both numbers come
-// out of the two requests already being sent.
 // Prompt tokens as the endpoint counted them, summed over the cache buckets. A
 // near-repeated body moves the same number out of input_tokens and into
 // cache_read_input_tokens, so reading one bucket alone reports a difference
@@ -113,6 +98,21 @@ function thinkingTokens(reply) {
   };
 }
 
+// Two small requests that differ in one field, read on both sides.
+//
+// The reply side decides the verdict: a thinking block, and the thinking_tokens
+// the endpoint reports for it. That is the observable difference the rule above
+// demands -- a relay that merely hid the block while the model still thought
+// would leave the token count behind, and this would catch it.
+//
+// The request side says how far the field got, which the reply alone cannot
+// tell. Measured on this relay, turning thinking off also shrinks the prompt
+// the endpoint counts, by a per-model amount that does not vary with the
+// message: 68 tokens on k3-256k and 79 on deepseek-v4-flash, over three message
+// lengths each. Nothing a relay does to a reply can shorten the prompt it
+// billed, so this separates "the model was told not to think" from "the block
+// was stripped on the way back". It costs no extra turn -- both numbers come
+// out of the two requests already being sent.
 export function probeThinking(claudeBin, model) {
   const ask = (extra) => completion(claudeBin, {
     model,
@@ -166,11 +166,12 @@ export function probeThinking(claudeBin, model) {
 }
 
 // A probe stimulus has to be hard enough for the difference it looks for to
-// exist. Measured both ways: asked a one-line riddle, low/medium/high/max all
-// land within noise of one another, and the honest-looking verdict "no
-// observable difference" is simply wrong -- the task never needed more
-// thinking. Asked to derive a recurrence, low < medium < high held in 3 of 3
-// variants, odds of about 1 in 200 by chance.
+// exist. Asked a one-line riddle, low/medium/high/max all land within noise of
+// one another, and the honest-looking verdict "no observable difference" is
+// simply wrong -- the task never needed more thinking. Deriving a recurrence
+// moves the numbers far enough apart to read, which is all this claims:
+// whether they then order is a separate question, and not one a fixed level
+// order could answer -- see levelOrder below.
 //
 // So "no difference" has two causes, a dead knob and a weak stimulus, and only
 // the second is ours. A probe that cannot tell them apart reports our own

@@ -81,10 +81,10 @@ async function main() {
 
   for (const model of options.models) {
     // The role is the design role with this model substituted, so the turn is
-    // shaped exactly like the one in production. Its context window still comes
-    // from configuration rather than from the model, which is the split this
-    // work has not reached yet; here it only moves auto-compaction, and a
-    // single turn never reaches it.
+    // shaped exactly like the one in production -- window included, since that
+    // is now read from what this model was measured to accept rather than from
+    // whichever role named it. Here it only moves auto-compaction, and a single
+    // turn never reaches it.
     const role = resolveRole('design', { model });
     const samples = [];
     for (let run = 1; run <= options.samples; run += 1) {

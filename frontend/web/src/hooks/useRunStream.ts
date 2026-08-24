@@ -28,8 +28,7 @@ const DEFAULT_POLL_MS = 3000
 
 /**
  * 订阅单个 run 的实时进度。
- * 优先尝试 SSE（GET /api/runs/:id/events），后端暂未实现时自动降级为轮询。
- * 后端补上 SSE 端点后，本 hook 无需改动即可启用推送。
+ * 优先走 SSE（GET /api/runs/:id/events），浏览器不支持或连接断开时降级为轮询。
  */
 export function useRunStream(runId: string | undefined, shareToken = ""): RunStreamState {
   const [data, setData] = useState<RunProgress | null>(null)
@@ -127,7 +126,7 @@ export function useRunStream(runId: string | undefined, shareToken = ""): RunStr
       }
 
       eventSource.onerror = () => {
-        // SSE 不可用（端点未实现或断连）→ 关闭并降级为轮询
+        // SSE 断开 → 关闭并降级为轮询
         eventSource?.close()
         eventSource = null
         if (!cancelled && (!finishedRef.current || interactiveRef.current)) startPolling()

@@ -402,7 +402,6 @@ async function main() {
     desktop: raw.desktopTargets ? splitTargets(raw.desktopTargets) : configuredPools.desktop,
     phone: raw.phoneTargets ? splitTargets(raw.phoneTargets) : configuredPools.phone,
   };
-  // Device classes are discovered by the runner from connected HDC targets.
   const previewGatewayOrigin = String(raw.gatewayOrigin || process.env.EXPO_FAST_PREVIEW_GATEWAY_ORIGIN || 'http://127.0.0.1:3456').replace(/\/$/, '');
   if (!hdcPreviewPools.desktop.length && hdcPreviewTargets.desktop) hdcPreviewPools.desktop = [hdcPreviewTargets.desktop];
   if (!hdcPreviewPools.phone.length && hdcPreviewTargets.phone) hdcPreviewPools.phone = [hdcPreviewTargets.phone];

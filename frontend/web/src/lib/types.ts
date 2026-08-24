@@ -1,5 +1,4 @@
-// 与 Python 后端 build_progress_payload 输出对齐的类型定义。
-// 后端字段一旦变动，这里更新后所有用到的地方会获得类型检查。
+// 与 Python 后端 build_progress_payload 的输出对齐；后端字段变动后先改这里。
 
 export type RunStatus = "waiting" | "running" | "succeeded" | "failed" | string
 export type RunRuntime = "arkpilot" | "expo"

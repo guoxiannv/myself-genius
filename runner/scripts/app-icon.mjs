@@ -10,8 +10,9 @@ import { basename, dirname, join, relative, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { resolveRole, roleEnv } from './execution-policy.mjs';
 
-// config/execution.json is the only source for this role's model, effort,
-// timeouts, and context window.
+// config/execution.json is the only source for this role's model, effort, and
+// timeouts. It does not hold the window: it names where that number comes from,
+// and resolveRole reads it from what the model was measured to accept.
 const appIconRole = resolveRole('appIcon');
 
 export const APP_ICON_ASSET_ROOT = 'assets/app-icon';

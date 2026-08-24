@@ -21,7 +21,6 @@ export function InstallDock({ artifacts }: { artifacts: RunArtifacts }) {
   const previousInstallKeyRef = useRef("")
   const panelRef = useRef<HTMLDivElement>(null)
 
-  // 首个二维码或后续更新后的二维码就绪时，都自动展开。
   useEffect(() => {
     const installKey = installReady
       ? artifacts.install_url

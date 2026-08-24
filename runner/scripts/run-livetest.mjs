@@ -977,7 +977,7 @@ async function main() {
     if (designHtml) writeFileSync(join(project, '.expo-fast/design.html'), designHtml);
     // thinkingBlocks arrives from designMetrics, counted in the reply. Nothing
     // here asserts what the turn was asked to do with thinking, because nothing
-    // we can send decides it.
+    // we can send decides it. Pinned by tests/orchestrator.test.mjs.
     metrics.design = { ...designMetrics, path: designHtml ? '.expo-fast/design.html' : '', model: designModel, effort: designRole.effort, timeoutSeconds: designTimeoutSeconds };
     metrics.stages.designMs = metrics.design.ms;
     metrics.experiment.design = { ...metrics.design, ...(metrics.design.path ? { sha256: sha256(readFileSync(join(project, metrics.design.path), 'utf8')) } : {}) };

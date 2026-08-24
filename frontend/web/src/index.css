@@ -21,9 +21,13 @@
   --color-danger: #f87171;
   --color-info: #60a5fa;
 
+  /* Latin 字形优先取系统 UI 字体，CJK 由后段的 Noto/思源兜底：
+     Arial 无中文字形，因此中文会落到 Noto Sans SC，Linux/Android 上不再出现方块字。 */
   --font-sans: "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei",
-    "Segoe UI", Arial, sans-serif;
-  --font-serif: "Noto Serif SC", "Songti SC", "SimSun", Georgia, serif;
+    "Segoe UI", Arial, "Noto Sans SC", "Noto Sans CJK SC", "Source Han Sans SC",
+    "Hiragino Sans GB", sans-serif;
+  --font-serif: "Noto Serif SC", "Noto Serif CJK SC", "Source Han Serif SC",
+    "Songti SC", "SimSun", Georgia, serif;
   /* 产品界面不使用超过 400 的字重；保留语义类，但统一映射为常规字重。 */
   --font-weight-medium: 400;
   --font-weight-semibold: 400;
@@ -53,6 +57,13 @@ body {
 b,
 strong {
   font-weight: 400;
+}
+
+/* 键盘焦点环：只在键盘导航时出现，鼠标点击不显示。
+   全站原先只有一处按钮有焦点样式，Tab 导航时无法判断焦点位置。 */
+:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--color-accent) 75%, transparent);
+  outline-offset: 2px;
 }
 
 /* 全局氛围光：顶部一抹暖橙极光，呼应 rork 的发光质感 */
@@ -190,6 +201,32 @@ strong {
   );
   background-size: 200% 100%;
   animation: shimmer 1.6s ease-in-out infinite;
+}
+
+/* Web 预览构建中的不确定进度条 */
+@keyframes preview-progress {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+.preview-progress {
+  animation: preview-progress 1.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+  }
+
+  .preview-progress {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+  }
 }
 
 /* 滚动条 */

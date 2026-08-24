@@ -20,3 +20,7 @@
 
 # Machine-local Harmony Go shell build cache (unsigned host.exp.exponent.harmony HAP).
 /runner/.harmony-go-shell/
+
+# v0 预览转发壳（本地生成，不进版本库）
+/package.json
+/pnpm-lock.yaml

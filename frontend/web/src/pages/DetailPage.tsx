@@ -237,7 +237,7 @@ function BackLink() {
   return (
     <Link
       to="/"
-      className="inline-flex h-8 items-center gap-1.5 rounded-full border border-border bg-surface/70 px-3 text-xs font-semibold text-foreground shadow-lg shadow-black/15 transition-colors hover:border-[#f59e0b] hover:bg-[#f59e0b]/10 hover:text-[#fbbf24]"
+      className="inline-flex h-8 items-center gap-1.5 rounded-full border border-border bg-surface/70 px-3 text-xs font-semibold text-foreground shadow-lg shadow-black/15 transition-colors hover:border-accent/50 hover:bg-accent/10 hover:text-accent-soft"
     >
       <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
         <path

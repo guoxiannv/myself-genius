@@ -2,6 +2,7 @@ import { Link } from "react-router-dom"
 import { TopBar } from "@/components/layout/TopBar"
 import { AuthControl } from "@/components/layout/AuthControl"
 import { PromptComposer } from "@/components/home/PromptComposer"
+import { cn } from "@/lib/format"
 
 const STEPS = [
   {
@@ -54,13 +55,13 @@ export function HomePage() {
           AI 驱动的 HarmonyOS 应用生成
         </span>
 
-        <h1 className="mt-5 text-balance text-center text-4xl font-bold leading-tight tracking-tight sm:text-6xl">
+        <h1 className="mt-6 text-balance text-center text-[2.5rem] leading-[1.15] tracking-tight text-foreground sm:text-6xl">
           一句话，构建你的
           <br />
           <span className="text-glow">鸿蒙应用</span>
         </h1>
 
-        <p className="mt-4 max-w-lg text-pretty text-center text-base leading-relaxed text-muted">
+        <p className="mt-5 max-w-lg text-pretty text-center text-sm leading-relaxed text-subtle sm:text-base">
           从想法到真机，全程自动完成。
         </p>
 
@@ -71,34 +72,46 @@ export function HomePage() {
 
       {/* 第二屏：三步流程 + CTA，占满整屏高度并垂直居中 */}
       <section className="relative z-10 mx-auto flex min-h-screen w-full max-w-5xl flex-col justify-center px-5 py-16">
-        <h2 className="text-center font-serif text-4xl font-black tracking-tight sm:text-5xl">
+        <h2 className="text-center text-3xl leading-tight tracking-tight text-foreground sm:text-4xl">
           三步，从想法到上架
         </h2>
 
-        <ol className="mt-12 grid gap-10 sm:grid-cols-3 sm:gap-8">
+        {/* 三步是真实时序，用一条贯穿的轨道表达推进关系，而非并列的装饰性编号 */}
+        <ol className="mt-14 grid gap-10 sm:grid-cols-3 sm:gap-6">
           {STEPS.map((step, i) => (
-            <li key={step.title} className="flex flex-col">
-              <span className="text-5xl font-bold leading-none tracking-tight text-accent/70">
-                {String(i + 1).padStart(2, "0")}
-              </span>
-              <h3 className="mt-5 text-lg font-semibold text-foreground">{step.title}</h3>
-              <p className="mt-2 text-sm leading-relaxed text-muted">{step.desc}</p>
+            <li key={step.title} className="relative flex flex-col pt-6">
+              {/* 轨道线跨过 grid gap 连到下一个节点，形成一条连续的时序轨道；末节收束为短促的收尾 */}
+              <span
+                aria-hidden="true"
+                className={cn(
+                  "absolute left-0 top-[3px] hidden h-px sm:block",
+                  i === STEPS.length - 1
+                    ? "w-10 bg-gradient-to-r from-accent/35 to-transparent"
+                    : "w-[calc(100%+1.5rem)] bg-gradient-to-r from-accent/35 via-border to-accent/35",
+                )}
+              />
+              <span
+                aria-hidden="true"
+                className="absolute left-0 top-0 h-[7px] w-[7px] rounded-full bg-accent ring-4 ring-accent/10"
+              />
+              <h3 className="text-base leading-snug text-foreground">{step.title}</h3>
+              <p className="mt-2.5 max-w-[26ch] text-sm leading-relaxed text-subtle">{step.desc}</p>
             </li>
           ))}
         </ol>
 
-        <div className="mt-16 rounded-[2.5rem] border border-border bg-surface/50 px-6 py-12 text-center">
-          <h2 className="text-balance font-serif text-3xl font-black tracking-tight sm:text-4xl">
+        <div className="mt-20 flex flex-col items-center rounded-[var(--radius-card)] border border-border bg-surface/40 px-6 py-14 text-center">
+          <h2 className="text-balance text-2xl leading-snug tracking-tight text-foreground sm:text-3xl">
             现在就开始打造你的鸿蒙 App
           </h2>
-          <p className="mx-auto mt-4 max-w-xl text-pretty text-base leading-relaxed text-muted">
+          <p className="mt-3.5 max-w-md text-pretty text-sm leading-relaxed text-subtle">
             免费体验 AI 生成能力，几分钟即可看到你的第一个鸿蒙应用。
           </p>
           <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
             <button
               type="button"
               onClick={scrollToTop}
-              className="inline-flex h-9 items-center gap-1.5 rounded-full bg-accent px-3.5 text-xs font-semibold text-background shadow-lg shadow-accent/20 transition-colors hover:bg-accent-soft"
+              className="inline-flex h-10 items-center gap-1.5 rounded-full bg-accent px-5 text-sm text-background transition-colors hover:bg-accent-soft"
             >
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
                 <path

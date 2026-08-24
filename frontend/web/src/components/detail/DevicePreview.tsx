@@ -855,10 +855,85 @@ function PreviewLoadingIcon() {
 
 function WebPreviewLoading() {
   return (
-    <div className="flex h-full w-full items-center justify-center bg-[#0d1117] text-white" role="status" aria-live="polite" aria-label="代码生成中">
-      <div className="flex items-center gap-2.5 text-sm font-medium text-white/65">
-        <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/20 border-t-accent" aria-hidden="true" />
-        <span>代码生成中</span>
+    <div
+      className="relative flex h-full w-full flex-col overflow-hidden bg-surface"
+      role="status"
+      aria-live="polite"
+      aria-label="Web 版代码生成中"
+    >
+      {/* 模拟浏览器窗口的标题栏与地址栏 */}
+      <div className="flex shrink-0 items-center gap-2 border-b border-border bg-surface-raised px-3 py-2">
+        <span className="flex shrink-0 items-center gap-1.5" aria-hidden="true">
+          <span className="h-2.5 w-2.5 rounded-full bg-border-strong" />
+          <span className="h-2.5 w-2.5 rounded-full bg-border-strong" />
+          <span className="h-2.5 w-2.5 rounded-full bg-border-strong" />
+        </span>
+        <div className="ml-1 flex h-6 min-w-0 flex-1 items-center gap-2 rounded-md bg-background/70 px-2.5 ring-1 ring-inset ring-border">
+          <svg viewBox="0 0 16 16" width="10" height="10" fill="none" className="shrink-0 text-subtle" aria-hidden="true">
+            <rect x="3.5" y="7" width="9" height="6.5" rx="1.4" stroke="currentColor" strokeWidth="1.3" />
+            <path d="M5.75 7V5.25a2.25 2.25 0 0 1 4.5 0V7" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+          </svg>
+          <span className="skeleton h-1.5 w-2/5 max-w-[180px] rounded-full" aria-hidden="true" />
+        </div>
+        <span className="skeleton h-3 w-3 shrink-0 rounded" aria-hidden="true" />
+      </div>
+
+      {/* 不确定进度条：呼应强调色，暗示构建仍在进行 */}
+      <div className="h-[2px] w-full shrink-0 overflow-hidden bg-border/60" aria-hidden="true">
+        <span className="preview-progress block h-full w-1/3 bg-gradient-to-r from-transparent via-accent to-transparent" />
+      </div>
+
+      {/* 页面线框骸架 */}
+      <div className="flex min-h-0 flex-1 flex-col gap-[3.5%] p-[4%]" aria-hidden="true">
+        <div className="flex shrink-0 items-center gap-3">
+          <span className="skeleton h-4 w-4 rounded" />
+          <span className="skeleton h-2 w-14 rounded-full" />
+          <span className="skeleton ml-auto h-2 w-10 rounded-full" style={{ animationDelay: "0.1s" }} />
+          <span className="skeleton h-2 w-10 rounded-full" style={{ animationDelay: "0.2s" }} />
+          <span className="skeleton h-5 w-16 rounded-md" style={{ animationDelay: "0.3s" }} />
+        </div>
+
+        <div className="flex shrink-0 flex-col gap-2.5">
+          <span className="skeleton h-3.5 w-3/5 rounded-md" style={{ animationDelay: "0.15s" }} />
+          <span className="skeleton h-2 w-2/5 rounded-full" style={{ animationDelay: "0.25s" }} />
+          <span className="skeleton mt-1 h-6 w-24 rounded-md" style={{ animationDelay: "0.35s" }} />
+        </div>
+
+        <div className="grid min-h-0 flex-1 grid-cols-3 gap-[3%]">
+          {[0, 1, 2].map((index) => (
+            <div
+              key={index}
+              className="flex min-h-0 flex-col gap-2 rounded-lg border border-border bg-surface-raised/50 p-[7%]"
+            >
+              <span
+                className="skeleton min-h-0 flex-1 rounded-md"
+                style={{ animationDelay: `${0.2 + index * 0.12}s` }}
+              />
+              <span
+                className="skeleton h-2 w-3/4 shrink-0 rounded-full"
+                style={{ animationDelay: `${0.28 + index * 0.12}s` }}
+              />
+              <span
+                className="skeleton h-2 w-1/2 shrink-0 rounded-full"
+                style={{ animationDelay: `${0.36 + index * 0.12}s` }}
+              />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* 中央状态提示 */}
+      <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+        <div className="flex max-w-[80%] flex-col items-center gap-2 rounded-xl border border-border bg-background/85 px-5 py-4 text-center shadow-[0_18px_48px_rgba(0,0,0,0.45)] backdrop-blur-md">
+          <span className="flex items-center gap-2.5 text-sm text-foreground">
+            <span
+              className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-border-strong border-t-accent"
+              aria-hidden="true"
+            />
+            代码生成中
+          </span>
+          <span className="text-[11px] leading-relaxed text-subtle">Web 版构建完成后会自动载入预览</span>
+        </div>
       </div>
     </div>
   )

@@ -36,6 +36,7 @@ import {
 import { refreshModelCache, verifyConfiguredModels } from '../scripts/preflight-models.mjs';
 import { modelCapability, readModelCache } from '../scripts/model-facts.mjs';
 import { probeContextWindow, probeEfforts, probeThinking, windowLadder } from '../scripts/model-probes.mjs';
+import { bodyText, captureRequest, mcpNames, systemText, toolNames } from '../scripts/request-body-probe.mjs';
 import { windowFromApiError, windowFromRejection } from '../scripts/endpoint-limits.mjs';
 import { parseArguments as parseTimingArguments } from '../scripts/probe-turn-timing.mjs';
 import { repairArtifactName } from '../scripts/repair-artifact.mjs';
@@ -3201,4 +3202,66 @@ test('the design deadline is reported, never judged', () => {
   write([{ ms: 1000, bytes: 9000, complete: true }, { ms: 2000, bytes: 9000, complete: true }]);
   assert.deepEqual(verifyConfiguredModels({}, paths).notes, []);
   rmSync(dir, { recursive: true, force: true });
+});
+
+test('an empty flag value must never sit where the prompt does', () => {
+  // Measured against Claude Code 2.1.241: `--tools '' <prompt>` consumes the
+  // prompt as the flag's value and the run exits reporting that no input was
+  // given. The design turn is safe only because --output-format follows its
+  // empty --tools -- a property nobody had written down, and one that a tidy-up
+  // of the argument order would quietly destroy. It is also what made an earlier
+  // attempt at this probe look intermittent: the runs that captured nothing were
+  // the ones whose empty value happened to land last.
+  const { args } = designTurnInvocation(resolveRole('design'), 'the prompt');
+  assert.equal(args.at(-1), 'the prompt', 'the prompt is the final argument');
+  for (const [index, value] of args.entries()) {
+    if (value !== '') continue;
+    assert.ok(index + 1 < args.length - 1, `an empty value at ${index} is immediately before the prompt`);
+    assert.match(args[index + 1], /^--/, 'an empty value must be followed by another flag');
+  }
+});
+
+test('the request-body probe reads what was sent, not where we assumed it lands', async () => {
+  // Fixtures rather than a live capture for the reading itself, so the rules
+  // stay checkable without Claude Code installed.
+  const request = {
+    system: [{ type: 'text', text: 'FIRST' }, { type: 'text', text: 'SECOND' }],
+    tools: [{ name: 'Read' }, { name: 'Write' }],
+    messages: [{ role: 'user', content: 'MARKER-IN-MESSAGES' }],
+  };
+  assert.equal(systemText(request), 'FIRST\nSECOND');
+  assert.deepEqual(toolNames(request), ['Read', 'Write']);
+  assert.equal(systemText({ system: 'plain' }), 'plain');
+  assert.deepEqual(toolNames({}), []);
+
+  // The distinction the probe exists to respect: a project CLAUDE.md arrives
+  // among the messages while --append-system-prompt-file lands in system, so a
+  // check reading only `system` reports the CLAUDE.md walk as already disabled --
+  // the right answer for the wrong reason.
+  assert.equal(systemText(request).includes('MARKER-IN-MESSAGES'), false);
+  assert.equal(bodyText(request).includes('MARKER-IN-MESSAGES'), true);
+
+  // The capture plumbing, driven by a stand-in for Claude Code so the test needs
+  // neither the real binary nor the network.
+  const dir = mkdtempSync(join(tmpdir(), 'expo-fast-capture-test-'));
+  const stub = join(dir, 'claude-stub');
+  writeFileSync(stub, `#!/bin/sh
+echo '{"type":"system","subtype":"init","mcp_servers":[{"name":"ghost","status":"failed"}]}'
+curl -sS "$ANTHROPIC_BASE_URL/v1/messages" -H 'content-type: application/json' \
+  --data '{"model":"stub","tools":[{"name":"Read"}],"system":[{"type":"text","text":"HELLO"}],"messages":[]}' > /dev/null
+`);
+  chmodSync(stub, 0o755);
+  const previous = process.env.GENIUS_CLAUDE_REAL_BIN;
+  process.env.GENIUS_CLAUDE_REAL_BIN = stub;
+  try {
+    const capture = await captureRequest({ flags: ['--tools', ''], cwd: dir, timeoutMs: 20_000 });
+    assert.equal(capture.requestCount, 1, 'exactly one request, so a contrast compares two runs and not two retries');
+    assert.deepEqual(toolNames(capture.request), ['Read']);
+    assert.equal(systemText(capture.request), 'HELLO');
+    assert.deepEqual(mcpNames(capture), ['ghost'], 'the MCP list comes from the init event, not the request body');
+  } finally {
+    if (previous === undefined) delete process.env.GENIUS_CLAUDE_REAL_BIN;
+    else process.env.GENIUS_CLAUDE_REAL_BIN = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

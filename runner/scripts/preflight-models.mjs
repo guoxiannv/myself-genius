@@ -161,6 +161,10 @@ export function refreshModelCache(claudeBin, paths = {}, options = {}) {
     fetchedAt: new Date().toISOString(),
     claudeCodeVersion: claudeCodeVersion(claudeBin),
     probeSuiteVersion,
+    // Carried across a change of endpoint, unlike every model record below:
+    // what Claude Code does with a flag is a property of Claude Code, and a
+    // relay moving does not make it untrue.
+    ...(previous.cache?.harness ? { harness: previous.cache.harness } : {}),
     // One record per served model, measured for the ones in use and an empty
     // slot for the rest. An empty slot is not a claim about the model; it says
     // nothing was asked.

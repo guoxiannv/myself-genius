@@ -116,3 +116,24 @@ export function recordModelFacts(model, facts, paths = {}) {
   writeFileSync(cacheFile, `${JSON.stringify(cache, null, 2)}\n`);
   return cache.models[model];
 }
+
+// What Claude Code itself was measured to do, as opposed to what the endpoint
+// does. Kept in the same file because one fact file is simpler than two, but
+// under its own key and its own rule: these answers depend on which Claude Code
+// build produced them, not on which endpoint llm.env points at.
+//
+// That is why refreshModelCache carries this section across a change of
+// endpoint while dropping every model record. Discarding a measurement of the
+// harness because the relay moved would throw away something still true, and
+// re-earning it costs another run of the probe.
+export function recordHarnessFacts(facts, paths = {}) {
+  const cacheFile = paths.cachePath || cachePath;
+  const current = readModelCache(paths);
+  if (!current.cache) {
+    throw new Error(`there is no fact file to record into (${current.status}) · ./start-livetest.sh --refresh-models`);
+  }
+  const cache = current.cache;
+  cache.harness = { ...(cache.harness || {}), ...facts };
+  writeFileSync(cacheFile, `${JSON.stringify(cache, null, 2)}\n`);
+  return cache.harness;
+}

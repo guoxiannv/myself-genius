@@ -52,7 +52,7 @@ start-livetest.sh
        -> scripts/dependencies.mjs     依赖 seed、sync 与 Harmony Go export
        -> scripts/trace-scope.mjs      模型读取/写入边界审计
        -> scripts/verify-product.mjs   产品源码与构建产物审计
-       -> scripts/validate-smoke.mjs   运行时身份与交互证据验证
+       -> scripts/layout-identity.mjs  直装 HAP 的前台身份与构建标记判定
        -> scripts/harmony-go-runtime.mjs 壳 HAP 路径与 bundleName 的唯一解析入口
        -> scripts/hap-build.mjs        固定 SDK pool 中的 HAP 构建
 follow-up-control.sh
@@ -86,10 +86,10 @@ follow-up-control.sh
 4. 解析并同步模型选择的精确能力依赖，执行 typecheck、trace-scope 和 source audit。
 5. 若确定性诊断失败，使用同一会话执行聚合 repair，再完整复验；轮数上限由 `config/execution.json` 的 `repair.limit` 决定，达到上限后保留最后诊断并终止。
 6. 通过 SDK Harmony CLI 导出 Bundle/catalog，执行 artifact audit。
-7. 将 Bundle 发布到共享 Gateway，由设备池分配预装 Harmony Go 壳并验证当前应用身份与交互证据。
-8. 只有显式传入 `--hap true` 时，才在固定 pool 中额外构建每任务 unsigned HAP。
+7. 从设备池租用一台模拟器，直接安装本次构建的 unsigned HAP 并启动，校验前台应用确实是这次的 bundleName 与 build stamp，再截图存证。
+8. HAP 由预览强制：预览默认开启，所以固定 pool 每轮都会构建 unsigned HAP。只有同时关掉预览（`--launch false`）才能用 `--no-hap` 跳过它。
 
-HAP 失败会被记录为独立的 partial failure，不会抹掉此前已经通过的生成、审计或 Harmony Go 证据。
+HAP 失败会被记录为独立的 partial failure，不会抹掉此前已经通过的生成与审计结果。
 
 Runner 只有一套执行策略，不再接受 `--candidate`，也不会根据需求长度或关键词自动分流。主回合由 `--model`、`--effort` 控制，repair 回合由 `--repair-model`、`--repair-effort` 控制；未传入时读取 `config/execution.json`。若只传主回合参数，repair 会继承对应的外部覆盖值。`--timeout` 控制主回合，`--repair-timeout` 控制每一轮 repair；模型/进程失败、单轮超时、用户停止或系统限制仍会终止执行。
 
@@ -156,7 +156,10 @@ node scripts/probe-hardcoded-knobs.mjs                            # 免费：全
   build-evidence.json
   runtime.json
   manifest.json
-  smoke/
+  launch-previews.json
+  launch-product-desktop.json
+  launch-screenshot-desktop.jpeg
+  launch-screenshot.jpeg
   hap/
   result.json
   revisions/

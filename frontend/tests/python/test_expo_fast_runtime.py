@@ -11,7 +11,7 @@ from unittest.mock import patch
 from urllib.parse import urlparse
 
 from scan_install.expo_gateway import ExpoPublicGateway
-from tests.python.test_expo_public_gateway import write_harmony_go_export
+from tests.python.test_expo_public_gateway import write_expo_web_export, write_harmony_go_export
 
 
 MODULE_PATH = Path(__file__).resolve().parents[2] / "app.py"
@@ -868,6 +868,7 @@ class ExpoFastRuntimeTests(unittest.TestCase):
             encoding="utf-8",
         )
         write_harmony_go_export(Path(record.workspace))
+        write_expo_web_export(Path(record.workspace))
 
         original_gateway = remote_ui_app.EXPO_PUBLIC_GATEWAY
         gateway = ExpoPublicGateway(
@@ -889,6 +890,8 @@ class ExpoFastRuntimeTests(unittest.TestCase):
                     "https://devkit.yorha2b.cc/p/"
                 )
             )
+            self.assertTrue(automatic["artifacts"]["web_ready"])
+            self.assertIn("/web/?v=", automatic["artifacts"]["web_url"])
 
             status, _, published = self.request(
                 "POST",
@@ -907,6 +910,14 @@ class ExpoFastRuntimeTests(unittest.TestCase):
             response = connection.getresponse()
             self.assertEqual(response.status, 200)
             self.assertEqual(json.loads(response.read())[0]["id"], "sample-app")
+            connection.close()
+
+            web = urlparse(automatic["artifacts"]["web_local_url"])
+            connection = http.client.HTTPConnection(web.hostname, web.port)
+            connection.request("GET", web.path + (f"?{web.query}" if web.query else ""))
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertIn(b'<div id="root">', response.read())
             connection.close()
 
             status, _, progress = self.request("GET", f"/api/runs/{record.run_id}", cookie=cookie)
@@ -929,6 +940,70 @@ class ExpoFastRuntimeTests(unittest.TestCase):
             response = connection.getresponse()
             self.assertEqual(response.status, 404)
             response.read()
+            connection.close()
+        finally:
+            remote_ui_app.EXPO_PUBLIC_GATEWAY = original_gateway
+            gateway.stop()
+
+    def test_running_expo_run_publishes_web_before_hap_is_ready(self) -> None:
+        status, headers, payload = self.request(
+            "POST",
+            "/api/runs",
+            body={"prompt": "Web 先行预览测试", "runtime": "expo"},
+        )
+        self.assertEqual(status, 201)
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        record = remote_ui_app.load_run(payload["run_id"])
+        self.assertIsNotNone(record)
+        assert record is not None
+
+        workspace = Path(record.workspace)
+        state_root = workspace / ".expo-fast"
+        state_root.mkdir(parents=True)
+        (state_root / "state.json").write_text(
+            json.dumps(
+                {
+                    "state": "generating_code",
+                    "status": "running",
+                    "detail": "hap_building",
+                    "context": {"hap": {"status": "building"}},
+                    "updatedAt": "2026-08-24T12:00:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+        write_harmony_go_export(workspace)
+        write_expo_web_export(workspace)
+
+        original_gateway = remote_ui_app.EXPO_PUBLIC_GATEWAY
+        gateway = ExpoPublicGateway(
+            enabled=True,
+            host="127.0.0.1",
+            port=0,
+            public_origin="https://devkit.yorha2b.cc/",
+            state_path=Path(self.temp_dir.name) / "early-web-publications.json",
+            allowed_root=remote_ui_app.EXPO_FAST_APP_ROOT,
+        )
+        self.assertTrue(gateway.start())
+        remote_ui_app.EXPO_PUBLIC_GATEWAY = gateway
+        try:
+            status, _, progress = self.request("GET", f"/api/runs/{record.run_id}", cookie=cookie)
+            self.assertEqual(status, 200)
+            self.assertEqual(progress["status"], "running")
+            self.assertEqual(progress["stage"], "hap_building")
+            self.assertEqual(progress["expo"]["package"]["status"], "building")
+            self.assertFalse(progress["artifacts"]["hap_found"])
+            self.assertTrue(progress["artifacts"]["web_ready"])
+            self.assertEqual(progress["artifacts"]["web_status"], "ready")
+            self.assertIn("/web/?v=", progress["artifacts"]["web_url"])
+            self.assertEqual(progress["expo"]["serve"]["status"], "serving")
+
+            web = urlparse(progress["artifacts"]["web_local_url"])
+            connection = http.client.HTTPConnection(web.hostname, web.port)
+            connection.request("GET", web.path + (f"?{web.query}" if web.query else ""))
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertIn(b'<div id="root">', response.read())
             connection.close()
         finally:
             remote_ui_app.EXPO_PUBLIC_GATEWAY = original_gateway

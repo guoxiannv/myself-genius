@@ -12,7 +12,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 
 TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{24,128}$")
@@ -133,6 +133,49 @@ def validate_harmony_go_export(artifact_root: Path, allowed_root: Path | None) -
         "app_count": len(catalog),
         "file_count": len(checked_files),
     }
+
+
+def validate_expo_web_export(artifact_root: Path, allowed_root: Path | None) -> dict[str, Any]:
+    root = artifact_root.expanduser().resolve()
+    if allowed_root is None:
+        raise ExpoExportValidationError("HP_EXPO_FAST_APP_ROOT is not configured")
+    allowed = allowed_root.expanduser().resolve()
+    if not path_is_within(root, allowed):
+        raise ExpoExportValidationError("Expo web export is outside HP_EXPO_FAST_APP_ROOT")
+    if not root.is_dir():
+        raise ExpoExportValidationError(f"Expo web export directory does not exist: {root}")
+
+    marker_path = root / ".expo-web-export.json"
+    if not marker_path.is_file():
+        raise ExpoExportValidationError("Expo web export marker is missing")
+    marker = read_json_file(marker_path, "Expo web export marker")
+    if not isinstance(marker, dict) or marker.get("schemaVersion") != 1 or marker.get("status") != "ready":
+        raise ExpoExportValidationError("Expo web export marker is invalid")
+    if marker.get("entryPoint") != "index.html":
+        raise ExpoExportValidationError("Expo web export entry point is invalid")
+
+    entry_path = root / "index.html"
+    if not entry_path.is_file():
+        raise ExpoExportValidationError("Expo web export index.html is missing")
+    javascript_files = []
+    for candidate in root.rglob("*.js"):
+        resolved = candidate.resolve()
+        if not path_is_within(resolved, root):
+            raise ExpoExportValidationError("Expo web export contains a file outside its root")
+        if resolved.is_file():
+            javascript_files.append(resolved)
+    if not javascript_files:
+        raise ExpoExportValidationError("Expo web export JavaScript bundle is missing")
+    return {
+        "artifact_root": str(root),
+        "entry_point": str(entry_path),
+        "javascript_file_count": len(javascript_files),
+        "exported_at": str(marker.get("exportedAt") or marker_path.stat().st_mtime_ns),
+    }
+
+
+def expo_web_root(publication: ExpoPublication) -> Path:
+    return Path(publication.artifact_root).resolve().parent / "web"
 
 
 class ExpoPublicationRegistry:
@@ -487,8 +530,14 @@ def gateway_handler(registry: ExpoPublicationRegistry) -> type[BaseHTTPRequestHa
                 return
             relative = "/".join(parts[2:]) or "catalog.json"
             try:
-                root = Path(publication.artifact_root).resolve()
-                file_path = resolve_export_file(root, relative)
+                if relative == "web" or relative.startswith("web/"):
+                    root = expo_web_root(publication)
+                    validate_expo_web_export(root, registry.allowed_root)
+                    web_relative = relative.removeprefix("web/") if relative != "web" else ""
+                    file_path = resolve_export_file(root, web_relative or "index.html")
+                else:
+                    root = Path(publication.artifact_root).resolve()
+                    file_path = resolve_export_file(root, relative)
                 if registry.allowed_root is None or not path_is_within(root, registry.allowed_root):
                     raise ExpoExportValidationError("Publication root is not allowed")
             except ExpoExportValidationError:
@@ -589,6 +638,10 @@ class ExpoPublicGateway:
             "can_publish": bool(can_publish and self.enabled and self.running),
             "public_url": "",
             "local_url": "",
+            "web_status": "waiting",
+            "web_url": "",
+            "web_local_url": "",
+            "web_error": "",
             "published_at": "",
             "error": self._start_error,
         }
@@ -614,6 +667,16 @@ class ExpoPublicGateway:
             except ExpoExportValidationError as exc:
                 base["status"] = "failed"
                 base["error"] = str(exc)
+            try:
+                web_export = validate_expo_web_export(expo_web_root(publication), self.registry.allowed_root)
+            except ExpoExportValidationError as exc:
+                base["web_status"] = "missing" if "does not exist" in str(exc) or "marker is missing" in str(exc) else "failed"
+                base["web_error"] = str(exc)
+            else:
+                revision = quote(str(web_export["exported_at"]), safe="")
+                base["web_status"] = "ready"
+                base["web_url"] = f"{self.public_origin}{suffix}/web/?v={revision}"
+                base["web_local_url"] = f"{self.local_origin()}{suffix}/web/?v={revision}"
         return base
 
     def publish(self, run_id: str, artifact_root: Path) -> tuple[dict[str, Any], bool]:

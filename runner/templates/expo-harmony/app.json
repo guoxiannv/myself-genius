@@ -3,8 +3,15 @@
     "name": "__APP_NAME__",
     "slug": "__APP_SLUG__",
     "version": "1.0.0",
-    "platforms": ["harmony"],
+    "platforms": ["harmony", "web"],
     "scheme": "__APP_SCHEME__",
+    "web": {
+      "bundler": "metro",
+      "output": "single"
+    },
+    "experiments": {
+      "baseUrl": "."
+    },
     "harmony": {
       "bundleIdentifier": "__BUNDLE_IDENTIFIER__",
       "versionCode": 1

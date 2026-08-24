@@ -176,6 +176,11 @@ export interface RunArtifacts {
   live_frame_path?: string
   live_input_path?: string
   live_webrtc_config_path?: string
+  web_ready?: boolean
+  web_status?: "waiting" | "ready" | "missing" | "failed" | string
+  web_url?: string
+  web_local_url?: string
+  web_error?: string
   previews?: Partial<Record<PreviewKind, RunPreviewArtifact>>
   newer_hap_available: boolean
 }

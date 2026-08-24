@@ -35,6 +35,7 @@ export function verifyImplementation({
 } = {}) {
   const project = resolve(projectDir);
   const catalogRoot = resolve(outputDir || join(project, 'dist/harmony-go'));
+  const webRoot = join(project, 'dist/web');
   if (!['check', 'build'].includes(level)) throw new Error(`unknown verification level: ${level}`);
   const stageName = (name) => `${name}${suffix}`;
   const stages = {};
@@ -73,6 +74,8 @@ export function verifyImplementation({
   if (level === 'build') {
     const exported = runCommand(node, [dependencies, 'export', project, catalogRoot], { cwd: project });
     record('exportMs', exported.ms);
+    const webExported = runCommand(node, [dependencies, 'export-web', project, webRoot], { cwd: project });
+    record('webExportMs', webExported.ms);
     const audited = runCommand(node, [verifier, 'artifacts', project, catalogRoot], {
       cwd: project,
       log: join(project, '.expo-fast/artifact-audit-command.log'),

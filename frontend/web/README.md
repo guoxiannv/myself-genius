@@ -10,7 +10,7 @@ web/
 │   ├── pages/            # HomePage（一句话构建入口）、DetailPage（构建详情）
 │   ├── components/
 │   │   ├── home/         # PromptComposer、建议胶囊
-│   │   ├── detail/       # Timeline、BuildProgress、DevicePreview、InstallDock（扫码安装悬浮坞）
+│   │   ├── detail/       # Timeline、BuildProgress、DevicePreview（PC/手机/Web）、InstallDock（扫码安装悬浮坞）
 │   │   ├── layout/       # TopBar
 │   │   └── ui/           # Card、StatusBadge 等基础组件
 │   ├── hooks/

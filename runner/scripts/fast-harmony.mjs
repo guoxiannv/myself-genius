@@ -39,7 +39,9 @@ const infrastructurePackages = new Set([
   'metro',
   'metro-config',
   'react',
+  'react-dom',
   'react-native',
+  'react-native-web',
 ]);
 
 function json(path, fallback = null) { return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : fallback; }

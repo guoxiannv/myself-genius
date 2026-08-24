@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, cpSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, cpSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { coreCachePackages, resolveCapabilities, scaffoldCapabilityPackages } from './fast-harmony.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 export const runtimeCorePackages = ['expo-asset', 'expo-constants', 'expo-modules-core'];
+export const webRuntimePackages = ['react-dom', 'react-native-web'];
 
 function readJson(path, fallback = null) {
   return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : fallback;
@@ -44,6 +45,12 @@ function sdkRuntimePath(sdkRoot) {
 
 function packageVersion(modulesRoot, name) {
   return readJson(join(modulesRoot, ...name.split('/'), 'package.json'), {}).version || '';
+}
+
+function webRuntimePins(pkg) {
+  return Object.fromEntries(webRuntimePackages
+    .map((name) => [name, pkg.dependencies?.[name] || ''])
+    .filter(([, version]) => version));
 }
 
 function configuredCaches() {
@@ -169,7 +176,7 @@ function seedFromConfiguredCache(project, caches, runtimePins) {
   const scaffoldPins = Object.fromEntries(scaffoldCapabilityPackages
     .map((name) => [name, pkg.dependencies?.[name] || ''])
     .filter(([, version]) => version));
-  const expected = { ...scaffoldPins, ...runtimePins };
+  const expected = { ...scaffoldPins, ...runtimePins, ...webRuntimePins(pkg) };
   const missingEntries = Object.entries(expected)
     .filter(([name, version]) => packageVersion(modules, name) !== version);
   const install = missingEntries.length
@@ -266,7 +273,8 @@ export function syncDependencies(projectRoot) {
   const modules = join(project, 'node_modules');
   const selectedCapabilities = Object.fromEntries(resolution.selected.map((entry) => [entry.package, entry.version]));
   const runtimeDependencies = resolution.runtimeDependencies || {};
-  const expected = { ...selectedCapabilities, ...runtimeDependencies };
+  const pkg = readJson(join(project, 'package.json'), {});
+  const expected = { ...selectedCapabilities, ...runtimeDependencies, ...webRuntimePins(pkg) };
   const missingEntries = Object.entries(expected)
     .filter(([name, version]) => packageVersion(modules, name) !== version);
   const missing = missingEntries.map(([name]) => name);
@@ -322,6 +330,75 @@ export function exportHarmonyGo(projectRoot, outputRoot, sdkRoot = resolve(root,
   return result;
 }
 
+function walkFiles(rootDir, output = []) {
+  for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
+    const path = join(rootDir, entry.name);
+    if (entry.isDirectory()) walkFiles(path, output);
+    else if (entry.isFile()) output.push(path);
+  }
+  return output;
+}
+
+export function inspectExpoWebExport(projectRoot, outputRoot) {
+  const project = resolve(projectRoot);
+  const output = resolve(outputRoot);
+  const outputRelative = relative(project, output);
+  if (!outputRelative || outputRelative.startsWith('..') || outputRelative.startsWith('/')) {
+    throw new Error(`Expo web output must stay inside the generated project: ${output}`);
+  }
+  const entryPoint = join(output, 'index.html');
+  if (!existsSync(entryPoint) || !statSync(entryPoint).isFile()) {
+    throw new Error(`Expo web export is missing index.html: ${output}`);
+  }
+  const files = walkFiles(output);
+  const javascriptFiles = files.filter((path) => /\.js$/i.test(path));
+  if (!javascriptFiles.length) {
+    throw new Error(`Expo web export contains no JavaScript bundle: ${output}`);
+  }
+  const html = readFileSync(entryPoint, 'utf8');
+  if (!/<div\s+id=["']root["']/i.test(html) || !/<script\b/i.test(html)) {
+    throw new Error(`Expo web index.html is not a runnable app entry: ${entryPoint}`);
+  }
+  return {
+    schemaVersion: 1,
+    status: 'ready',
+    entryPoint: 'index.html',
+    fileCount: files.length,
+    totalBytes: files.reduce((sum, path) => sum + statSync(path).size, 0),
+  };
+}
+
+export function exportExpoWeb(projectRoot, outputRoot = join(resolve(projectRoot), 'dist/web')) {
+  const project = resolve(projectRoot);
+  const output = resolve(outputRoot);
+  const outputRelative = relative(project, output);
+  if (!outputRelative || outputRelative.startsWith('..') || outputRelative.startsWith('/')) {
+    throw new Error(`Expo web output must stay inside the generated project: ${output}`);
+  }
+  rmSync(output, { recursive: true, force: true });
+  const cli = join(project, 'node_modules/expo/bin/cli');
+  if (!existsSync(cli)) throw new Error(`project Expo CLI is missing: ${cli}`);
+  const result = run(process.execPath, [
+    cli,
+    'export',
+    '--platform',
+    'web',
+    '--output-dir',
+    output,
+  ], { cwd: project, log: join(project, '.expo-fast/web-export.log') });
+  const evidence = {
+    ...inspectExpoWebExport(project, output),
+    exportedAt: new Date().toISOString(),
+    durationMs: result.ms,
+  };
+  writeJson(join(output, '.expo-web-export.json'), evidence);
+  writeJson(join(project, '.expo-fast/web-export.json'), {
+    ...evidence,
+    output: outputRelative,
+  });
+  return evidence;
+}
+
 function main() {
   const [command, projectArg, outputArg] = process.argv.slice(2);
   const project = resolve(projectArg || '.');
@@ -329,7 +406,8 @@ function main() {
   if (command === 'seed') { console.log(JSON.stringify(seedDependencies(project), null, 2)); return; }
   if (command === 'sync') { console.log(JSON.stringify(syncDependencies(project), null, 2)); return; }
   if (command === 'export') { exportHarmonyGo(project, resolve(outputArg || join(project, 'dist/harmony-go'))); return; }
-  throw new Error('usage: dependencies.mjs check | seed|sync|export <project> [output]');
+  if (command === 'export-web') { exportExpoWeb(project, resolve(outputArg || join(project, 'dist/web'))); return; }
+  throw new Error('usage: dependencies.mjs check | seed|sync|export|export-web <project> [output]');
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

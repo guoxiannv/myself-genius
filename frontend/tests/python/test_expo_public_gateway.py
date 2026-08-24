@@ -53,6 +53,29 @@ def write_harmony_go_export(root: Path, app_id: str = "sample-app") -> Path:
     return artifact_root
 
 
+def write_expo_web_export(root: Path) -> Path:
+    artifact_root = root / "dist" / "web"
+    bundle_root = artifact_root / "_expo" / "static" / "js" / "web"
+    bundle_root.mkdir(parents=True)
+    (artifact_root / "index.html").write_text(
+        '<!doctype html><html><body><div id="root"></div><script src="./_expo/static/js/web/app.js"></script></body></html>',
+        encoding="utf-8",
+    )
+    (bundle_root / "app.js").write_text("globalThis.__web = true;\n", encoding="utf-8")
+    (artifact_root / ".expo-web-export.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "status": "ready",
+                "entryPoint": "index.html",
+                "exportedAt": "2026-08-24T12:00:00.000Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return artifact_root
+
+
 class ExpoPublicGatewayTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -61,6 +84,7 @@ class ExpoPublicGatewayTests(unittest.TestCase):
         self.apps_root.mkdir()
         self.state_path = self.root / "state" / "publications.json"
         self.artifact_root = write_harmony_go_export(self.apps_root / "sample")
+        self.web_root = write_expo_web_export(self.apps_root / "sample")
         self.gateway = ExpoPublicGateway(
             enabled=True,
             host="127.0.0.1",
@@ -104,6 +128,8 @@ class ExpoPublicGatewayTests(unittest.TestCase):
         self.assertTrue(created)
         self.assertEqual(serve["status"], "serving")
         self.assertTrue(serve["public_url"].startswith("https://devkit.yorha2b.cc/p/"))
+        self.assertEqual(serve["web_status"], "ready")
+        self.assertIn("/web/?v=", serve["web_url"])
         token_path = url_path(serve["local_url"])
 
         status, headers, catalog_body = self.request("GET", token_path)
@@ -123,6 +149,16 @@ class ExpoPublicGatewayTests(unittest.TestCase):
         self.assertEqual(int(headers["Content-Length"]), len(b"globalThis.__sample = true;\n"))
 
         status, _, _ = self.request("GET", token_path + "/%2e%2e/catalog.json")
+        self.assertEqual(status, 404)
+
+        status, headers, web_body = self.request("GET", token_path + "/web/")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "text/html")
+        self.assertIn(b'<div id="root">', web_body)
+        status, _, bundle_body = self.request("GET", token_path + "/web/_expo/static/js/web/app.js")
+        self.assertEqual(status, 200)
+        self.assertEqual(bundle_body, b"globalThis.__web = true;\n")
+        status, _, _ = self.request("GET", token_path + "/web/%2e%2e/catalog.json")
         self.assertEqual(status, 404)
 
         stopped, removed = self.gateway.unpublish(RUN_ID, can_publish=True)

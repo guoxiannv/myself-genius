@@ -143,6 +143,14 @@ document-picker capabilities. The artifact gate reconciles product imports, exac
 `package.json` pins, manifest `requiredPackageVersions`, and catalog-selected versions
 before accepting a Bundle.
 
+Every deterministic build also exports the same generated source as an Expo Web
+single-page app with Metro. `react-dom` and `react-native-web` are fixed scaffold
+dependencies, and `app.json` enables both `harmony` and `web`. The production export
+lands in `dist/web`; its relative asset base lets the frontend serve each run below a
+random publication path without rebuilding for a deployment-specific URL. A missing
+`index.html`, missing JavaScript bundle, or failed `expo export --platform web` is a
+deterministic build failure rather than a silently absent preview.
+
 Evidence written per run:
 
 ```text
@@ -171,6 +179,8 @@ Evidence written per run:
   capability-resolution.log
   typecheck.log
   export.log
+  web-export.log
+  web-export.json
   source-audit.json
   build-evidence.json
   sdk-cli.json
@@ -189,6 +199,12 @@ Evidence written per run:
       agent-repair-trace*.jsonl
       trace-scope-audit*.json
 ```
+
+The generated product artifacts are written separately to `dist/harmony-go/` and
+`dist/web/`. The latter includes `.expo-web-export.json`, which the publication gateway
+validates before exposing the Web preview. Both exports are produced before the
+pool-backed unsigned HAP build, so the frontend may expose Web as soon as its marker is
+valid while the native package continues building.
 
 Never claim full end-to-end success from `manifest.json` alone. The minimum smoke
 assertion is an app-specific accessibility node/value change after a form

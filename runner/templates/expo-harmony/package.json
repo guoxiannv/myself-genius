@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "harmony": "expo run:harmony",
+    "web": "expo export --platform web --output-dir dist/web",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -16,7 +17,9 @@
     "metro": "0.83.3",
     "metro-config": "0.83.3",
     "react": "19.2.3",
-    "react-native": "0.84.1"
+    "react-dom": "19.2.3",
+    "react-native": "0.84.1",
+    "react-native-web": "0.21.2"
   },
   "devDependencies": {
     "@expo/metro": "56.0.0",

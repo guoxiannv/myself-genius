@@ -11,11 +11,14 @@ import type {
 } from "@/lib/types"
 
 type PreviewMediaElement = HTMLImageElement | HTMLVideoElement
+type PreviewTabKind = PreviewKind | "web"
 const FRAME_REQUEST_RETRY_DELAY_MS = 25
 const FRAME_LONG_POLL_WAIT_MS = 1000
 const STALE_FRAME_RETRY_DELAY_MS = 500
 const FRAME_ERROR_RETRY_DELAY_MS = 1000
 const WEBRTC_FIRST_FRAME_TIMEOUT_MS = 5_000
+const WEB_PC_CANVAS_WIDTH = 1440
+const WEB_PC_CANVAS_HEIGHT = 900
 
 function createViewerId() {
   return globalThis.crypto?.randomUUID?.()
@@ -55,21 +58,29 @@ export function DevicePreview({
         },
       }
   const resolvedPolicy = previewPolicy || defaultPolicy
-  const availablePreviews = (["desktop", "phone"] as PreviewKind[]).filter(
-    (kind) => resolvedPolicy.previews[kind]?.enabled,
-  )
+  const availablePreviews: PreviewTabKind[] = [
+    ...(["desktop", "phone"] as PreviewKind[]).filter(
+      (kind) => resolvedPolicy.previews[kind]?.enabled,
+    ),
+    ...(isExpo ? ["web" as const] : []),
+  ]
   const defaultPreview = availablePreviews.includes(resolvedPolicy.default_kind)
     ? resolvedPolicy.default_kind
     : availablePreviews[0] || (isExpo ? "desktop" : "phone")
-  const [activePreview, setActivePreview] = useState<PreviewKind>(defaultPreview)
-  const activeSession = previewSessions?.[activePreview]
-  const activeArtifacts = artifacts.previews?.[activePreview] || artifacts
-  const sessionStatus = String(activeSession?.status || ("status" in activeArtifacts ? activeArtifacts.status : "") || "").toLowerCase()
+  const [activePreview, setActivePreview] = useState<PreviewTabKind>(defaultPreview)
+  const isWebPreview = activePreview === "web"
+  const activeSession = isWebPreview ? undefined : previewSessions?.[activePreview]
+  const activeArtifacts = isWebPreview ? artifacts : artifacts.previews?.[activePreview] || artifacts
+  const sessionStatus = String(
+    isWebPreview
+      ? artifacts.web_status || "waiting"
+      : activeSession?.status || ("status" in activeArtifacts ? activeArtifacts.status : "") || "",
+  ).toLowerCase()
   // Build-time capture failures are separate from the user-triggered preview.
-  const previewFailed = Boolean(activeSession?.requested && sessionStatus === "failed")
+  const previewFailed = !isWebPreview && Boolean(activeSession?.requested && sessionStatus === "failed")
   const previewInactive = sessionStatus === "idle" || sessionStatus === "released"
   const previewStarting = ["queued", "allocating", "installing", "loading_bundle", "launching"].includes(sessionStatus)
-  const previewInitiallyIdle = sessionStatus === "idle" && !activeSession?.requested
+  const previewInitiallyIdle = !isWebPreview && sessionStatus === "idle" && !activeSession?.requested
   const queuePosition = Number(activeSession?.queue_position || 0)
   const phoneNeedsRequest = activePreview === "phone" && isExpo && (
     !activeSession?.requested || previewInactive
@@ -87,7 +98,8 @@ export function DevicePreview({
   const mediaPath = activeArtifacts.media_path || sessionScreenshot
   const hasMedia = Boolean((activeArtifacts.media_ready || sessionScreenshot) && mediaPath)
   const isVideo = !sessionScreenshot && (activeArtifacts.media_type === "mp4" || activeArtifacts.media_type === "webm")
-  const liveEnabled = Boolean(runId && activeArtifacts.live_ready && activeArtifacts.live_frame_path && sessionStatus !== "released")
+  const liveEnabled = !isWebPreview && Boolean(runId && activeArtifacts.live_ready && activeArtifacts.live_frame_path && sessionStatus !== "released")
+  const previewActive = liveEnabled || Boolean(isWebPreview && artifacts.web_ready)
   const showInactiveAction = hasMedia && !liveEnabled && (
     previewFailed || phoneNeedsRequest || previewInactive
   )
@@ -104,12 +116,14 @@ export function DevicePreview({
   const latestFrameSequenceRef = useRef(0)
   const webRTCRef = useRef<LivePreviewWebRTC | null>(null)
   const previewContainerRef = useRef<HTMLDivElement | null>(null)
+  const webCanvasHostRef = useRef<HTMLDivElement | null>(null)
   const inputErrorUntilRef = useRef(0)
   const automaticStartAttemptRef = useRef("")
   const [fullscreenSupported, setFullscreenSupported] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [retryingPreview, setRetryingPreview] = useState(false)
   const [retryPreviewError, setRetryPreviewError] = useState("")
+  const [webCanvasScale, setWebCanvasScale] = useState(1)
 
   useEffect(() => {
     if (availablePreviews.length && !availablePreviews.includes(activePreview)) {
@@ -125,10 +139,11 @@ export function DevicePreview({
   }, [previewFailed, sessionStatus])
 
   useEffect(() => {
-    const startMode = resolvedPolicy.previews[activePreview]?.start_mode
+    const startMode = isWebPreview ? undefined : resolvedPolicy.previews[activePreview]?.start_mode
     const attemptKey = `${runId || ""}:${activePreview}:${activeSession?.updated_at || "initial"}`
     if (
       !runId ||
+      isWebPreview ||
       !pageVisible ||
       startMode !== "automatic" ||
       !previewInitiallyIdle ||
@@ -140,13 +155,13 @@ export function DevicePreview({
     automaticStartAttemptRef.current = attemptKey
     setRetryingPreview(true)
     setRetryPreviewError("")
-    void api.startPreview(runId, activePreview, viewerIdRef.current, shareToken)
+    void api.startPreview(runId, activePreview as PreviewKind, viewerIdRef.current, shareToken)
       .then(() => setRetryingPreview(false))
       .catch((error) => {
         setRetryingPreview(false)
         setRetryPreviewError(error instanceof Error ? error.message : "自动连接模拟器失败")
       })
-  }, [activePreview, activeSession?.updated_at, pageVisible, previewInitiallyIdle, resolvedPolicy.previews, retryingPreview, runId, shareToken])
+  }, [activePreview, activeSession?.updated_at, isWebPreview, pageVisible, previewInitiallyIdle, resolvedPolicy.previews, retryingPreview, runId, shareToken])
 
   useEffect(() => {
     latestFrameSequenceRef.current = 0
@@ -169,7 +184,7 @@ export function DevicePreview({
   }, [])
 
   useEffect(() => {
-    if (!runId) return
+    if (!runId || isWebPreview) return
 
     let timer = 0
     const reportHeartbeat = (keepalive = false, leaving = false) => {
@@ -200,7 +215,7 @@ export function DevicePreview({
       window.removeEventListener("pageshow", handlePageShow)
       reportHeartbeat(true, true)
     }
-  }, [activePreview, runId, shareToken])
+  }, [activePreview, isWebPreview, runId, shareToken])
 
   // The component can mount before the first run snapshot arrives. The
   // initial heartbeat is then correctly ignored while the session is idle,
@@ -208,7 +223,7 @@ export function DevicePreview({
   // queued/ready preview would not register its viewer until the next 15s
   // interval. Register immediately whenever the live preview becomes active.
   useEffect(() => {
-    if (!runId || !["queued", "allocating", "installing", "loading_bundle", "launching", "ready"].includes(sessionStatus)) {
+    if (!runId || isWebPreview || !["queued", "allocating", "installing", "loading_bundle", "launching", "ready"].includes(sessionStatus)) {
       return
     }
     void api.heartbeatPreview(
@@ -220,7 +235,7 @@ export function DevicePreview({
       shareToken,
       false,
     ).catch(() => undefined)
-  }, [activePreview, runId, sessionStatus, shareToken])
+  }, [activePreview, isWebPreview, runId, sessionStatus, shareToken])
 
   useEffect(() => {
     setFullscreenSupported(Boolean(document.fullscreenEnabled && previewContainerRef.current?.requestFullscreen))
@@ -228,6 +243,26 @@ export function DevicePreview({
     document.addEventListener("fullscreenchange", handleFullscreenChange)
     return () => document.removeEventListener("fullscreenchange", handleFullscreenChange)
   }, [])
+
+  useEffect(() => {
+    if (!isWebPreview || !webCanvasHostRef.current) return
+
+    const host = webCanvasHostRef.current
+    const syncScale = () => {
+      const bounds = host.getBoundingClientRect()
+      const nextScale = Math.min(
+        bounds.width / WEB_PC_CANVAS_WIDTH,
+        bounds.height / WEB_PC_CANVAS_HEIGHT,
+      )
+      if (Number.isFinite(nextScale) && nextScale > 0) {
+        setWebCanvasScale(nextScale)
+      }
+    }
+    const observer = new ResizeObserver(syncScale)
+    observer.observe(host)
+    syncScale()
+    return () => observer.disconnect()
+  }, [isFullscreen, isWebPreview])
 
   useEffect(() => {
     if (!liveEnabled || !activeArtifacts.live_frame_path || !pageVisible || liveTransport === "webrtc") {
@@ -322,7 +357,7 @@ export function DevicePreview({
     let client: LivePreviewWebRTC
     client = new LivePreviewWebRTC({
       runId,
-      preview: artifacts.previews ? activePreview : "",
+      preview: artifacts.previews ? activePreview as PreviewKind : "",
       shareToken,
       onOpen: () => {
         if (!disposed) {
@@ -412,14 +447,14 @@ export function DevicePreview({
   }
 
   const sendInput = async (body: LivePreviewInput) => {
-    if (!runId) return
+    if (!runId || isWebPreview) return
     if (liveTransport === "webrtc" && webRTCRef.current?.sendInput(body)) {
       setLiveError("")
       return
     }
     try {
       setLiveError("")
-      await api.sendLiveInput(runId, artifacts.previews ? activePreview : "", body, shareToken)
+      await api.sendLiveInput(runId, artifacts.previews ? activePreview as PreviewKind : "", body, shareToken)
     } catch (error) {
       setLiveError(error instanceof Error ? error.message : "模拟器操作失败")
     }
@@ -491,11 +526,11 @@ export function DevicePreview({
   }
 
   const startPreview = async () => {
-    if (!runId || retryingPreview) return
+    if (!runId || isWebPreview || retryingPreview) return
     setRetryingPreview(true)
     setRetryPreviewError("")
     try {
-      await api.startPreview(runId, activePreview, viewerIdRef.current, shareToken)
+      await api.startPreview(runId, activePreview as PreviewKind, viewerIdRef.current, shareToken)
       setRetryingPreview(false)
     } catch (error) {
       setRetryingPreview(false)
@@ -533,7 +568,37 @@ export function DevicePreview({
     </button>
   ) : null
 
-  const previewContent = frameSource ? (
+  const previewContent = isWebPreview ? (
+    artifacts.web_ready && artifacts.web_url ? (
+      <div ref={webCanvasHostRef} className="relative h-full w-full overflow-hidden bg-white">
+        <iframe
+          src={artifacts.web_url}
+          title="Expo Web 应用预览"
+          className="absolute left-0 top-0 border-0 bg-white"
+          style={{
+            width: WEB_PC_CANVAS_WIDTH,
+            height: WEB_PC_CANVAS_HEIGHT,
+            transform: `scale(${webCanvasScale})`,
+            transformOrigin: "top left",
+          }}
+          sandbox={webPreviewSandbox(artifacts.web_url)}
+          allow="clipboard-read; clipboard-write"
+          referrerPolicy="no-referrer"
+        />
+      </div>
+    ) : (
+      <WaitingState
+        message={
+          artifacts.web_status === "failed"
+            ? artifacts.web_error || "Web 版构建失败，请查看构建日志。"
+            : artifacts.web_status === "missing"
+              ? "本次构建尚未生成可预览的 Web 产物。"
+              : "正在构建 Web 版…"
+        }
+        failed={artifacts.web_status === "failed" || artifacts.web_status === "missing"}
+      />
+    )
+  ) : frameSource ? (
       <img
         src={frameSource}
         alt="可交互的本地模拟器预览"
@@ -569,7 +634,7 @@ export function DevicePreview({
     <WaitingState
       message={
         retryingPreview || previewStarting
-          ? previewStatusMessage(sessionStatus, activePreview, queuePosition)
+          ? previewStatusMessage(sessionStatus, activePreview as PreviewKind, queuePosition)
             : phonePreviewOutdated && !phoneRefreshAvailable
             ? activeSession?.refresh_status === "failed"
               ? activeSession?.refresh_error || "最新预览 HAP 构建失败。"
@@ -611,7 +676,7 @@ export function DevicePreview({
                   : "text-muted hover:bg-white/[0.05] hover:text-foreground"
               }`}
             >
-              {kind === "desktop" ? "PC" : "手机"}
+              {kind === "desktop" ? "PC" : kind === "phone" ? "手机" : "Web"}
             </button>
           ))}
         </div>
@@ -628,16 +693,20 @@ export function DevicePreview({
           }}
         >
           <div className="flex h-8 items-center px-1">
-            <span className={`mr-2 h-1.5 w-1.5 rounded-full ${liveEnabled ? "bg-success shadow-[0_0_8px_rgba(73,222,128,0.55)]" : "bg-white/20"}`} />
+            <span className={`mr-2 h-1.5 w-1.5 rounded-full ${previewActive ? "bg-success shadow-[0_0_8px_rgba(73,222,128,0.55)]" : "bg-white/20"}`} />
             <span className="select-none text-[11px] font-medium text-muted">
-              {activePreview === "phone" ? "HarmonyOS 手机模拟器" : "HarmonyOS PC 模拟器"}
+              {activePreview === "phone"
+                ? "HarmonyOS 手机模拟器"
+                : activePreview === "web"
+                  ? `Expo Web · PC ${WEB_PC_CANVAS_WIDTH}×${WEB_PC_CANVAS_HEIGHT}`
+                  : "HarmonyOS PC 模拟器"}
             </span>
-            {activePreview === "desktop" && fullscreenSupported && (
+            {activePreview !== "phone" && fullscreenSupported && (
               <button
                 type="button"
                 onClick={() => void toggleFullscreen()}
                 className="ml-auto inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium text-muted transition-colors hover:bg-white/[0.06] hover:text-foreground"
-                aria-label={isFullscreen ? "退出全屏" : "全屏查看模拟器"}
+                aria-label={isFullscreen ? "退出全屏" : `全屏查看${isWebPreview ? " Web 预览" : "模拟器"}`}
               >
                 <FullscreenIcon active={isFullscreen} />
                 {isFullscreen ? "退出全屏" : "全屏查看"}
@@ -648,7 +717,13 @@ export function DevicePreview({
             className={`relative w-full overflow-hidden bg-[#050607] shadow-[0_12px_36px_rgba(0,0,0,0.22)] ring-1 ring-white/[0.07] ${
               activePreview === "phone" ? "rounded-[22px]" : "rounded-lg"
             }`}
-            style={{ aspectRatio: activePreview === "phone" ? "1320 / 2856" : "3 / 2" }}
+            style={{
+              aspectRatio: activePreview === "phone"
+                ? "1320 / 2856"
+                : activePreview === "web"
+                  ? `${WEB_PC_CANVAS_WIDTH} / ${WEB_PC_CANVAS_HEIGHT}`
+                  : "3 / 2",
+            }}
           >
             {previewContent}
             {desktopRefreshMessage ? (
@@ -780,6 +855,28 @@ function desktopPreviewRefreshMessage(status: string, queuePosition = 0) {
 
 function clamp(value: number) {
   return Math.min(1, Math.max(0, value))
+}
+
+function webPreviewSandbox(url: string) {
+  const capabilities = [
+    "allow-downloads",
+    "allow-forms",
+    "allow-modals",
+    "allow-popups",
+    "allow-popups-to-escape-sandbox",
+    "allow-scripts",
+  ]
+  try {
+    // A dedicated Gateway origin can retain localStorage-backed AsyncStorage.
+    // On an accidental same-origin deployment, keep the iframe opaque so
+    // generated code cannot reach the host page through window.parent.
+    if (new URL(url, window.location.href).origin !== window.location.origin) {
+      capabilities.push("allow-same-origin")
+    }
+  } catch {
+    // Invalid URLs never render because web_ready also requires a server URL.
+  }
+  return capabilities.join(" ")
 }
 
 function revokeAfterPaint(objectUrl: string) {

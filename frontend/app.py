@@ -92,6 +92,7 @@ from scan_install.expo_gateway import (
     ExpoExportValidationError,
     ExpoGatewayError,
     ExpoPublicGateway,
+    validate_expo_web_export,
 )
 from scan_install.hpack import (
     build_install_qr_content,
@@ -3571,7 +3572,7 @@ def build_expo_preview_payloads(
 
 
 def ensure_expo_publication(record: RunRecord, *, can_publish: bool) -> dict[str, Any]:
-    """Publish a completed Harmony Go export once and return its current state."""
+    """Publish a validated export once and return its current gateway state."""
     serve_state = EXPO_PUBLIC_GATEWAY.describe(record.run_id, can_publish=can_publish)
     if not can_publish or serve_state.get("public_url") or not serve_state.get("can_publish"):
         return serve_state
@@ -3585,6 +3586,14 @@ def ensure_expo_publication(record: RunRecord, *, can_publish: bool) -> dict[str
         serve_state["status"] = "failed"
         serve_state["error"] = str(exc)
     return serve_state
+
+
+def expo_web_export_readiness(workspace: Path) -> tuple[bool, str]:
+    try:
+        validate_expo_web_export(workspace / "dist" / "web", EXPO_FAST_APP_ROOT)
+    except ExpoExportValidationError as exc:
+        return False, str(exc)
+    return True, ""
 
 
 def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
@@ -3704,7 +3713,28 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
             record.first_ready_at = to_iso()
             record = save_run(record)
 
-    serve_state = ensure_expo_publication(record, can_publish=run_status == "completed")
+    web_export_ready, web_validation_error = expo_web_export_readiness(workspace)
+    # Web export finishes before the pool-backed HAP build. Publish as soon as
+    # that independently validated artifact is ready so the browser preview is
+    # usable while the slower native package continues in the background.
+    can_publish = run_status == "completed" or web_export_ready
+    serve_state = ensure_expo_publication(record, can_publish=can_publish)
+    web_status = str(serve_state.get("web_status") or "waiting")
+    web_error = str(serve_state.get("web_error") or "")
+    if can_publish and web_status != "ready":
+        if not web_export_ready:
+            web_status = (
+                "missing"
+                if "does not exist" in web_validation_error or "marker is missing" in web_validation_error
+                else "failed"
+            )
+            web_error = web_validation_error
+        else:
+            web_status = "failed"
+            web_error = str(
+                serve_state.get("error")
+                or "Expo Web 产物已生成，但预览 Gateway 当前不可用。"
+            )
     events = [
         {
             "kind": "run",
@@ -3856,6 +3886,11 @@ def build_expo_progress_payload(record: RunRecord) -> dict[str, Any]:
             "live_frame_path": str(primary_preview.get("live_frame_path") or ""),
             "live_input_path": str(primary_preview.get("live_input_path") or ""),
             "live_webrtc_config_path": str(primary_preview.get("live_webrtc_config_path") or ""),
+            "web_ready": bool(web_status == "ready" and serve_state.get("web_url")),
+            "web_status": web_status,
+            "web_url": str(serve_state.get("web_url") or ""),
+            "web_local_url": str(serve_state.get("web_local_url") or ""),
+            "web_error": web_error,
             "previews": preview_payloads,
             "newer_hap_available": newer_hap,
         },
@@ -5422,9 +5457,11 @@ class RemoteUIHandler(BaseHTTPRequestHandler):
             )
             return
         state = load_expo_fast_state(Path(record.workspace))
-        if expo_fast_run_status(record, state) != "completed":
+        run_status = expo_fast_run_status(record, state)
+        web_export_ready, _web_validation_error = expo_web_export_readiness(Path(record.workspace))
+        if run_status != "completed" and not web_export_ready:
             self.send_json(
-                {"ok": False, "error": "Expo 生成与启动验证完成后才能开启外网预览。", "code": "expo_run_not_ready"},
+                {"ok": False, "error": "Expo Web 产物生成后才能开启外网预览。", "code": "expo_run_not_ready"},
                 status=HTTPStatus.CONFLICT,
             )
             return

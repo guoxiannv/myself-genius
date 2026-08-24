@@ -49,7 +49,7 @@ import {
 } from '../scripts/admission.mjs';
 import { parseArguments as parseTimingArguments } from '../scripts/probe-turn-timing.mjs';
 import { repairArtifactName } from '../scripts/repair-artifact.mjs';
-import { assertDependencyRuntime, installProjectDependencies, pinRuntimeDependencies, stageHarmonyCli } from '../scripts/dependencies.mjs';
+import { assertDependencyRuntime, inspectExpoWebExport, installProjectDependencies, pinRuntimeDependencies, stageHarmonyCli } from '../scripts/dependencies.mjs';
 import { BUILD_IDENTITY_FILE, HAP_DEVICE_TYPES, buildIdentityModule, buildStampFromJobId, runHapPoolBuild } from '../scripts/hap-build.mjs';
 import {
   designTurnInvocation,
@@ -1650,6 +1650,12 @@ test('product capability selection adds exact Expo dependencies and rejects drif
   const pkg = JSON.parse(readFileSync(packagePath, 'utf8'));
   const catalog = JSON.parse(readFileSync(join(project, '.expo-fast/capability-catalog.json'), 'utf8'));
   assert.equal(pkg.dependencies['react-native-svg'], '15.15.4');
+  assert.equal(pkg.dependencies['react-dom'], '19.2.3');
+  assert.equal(pkg.dependencies['react-native-web'], '0.21.2');
+  const app = JSON.parse(readFileSync(join(project, 'app.json'), 'utf8'));
+  assert.deepEqual(app.expo.platforms, ['harmony', 'web']);
+  assert.deepEqual(app.expo.web, { bundler: 'metro', output: 'single' });
+  assert.equal(app.expo.experiments.baseUrl, '.');
   assert.equal(pkg.dependencies['@react-native-async-storage/async-storage'], undefined);
   assert.equal(pkg.dependencies['expo-sharing'], undefined);
   pkg.dependencies['expo-sharing'] = catalog.available.find((entry) => entry.package === 'expo-sharing').version;
@@ -1853,6 +1859,25 @@ test('external dependency controller runs the SDK Harmony overlay from project-i
   assert.equal(readFileSync(join(project, 'node_modules/@expo/cli/harmony/harmony-go-runtime.json'), 'utf8'), '{}\n');
 });
 
+test('Expo web export inspection requires a runnable in-project static app', () => {
+  const project = temporaryDirectory('expo-fast-web-export-');
+  const output = join(project, 'dist/web');
+  mkdirSync(join(output, '_expo/static/js/web'), { recursive: true });
+  writeFileSync(join(output, 'index.html'), '<!doctype html><div id="root"></div><script src="./_expo/static/js/web/app.js"></script>');
+  writeFileSync(join(output, '_expo/static/js/web/app.js'), 'globalThis.__app = true;\n');
+
+  const inspected = inspectExpoWebExport(project, output);
+  assert.equal(inspected.status, 'ready');
+  assert.equal(inspected.entryPoint, 'index.html');
+  assert.equal(inspected.fileCount, 2);
+  assert.throws(
+    () => inspectExpoWebExport(project, join(project, '../outside-web')),
+    /must stay inside the generated project/,
+  );
+  rmSync(join(output, '_expo/static/js/web/app.js'));
+  assert.throws(() => inspectExpoWebExport(project, output), /contains no JavaScript bundle/);
+});
+
 test('external dependency controller CLI synchronizes an already installed exact capability', () => {
   const workspace = temporaryDirectory('expo-fast-dependency-sync-');
   const project = join(workspace, 'app');
@@ -1948,6 +1973,7 @@ test('single execution policy uses external model controls and caps deterministi
   assert.match(runner, /\[dependencies, 'seed', project\]/);
   assert.match(verification, /\[dependencies, 'sync', project\]/);
   assert.match(verification, /\[dependencies, 'export', project, catalogRoot\]/);
+  assert.match(verification, /\[dependencies, 'export-web', project, webRoot\]/);
   assert.doesNotMatch(runner, /\[helper, 'seed-modules', project\]/);
   assert.match(runner, /enforcement: 'advisory', blocking: false/);
   assert.match(runner, /trace-scope warning/);

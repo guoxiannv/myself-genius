@@ -1151,7 +1151,7 @@ async function main() {
     }
   }
   if (!isInitial && !metrics.generationMs && metrics.stages.claudeMs) {
-    metrics.generationMs = Object.entries(metrics.stages).filter(([name]) => /^(?:seedModules|claude|repair|dependencySync|typecheck|sourceAudit|export|artifactAudit).*Ms$/.test(name)).reduce((sum, [, value]) => sum + (Number(value) || 0), 0);
+    metrics.generationMs = Object.entries(metrics.stages).filter(([name]) => /^(?:seedModules|claude|repair|dependencySync|typecheck|sourceAudit|export|webExport|artifactAudit).*Ms$/.test(name)).reduce((sum, [, value]) => sum + (Number(value) || 0), 0);
     metrics.totalMs = metrics.generationMs;
   }
   if (isInitial) {

@@ -228,9 +228,9 @@ scripts/restart_dev.sh --foreground
 - `scripts/run_backend.sh`：只启动 Python 后端，用于 API / HPack / HDC 后端单独调试。
 - `scripts/run_tunnel.sh`：只启动 Cloudflare Tunnel，用于手动拆分调试。
 
-## Expo Harmony Go 公网预览
+## Expo Harmony Go 与 Web 公网预览
 
-后端会常驻一个只监听 loopback 的静态 Gateway，默认地址是 `http://127.0.0.1:3353`。Expo 任务完成并通过 Harmony Go 启动验证后，详情页会出现“开启外网预览”按钮。开启操作只把该 Run 的 `dist/harmony-go` 注册到 Gateway，不会为每个应用重复占用端口；关闭后对应的随机发布地址立即失效。
+后端会常驻一个只监听 loopback 的静态 Gateway，默认地址是 `http://127.0.0.1:3353`。Expo 的 Web 产物校验通过后会立即发布，不需要等待后续的 HAP 构建与设备预览完成。Gateway 用同一个随机发布令牌提供两类产物：`dist/harmony-go` 供 Harmony Go 使用，`dist/web` 供详情页右侧的 Web Tab 通过 iframe 预览。所有 Run 共用一个 Gateway 端口；关闭发布后对应的随机地址立即失效。
 
 没有 Tunnel 时可先本地验证：
 
@@ -250,7 +250,13 @@ http://127.0.0.1:3353
 https://version2app.bitfun-platform.com/p/<随机发布令牌>
 ```
 
-当前 Harmony Go 不会为 catalog 请求附加 Cloudflare Access 登录凭据，因此 `/p/*` 需要在 Cloudflare Access 中配置 Bypass；随机发布令牌负责避免可预测枚举。Gateway 只会读取 `HP_EXPO_FAST_APP_ROOT` 下经过导出校验的 `dist/harmony-go`，不会暴露 Prompt 或工程源码。
+同一 Run 的 Web 预览地址形如：
+
+```text
+https://version2app.bitfun-platform.com/p/<随机发布令牌>/web/
+```
+
+当前 Harmony Go 不会为 catalog 请求附加 Cloudflare Access 登录凭据，因此 `/p/*` 需要在 Cloudflare Access 中配置 Bypass；随机发布令牌负责避免可预测枚举。Gateway 只会读取 `HP_EXPO_FAST_APP_ROOT` 下经过导出校验的 `dist/harmony-go` 与其同级 `dist/web`，不会暴露 Prompt 或工程源码。Web iframe 使用 Gateway origin，并通过 sandbox 与主站能力隔离。
 
 ## 生成的鸿蒙工程目录
 

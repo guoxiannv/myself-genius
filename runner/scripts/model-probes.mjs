@@ -92,9 +92,11 @@ function promptTokens(reply) {
 function thinkingTokens(reply) {
   const blocks = Array.isArray(reply.json?.content) ? reply.json.content : [];
   const counted = reply.json?.usage?.output_tokens_details?.thinking_tokens;
+  const billed = reply.json?.usage?.output_tokens;
   return {
     present: blocks.some((block) => block?.type === 'thinking') || Number(counted) > 0,
     counted: Number.isFinite(counted) ? counted : null,
+    billed: Number.isFinite(billed) ? billed : null,
   };
 }
 
@@ -110,9 +112,15 @@ function thinkingTokens(reply) {
 // the endpoint counts, by a per-model amount that does not vary with the
 // message: 68 tokens on k3-256k and 79 on deepseek-v4-flash, over three message
 // lengths each. Nothing a relay does to a reply can shorten the prompt it
-// billed, so this separates "the model was told not to think" from "the block
-// was stripped on the way back". It costs no extra turn -- both numbers come
-// out of the two requests already being sent.
+// billed, so a difference there says "the model was told not to think" and
+// nothing else can. The silence does not say the opposite, though: no
+// difference fits both "the block was stripped on the way back" and "the
+// endpoint honored the field away from the prompt", and the probe leaves that
+// undecided rather than reading the absence of a mark as proof of a relay.
+//
+// Both sides cost no extra turn -- every number comes out of the two requests
+// already being sent, including the billed output that rides along with the
+// verdict below.
 export function probeThinking(claudeBin, model) {
   const ask = (extra) => completion(claudeBin, {
     model,
@@ -133,10 +141,22 @@ export function probeThinking(claudeBin, model) {
   const seen = (side) => (side.counted === null ? (side.present ? 'a thinking block' : 'none') : `${side.counted} thinking tokens`);
   return {
     // Whether this model can be told to stop thinking at all.
+    //
+    // The output the endpoint billed travels with the verdict, unjudged. A
+    // relay can delete the thinking block and the thinking_tokens beside it,
+    // but not the output it already charged for: if that number barely moves
+    // while the thinking above goes to none, the model most likely thought and
+    // only the reply was edited. Recorded rather than decided, because two
+    // replies differ in length by nature and nobody has measured the threshold
+    // that would separate the two cases -- inventing one here is the move this
+    // file exists to avoid.
     thinkingDisablable: {
       value: before.present && !after.present,
       confidence: 'exact',
-      evidence: `${seen(before)} with no thinking field, ${seen(after)} with thinking disabled`,
+      evidence: `${seen(before)} with no thinking field, ${seen(after)} with thinking disabled`
+        + (before.billed === null || after.billed === null
+          ? ''
+          : ` (billed output ${before.billed} then ${after.billed})`),
     },
     // What the endpoint makes of the field being absent. Claude Code omits it
     // entirely when MAX_THINKING_TOKENS is 0, so this decides whether that has
@@ -146,20 +166,30 @@ export function probeThinking(claudeBin, model) {
       confidence: 'exact',
       evidence: `no thinking field sent, reply carried ${seen(before)}`,
     },
-    // Which side the field changed. Kept apart from the verdict because it
-    // answers a different question: thinkingDisablable says the thinking went
-    // away, this says whether it went away before the model saw the prompt or
-    // somewhere on the way back. A false here alongside a true above is the
-    // signature of a relay hiding the block rather than an endpoint honoring
-    // the field, and that is worth being able to read off the fact table.
+    // Whether the field left a mark on the prompt the endpoint billed. Kept
+    // apart from the verdict because it answers a different question:
+    // thinkingDisablable says the thinking went away, this says whether the
+    // prompt changed with it.
+    //
+    // The reading runs one way only. A true is strong -- nothing a relay does
+    // to a reply can resize a prompt already charged for, so the field reached
+    // what the model was sent. A false is only the absence of that mark: it
+    // fits a relay hiding the block, and it fits just as well an endpoint
+    // honoring the field somewhere that costs no prompt tokens. This does not
+    // choose between them, and the evidence below does not pretend to.
+    //
+    // The per-model offset behind a true (68 tokens on k3-256k, 79 on
+    // deepseek-v4-flash) held across three message lengths when measured by
+    // hand. The probe sends one length, so it observes the offset, never its
+    // invariance.
     thinkingDisableReachesPrompt: promptBefore === null || promptAfter === null
-      ? { status: 'unmeasured', evidence: 'the endpoint reported no prompt tokens, so which side changed cannot be told' }
+      ? { status: 'unmeasured', evidence: 'the endpoint reported no prompt tokens, so nothing can be said about the prompt' }
       : {
         value: promptBefore !== promptAfter,
         confidence: 'exact',
         evidence: `${promptBefore} prompt tokens with no thinking field, ${promptAfter} with thinking disabled`
           + (promptBefore === promptAfter
-            ? ' (identical, so only the reply changed)'
+            ? ' (identical, so the field left no mark on the billed prompt)'
             : ` (differs by ${Math.abs(promptBefore - promptAfter)}, so the field changed what the model was sent)`),
       },
   };

@@ -2885,6 +2885,10 @@ esac`);
   const measured = probeThinking(thinks, 'k3-256k');
   assert.equal(measured.thinkingDisablable.value, true);
   assert.match(measured.thinkingDisablable.evidence, /34 thinking tokens .*, none with thinking disabled/);
+  // The output the endpoint billed collapsed with the block, which is what a
+  // model that stopped thinking looks like from the outside. Carried in the
+  // evidence, not turned into a verdict.
+  assert.match(measured.thinkingDisablable.evidence, /billed output 50 then 5\b/);
   // The prompt the endpoint billed shrank too, which no amount of rewriting the
   // reply could do. That is what says the field reached the model rather than
   // the block being stripped on the way back.
@@ -2902,10 +2906,13 @@ echo 'HTTP/2 200' >&2
 echo '{"content":[{"type":"thinking","thinking":"x"}],"usage":{"output_tokens_details":{"thinking_tokens":9}}}'`);
   assert.equal(probeThinking(alwaysThinks, 'k3-256k').thinkingDisablable.value, false);
 
-  // The case the reply alone cannot tell apart from a working field: the block
-  // is gone but the endpoint billed the same prompt both ways, so nothing
-  // reached the model. Reported as disablable -- that is what was observed --
-  // with the second fact saying the change never got past the relay.
+  // The case nothing here can settle: the block is gone, but the endpoint
+  // billed the same prompt and the same output both ways. Reported as
+  // disablable -- that is what was observed -- with the prompt fact saying only
+  // that the field left no mark there, and the billed output sitting beside the
+  // verdict for a reader to weigh. A relay that hid the block and an endpoint
+  // that honored it away from the prompt look alike from here, and the probe
+  // says so instead of picking one.
   const stripsTheBlock = fakeEndpoint(`body=$(cat)
 echo 'HTTP/2 200' >&2
 case "$body" in
@@ -2915,7 +2922,10 @@ esac`);
   const stripped = probeThinking(stripsTheBlock, 'k3-256k');
   assert.equal(stripped.thinkingDisablable.value, true);
   assert.equal(stripped.thinkingDisableReachesPrompt.value, false);
-  assert.match(stripped.thinkingDisableReachesPrompt.evidence, /identical, so only the reply changed/);
+  assert.match(stripped.thinkingDisableReachesPrompt.evidence, /identical, so the field left no mark on the billed prompt/);
+  // The tell the prompt cannot give: the reply lost its block but cost the same
+  // to produce, so the thinking was billed and then edited out.
+  assert.match(stripped.thinkingDisablable.evidence, /billed output 50 then 50\b/);
 
   // Caching moves the same prompt out of input_tokens and into
   // cache_read_input_tokens, which reading one bucket would report as the

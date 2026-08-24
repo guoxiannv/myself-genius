@@ -18,9 +18,10 @@ into native React Native layout and local Lucide path geometry.
 
 The runner has one execution policy. Main and repair model/effort values come from
 command options with `config/execution.json` as the fallback. Deterministic verification
-failures always resume the same model session for another repair, with no runner-owned
-attempt limit; process/model failures, per-turn deadlines, user cancellation, and system
-limits remain terminal conditions.
+failures resume the same model session for another repair until the `repair.limit`
+declared in `config/execution.json` is reached, at which point the last diagnosis is kept
+and the run ends. Process/model failures, per-turn deadlines, user cancellation, and
+system limits remain terminal conditions.
 
 The initial 0→1 turn keeps the established product prompt and `Read`/`Write`/`Edit`
 tool surface. Repair and user follow-up turns additionally receive two project-bound MCP

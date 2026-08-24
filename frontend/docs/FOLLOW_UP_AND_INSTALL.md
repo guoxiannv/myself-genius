@@ -9,8 +9,7 @@
 1. **首版本自动、后续按需生成安装包**：0→1 首版本在 QA 与 unsigned HAP 就绪后自动签名；模拟器预览由详情页访问者按需申请，不阻塞签名。后续调整不重复 QA，只有用户点击后才重新编译、签名并生成最新二维码。
 2. **生成后续跑（follow-up）**：Harmony Pilot 或 Expo Runner 的 0→1 工作流完成后，用户可以继续对同一工作区提出增量修改。Remote UI 只负责鉴权、展示与调用各 Runtime 自己的受控控制器。
 
-本文描述当前已实现的前后端交互设计。Harmony Pilot 的控制契约来源于：
-后端仓库的 `docs/follow-up-control-remote-ui-handoff.md`。
+本文描述当前已实现的前后端交互设计。Harmony Pilot 的控制契约来源于：后端仓库的 `docs/follow-up-control-remote-ui-handoff.md`。
 
 ## 2. 系统边界与职责
 
@@ -262,12 +261,6 @@ Expo 状态保存在生成工程内：
 7. 生成成功后进度从 80% 变为 100%，右下角自动展开最新二维码；再次开始调整后进度退回 80%。
 8. `GET /api/runs/{id}/install-qr?version=first` 专门返回首版本二维码。
 
-### 7.3 续跑重试与安装按钮状态
-
-- 如果续跑第一次恢复旧 Claude session 失败，Runner 会自动创建 fresh follow-up session，继续使用当前工程文件完成调整；成功结果会同步新的 session ID。
-- 同一 trace 文件中若同时存在失败重试和最终成功结果，详情页只展示最后一个 Result，避免把已恢复的会话显示为失败。
-- Expo 详情页顶部按钮按当前安装包状态显示「安装」或「更新安装包」；更新请求触发最新 HAP 刷新和 HPack 签名，二维码发布完成后恢复为「安装」。
-
 ### 7.1 续跑后的按需预览
 
 ArkPilot 仍可维护原有媒体采集。Expo follow-up 完成后只发布最新 Bundle/HAP，不自动占用桌面模拟器；用户点击详情页预览按钮时，再将当前 HAP 安装到 FIFO 分配的设备：
@@ -304,6 +297,12 @@ ArkPilot 仍可维护原有媒体采集。Expo follow-up 完成后只发布最�
 - 手动更新安装包并生成最新二维码：100%
 
 签名阶段只有同时满足 `package_current`、`install_ready`、安装 URL 和二维码路径存在时才算完成。`distribution_status: ready` 不能单独把进度推到 100%，以免 run 记录残留的首版本状态造成误判。
+
+### 7.3 续跑重试与安装按钮状态
+
+- 如果续跑第一次恢复旧 Claude session 失败，Runner 会自动创建 fresh follow-up session，继续使用当前工程文件完成调整；成功结果会同步新的 session ID。
+- 同一 trace 文件中若同时存在失败重试和最终成功结果，详情页只展示最后一个 Result，避免把已恢复的会话显示为失败。
+- Expo 详情页顶部按钮按当前安装包状态显示「安装」或「更新安装包」；更新请求触发最新 HAP 刷新和 HPack 签名，二维码发布完成后恢复为「安装」。
 
 ## 8. 本地模拟与真实验证
 

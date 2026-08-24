@@ -84,7 +84,7 @@ follow-up-control.sh
 2. 将合格设计稿保存为 `.expo-fast/design.html`，主实现读取它并转译为原生布局与本地 Lucide 路径图标。
 3. 运行主模型回合，只允许在目标工程边界内读写产品文件；`brief.json` 出现后，另一个独立模型进程并行生成应用图标。
 4. 解析并同步模型选择的精确能力依赖，执行 typecheck、trace-scope 和 source audit。
-5. 若确定性诊断失败，使用同一会话执行聚合 repair，再完整复验；单次运行最多执行 100 轮 repair，达到上限后保留最后诊断并终止。
+5. 若确定性诊断失败，使用同一会话执行聚合 repair，再完整复验；轮数上限由 `config/execution.json` 的 `repair.limit` 决定，达到上限后保留最后诊断并终止。
 6. 通过 SDK Harmony CLI 导出 Bundle/catalog，执行 artifact audit。
 7. 将 Bundle 发布到共享 Gateway，由设备池分配预装 Harmony Go 壳并验证当前应用身份与交互证据。
 8. 只有显式传入 `--hap true` 时，才在固定 pool 中额外构建每任务 unsigned HAP。
@@ -166,7 +166,7 @@ node scripts/probe-hardcoded-knobs.mjs                            # 免费：全
       trace-scope-audit*.json
 ```
 
-`manifest.json` 单独存在不代表端到端成功；应以 `result.json`、各项 gate 和运行时交互证据共同判断。`result.json.execution` 记录本次实际使用的主/repair 模型、effort 和 `repairLimit: 100`。`result.json.revisions` 记录首轮和每次 follow-up，初始 `generationMs`/`totalMs` 不会被后续操作覆盖；后续耗时写入 revision、`operations`/`resumes` 与 `lastOperationMs`。
+`manifest.json` 单独存在不代表端到端成功；应以 `result.json`、各项 gate 和运行时交互证据共同判断。`result.json.execution` 记录本次实际使用的主/repair 模型、effort 和生效的 `repairLimit`。`result.json.revisions` 记录首轮和每次 follow-up，初始 `generationMs`/`totalMs` 不会被后续操作覆盖；后续耗时写入 revision、`operations`/`resumes` 与 `lastOperationMs`。
 
 生成成功后，Expo 工程中的源资产位于 `assets/app-icon/`：`app.json#expo.icon` 指向合成 PNG，`app.json#expo.harmony.icon` 声明前景和背景层。HAP prebuild 时由 SDK 将分层资源写入 AppScope 与 entry module，并同步更新应用图标和主 EntryAbility 图标；Runner 不携带原生 config plugin，启动窗口图标仍由 splash 独立控制，固定 SDK pool 也不保存产品图标源码。首次 Harmony Go export 会在主实现完成后汇合并行图标任务，SDK 将图标作为带 URL、大小和 SHA-256 的 manifest asset 与 `bundle.js` 一起发布；Harmony Go 的远端 catalog 和离线已安装列表都会显示图标。图标任务状态与耗时记录在 `.expo-fast/app-icon/result.json` 和最终 metrics 中。可通过 `.env` 中的 `EXPO_FAST_APP_ICON_*` 参数单独关闭、换模型或调整超时。
 

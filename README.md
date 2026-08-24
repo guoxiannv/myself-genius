@@ -24,12 +24,9 @@ git clone --recurse-submodules https://github.com/BitFun-Platform/Genius.git
 git submodule update --init --recursive
 ```
 
-以上命令会检出 Genius 当前记录、并已经过配套验证的 SDK commit。普通部署不要执行
-`git submodule update --remote sdk`，以免本机 SDK 偏离主仓库固定的版本。
+以上命令会检出 Genius 当前记录、并已经过配套验证的 SDK commit。普通部署不要执行 `git submodule update --remote sdk`，以免本机 SDK 偏离主仓库固定的版本。
 
-当前 Harmony full-profile 版本由 SDK 的 `tools/harmony/full-profile.json` 固定。升级
-`profileId`（例如从 v2 到 v3）会使已有构建池失效；升级后的 SDK 必须先推送到
-`BitFun-Platform/devkit_sdk`，再更新本仓库的 submodule 指针，并为新 profile 创建新的 Pool 根目录。
+当前 Harmony full-profile 版本由 SDK 的 `tools/harmony/full-profile.json` 固定。升级 `profileId`（例如从 v2 到 v3）会使已有构建池失效；升级后的 SDK 必须先推送到 `BitFun-Platform/devkit_sdk`，再更新本仓库的 submodule 指针，并为新 profile 创建新的 Pool 根目录。
 
 ### 维护者升级 SDK
 
@@ -49,9 +46,7 @@ git push
 
 ## 初始化 Expo HAP 构建池
 
-Expo Runner 在 bundle 导出和确定性校验之后，会通过 SDK 的固定 slot 池构建同时支持
-`phone` 和 `2in1` 的 unsigned HAP，并将同一产物用于手机安装和 PC 模拟器预览。机器首次部署
-或 SDK full-profile 变化后，在仓库根目录执行：
+Expo Runner 在 bundle 导出和确定性校验之后，会通过 SDK 的固定 slot 池构建同时支持 `phone` 和 `2in1` 的 unsigned HAP，并将同一产物用于手机安装和 PC 模拟器预览。机器首次部署或 SDK full-profile 变化后，在仓库根目录执行：
 
 ```bash
 cp runner/.env.example runner/.env
@@ -59,14 +54,9 @@ cp runner/.env.example runner/.env
 runner/setup-harmony-pool.sh
 ```
 
-脚本会在需要时通过 Corepack 安装 SDK pool 准备流程所需的最小 workspace 依赖，然后在仓库根目录
-创建被 Git 忽略的 `harmony-pool/`，初始化四个 slot 并依次预热。可通过
-`EXPO_HARMONY_POOL_ROOT` 和 `EXPO_HARMONY_POOL_SIZE` 覆盖路径与数量。预热完成后，每个生成任务
-由 Runner 提交一个 SDK pool job；SDK 负责排队、租约、缓存、Hvigor 构建和 HAP 产物校验。
+脚本会在需要时通过 Corepack 安装 SDK pool 准备流程所需的最小 workspace 依赖，然后在仓库根目录创建被 Git 忽略的 `harmony-pool/`，初始化四个 slot 并依次预热。可通过 `EXPO_HARMONY_POOL_ROOT` 和 `EXPO_HARMONY_POOL_SIZE` 覆盖路径与数量。预热完成后，每个生成任务由 Runner 提交一个 SDK pool job；SDK 负责排队、租约、缓存、Hvigor 构建和 HAP 产物校验。
 
-默认四个 slot 的初始化磁盘预检门槛约为 `4 × 8 GiB + 20 GiB = 52 GiB`。这是 SDK 用于预留
-slot 空间和系统剩余空间的安全门槛，不代表 Pool 最终一定占用 52 GiB。首次完整预热需要依次完成
-四次原生构建，可能持续几十分钟；后续命中 warm slot 的应用构建会明显更快。
+默认四个 slot 的初始化磁盘预检门槛约为 `4 × 8 GiB + 20 GiB = 52 GiB`。这是 SDK 用于预留 slot 空间和系统剩余空间的安全门槛，不代表 Pool 最终一定占用 52 GiB。首次完整预热需要依次完成四次原生构建，可能持续几十分钟；后续命中 warm slot 的应用构建会明显更快。
 
 初始化脚本还支持：
 
@@ -85,14 +75,11 @@ runner/setup-harmony-pool.sh --force
 - `slot-01` 至 `slot-04` 的 `status` 均为 `idle`；
 - 四个 slot 的 `warm` 均为 `true`。
 
-如果只是 SDK commit 变化，重新执行脚本即可识别并预热旧 slot；如果 SDK 的 full-profile
-`profileId` 发生变化，需要为 `EXPO_HARMONY_POOL_ROOT` 配置一个新的空目录，不能复用旧 Pool。
+如果只是 SDK commit 变化，重新执行脚本即可识别并预热旧 slot；如果 SDK 的 full-profile `profileId` 发生变化，需要为 `EXPO_HARMONY_POOL_ROOT` 配置一个新的空目录，不能复用旧 Pool。
 
 ## 本地验证 Expo 到 HAP
 
-以下流程只启动本地 Frontend 和 Python API，不需要 Cloudflare、Profile、HPack 签名材料或
-`frontend/deploy/server.env`。开始前请确保 `runner/.env` 已配置 Node.js 22.13+、DevEco Studio
-和 Claude CLI，DevEco PC 模拟器已经启动，并且 `tmux` 可用。
+以下流程只启动本地 Frontend 和 Python API，不需要 Cloudflare、Profile、HPack 签名材料或 `frontend/deploy/server.env`。开始前请确保 `runner/.env` 已配置 Node.js 22.13+、DevEco Studio 和 Claude CLI，DevEco PC 模拟器已经启动，并且 `tmux` 可用。
 
 在仓库根目录安装 Frontend 依赖：
 
@@ -102,8 +89,7 @@ frontend/.venv/bin/python3 -m pip install -r frontend/requirements.txt
 npm --prefix frontend/web ci
 ```
 
-这是**起服务**要装的东西。跑 frontend 的测试不需要它们，入口和最小依赖见
-[`frontend/README.md`](frontend/README.md) 的「测试」一节。
+这是**起服务**要装的东西。跑 frontend 的测试不需要它们，入口和最小依赖见 [`frontend/README.md`](frontend/README.md) 的「测试」一节。
 
 启动本地服务：
 
@@ -111,10 +97,7 @@ npm --prefix frontend/web ci
 frontend/scripts/restart_local.sh --tmux
 ```
 
-浏览器打开 `http://127.0.0.1:8180`，选择 `Expo`，输入“生成一个简单番茄闹钟APP”并提交。
-任务完成后不会自动占用 PC 模拟器。HAP 可用时，详情页显示“在 PC 模拟器中预览”按钮；用户点击后
-才进入共享设备池的 FIFO 队列并完成安装、启动和最大化。模拟器预览失败不影响原有安装入口。
-对应本地产物位于：
+浏览器打开 `http://127.0.0.1:8180`，选择 `Expo`，输入“生成一个简单番茄闹钟APP”并提交。任务完成后不会自动占用 PC 模拟器。HAP 可用时，详情页显示“在 PC 模拟器中预览”按钮；用户点击后才进入共享设备池的 FIFO 队列并完成安装、启动和最大化。模拟器预览失败不影响原有安装入口。对应本地产物位于：
 
 ```text
 expo-app/remote-ui-<run_id>/dist/harmony-go/bundle.js
@@ -139,6 +122,7 @@ frontend/<分支名>
 runner/<分支名>
 sdk/<分支名>
 global/<分支名>
+evaluation/<分支名>
 ```
 
 分支名使用小写英文、数字和连字符，名称应简短并能说明改动目的。例如：
@@ -148,9 +132,12 @@ frontend/add-login-page
 runner/fix-task-timeout
 sdk/update-device-api
 global/update-ci-config
+evaluation/add-cold-start-rubric
 ```
 
-其中 `global/` 用于同时影响多个目录或仓库级配置的改动，例如 CI、文档和公共配置。
+其中 `global/` 用于同时影响多个目录或仓库级配置的改动，例如 CI、文档和公共配置；`evaluation/` 用于生成质量的评测与评分口径。
+
+以上五个前缀由 `.github/workflows/validate-pull-request.yml` 强制校验，不匹配的分支名和 PR 标题会被拒绝。
 
 ## Issue 命名规范
 
@@ -161,19 +148,13 @@ Issue 标题使用 `[范围] 简短描述` 的格式，范围与目录保持一�
 [runner] 修复任务执行超时
 [sdk] 增加设备状态接口
 [global] 更新项目 CI 配置
+[evaluation] 补充冷启动评分口径
 ```
 
 - `[frontend]`：仅涉及 Frontend。
 - `[runner]`：仅涉及 Runner。
 - `[sdk]`：仅涉及 SDK。
 - `[global]`：涉及多个部分或仓库级事项。
+- `[evaluation]`：生成质量的评测与评分口径。
 
-一个 Issue 如果涉及多个部分，优先使用 `[global]`，并在正文中列出受影响的目录。
-
-## 当前进展
-
-- 已建立 `frontend/`、`runner/` 和 `sdk/` 三个目录的基础结构。
-- 已将 `yuhuailiu/expo-arkpilot` 的 Runner 当前代码初始导入 `runner/` 目录。
-- 已接入 `BitFun-Platform/devkit_sdk` submodule，并配置跟踪 `dev/SupportOH` 分支。
-- 已启用 Issue 模板和标题规范校验 Workflow。
-- 已在 `GeniusProjectTrack` 中创建并转换 Issue `#1`：`[global] 更新项目 README 进展说明`，本次 README 更新通过 Pull Request 合并。
+一个 Issue 如果涉及多个部分，优先使用 `[global]`，并在正文中列出受影响的目录。Issue 标题同样由 Workflow 校验，模板见 `.github/ISSUE_TEMPLATE/`。

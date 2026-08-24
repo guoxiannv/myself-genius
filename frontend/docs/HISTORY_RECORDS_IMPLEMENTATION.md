@@ -80,8 +80,7 @@ data/artifacts/hpack/<run_id>/hpack-result.json
 ## 前端页面
 
 
-新增页面：
-![img_1.png](assets/myApp.png)
+新增页面：![img_1.png](assets/myApp.png)
 
 ```text
 web/src/pages/HistoryPage.tsx

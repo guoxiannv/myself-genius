@@ -106,8 +106,7 @@ curl -fsS http://127.0.0.1:8090/api/health | head -c 120
 
 ### 本地开发启动与停止
 
-已经单独配置 Cloudflare Tunnel，或者只需要本机访问时，使用
-`scripts/restart_local.sh`。它不会启动项目自带的 Tunnel，前端和后端端口可独立覆盖：
+已经单独配置 Cloudflare Tunnel，或者只需要本机访问时，使用 `scripts/restart_local.sh`。它不会启动项目自带的 Tunnel，前端和后端端口可独立覆盖：
 
 ```bash
 # 默认使用 nohup 后台启动（前端 8180、后端 8181）
@@ -129,10 +128,7 @@ tmux attach -t remote-ui-local
 FRONTEND_PORT=5173 BACKEND_PORT=8181 scripts/restart_local.sh --stop
 ```
 
-tmux 模式默认使用 `remote-ui-local` session，可通过
-`LOCAL_TMUX_SESSION` 修改。`--stop` 只停止这个受管 session 和
-`data/pids/local-*.pid` 记录的进程树，不会停止 Expo/ArkPilot 生成任务，
-也不会停止可能被其他任务共享的 `openbitfun-proxy` session。
+tmux 模式默认使用 `remote-ui-local` session，可通过 `LOCAL_TMUX_SESSION` 修改。`--stop` 只停止这个受管 session 和 `data/pids/local-*.pid` 记录的进程树，不会停止 Expo/ArkPilot 生成任务，也不会停止可能被其他任务共享的 `openbitfun-proxy` session。
 
 `app.py` 启动时会自动读取 `deploy/server.env`（`.env.local` 仅作可选覆盖）。验证时至少需要配置：
 
@@ -168,9 +164,7 @@ frontend/scripts/run_tests.sh
 
 ### 依赖
 
-**跑测试不需要 `.venv`，也不需要 `requirements.txt` 里的运行时依赖。** 唯一需要安装的第三方包
-声明在 `requirements-test.txt`（今天只有 Pillow）。整套二十秒左右跑完，不联网，也不需要
-hdc / tmux / 模拟器 / node_modules。
+**跑测试不需要 `.venv`，也不需要 `requirements.txt` 里的运行时依赖。** 唯一需要安装的第三方包声明在 `requirements-test.txt`（今天只有 Pillow）。整套二十秒左右跑完，不联网，也不需要 hdc / tmux / 模拟器 / node_modules。
 
 ```bash
 python3 -m pip install -r frontend/requirements-test.txt
@@ -178,12 +172,9 @@ python3 -m pip install -r frontend/requirements-test.txt
 PYTHON_BIN=python3.14 frontend/scripts/run_tests.sh
 ```
 
-`requirements.txt` 与 `requirements-test.txt` 是平级的两份清单，互不假设包含关系：前者回答
-「起服务要装什么」，后者回答「跑测试要装什么」，今天两份都含 Pillow 只是巧合。将来 pytest 一类
-只属于测试的包直接加进 `requirements-test.txt`，运行时清单不受影响。
+`requirements.txt` 与 `requirements-test.txt` 是平级的两份清单，互不假设包含关系：前者回答「起服务要装什么」，后者回答「跑测试要装什么」，今天两份都含 Pillow 只是巧合。将来 pytest 一类只属于测试的包直接加进 `requirements-test.txt`，运行时清单不受影响。
 
-这条边界由 `tests/python/test_dependency_contract.py` 断言，不靠文档维持：测试树里出现未声明的
-第三方 import 会直接失败，两份清单对同一个包写了不同的版本约束也会失败。
+这条边界由 `tests/python/test_dependency_contract.py` 断言，不靠文档维持：测试树里出现未声明的第三方 import 会直接失败，两份清单对同一个包写了不同的版本约束也会失败。
 
 ### 新增测试放哪
 
@@ -191,9 +182,7 @@ PYTHON_BIN=python3.14 frontend/scripts/run_tests.sh
 - Node 测试放 `tests/node/`，文件名必须以 `.test.mjs` 结尾
 - `web/` 的前端测试将来归 `web/` 工作区自己管，不进 `tests/`
 
-前两条不是约定而是硬性规则，`run_tests.sh` 会在跑任何测试之前检查。原因是这两种情况都会
-**少跑测试却报绿**：测试文件不归任何 lane 管，就没有任何命令会执行到它；Python 子目录缺
-`__init__.py`，`unittest discover` 会跳过整个目录，既不报错也不给警告。
+前两条不是约定而是硬性规则，`run_tests.sh` 会在跑任何测试之前检查。原因是这两种情况都会 **少跑测试却报绿**：测试文件不归任何 lane 管，就没有任何命令会执行到它；Python 子目录缺 `__init__.py`，`unittest discover` 会跳过整个目录，既不报错也不给警告。
 
 ### 结果不对时先看这里
 
@@ -207,8 +196,7 @@ PYTHON_BIN=python3.14 frontend/scripts/run_tests.sh
 
 ### 覆盖范围
 
-现有用例覆盖 `app.py`、`scan_install/` 与 `scripts/`。需要留意 `scan_install/webrtc_preview.py`
-对应的 3 个用例在未安装 aiortc 时全部跳过，因此「全绿」不等于「全覆盖」。
+现有用例覆盖 `app.py`、`scan_install/` 与 `scripts/`。需要留意 `scan_install/webrtc_preview.py` 对应的 3 个用例在未安装 aiortc 时全部跳过，因此「全绿」不等于「全覆盖」。
 
 ## 公网访问
 
@@ -242,10 +230,7 @@ scripts/restart_dev.sh --foreground
 
 ## Expo Harmony Go 公网预览
 
-后端会常驻一个只监听 loopback 的静态 Gateway，默认地址是
-`http://127.0.0.1:3353`。Expo 任务完成并通过 Harmony Go 启动验证后，详情页会出现
-“开启外网预览”按钮。开启操作只把该 Run 的 `dist/harmony-go` 注册到 Gateway，不会为每个
-应用重复占用端口；关闭后对应的随机发布地址立即失效。
+后端会常驻一个只监听 loopback 的静态 Gateway，默认地址是 `http://127.0.0.1:3353`。Expo 任务完成并通过 Harmony Go 启动验证后，详情页会出现“开启外网预览”按钮。开启操作只把该 Run 的 `dist/harmony-go` 注册到 Gateway，不会为每个应用重复占用端口；关闭后对应的随机发布地址立即失效。
 
 没有 Tunnel 时可先本地验证：
 
@@ -265,9 +250,7 @@ http://127.0.0.1:3353
 https://version2app.bitfun-platform.com/p/<随机发布令牌>
 ```
 
-当前 Harmony Go 不会为 catalog 请求附加 Cloudflare Access 登录凭据，因此 `/p/*` 需要在
-Cloudflare Access 中配置 Bypass；随机发布令牌负责避免可预测枚举。Gateway 只会读取
-`HP_EXPO_FAST_APP_ROOT` 下经过导出校验的 `dist/harmony-go`，不会暴露 Prompt 或工程源码。
+当前 Harmony Go 不会为 catalog 请求附加 Cloudflare Access 登录凭据，因此 `/p/*` 需要在 Cloudflare Access 中配置 Bypass；随机发布令牌负责避免可预测枚举。Gateway 只会读取 `HP_EXPO_FAST_APP_ROOT` 下经过导出校验的 `dist/harmony-go`，不会暴露 Prompt 或工程源码。
 
 ## 生成的鸿蒙工程目录
 
@@ -463,8 +446,7 @@ data/artifacts/videos/<run_id>/
 ### 环境约定
 
 - `hdc` 优先从 `HDC_PATH` 读取
-- 其次自动尝试：
-  `/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony/toolchains/hdc`
+- 其次自动尝试：`/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony/toolchains/hdc`
 - 当前脚本不依赖 MCP，完全走 `hdc`
 - `--config` 现在只是可选覆盖项，不再是必需前置文件
 

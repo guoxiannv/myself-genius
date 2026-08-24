@@ -4,7 +4,7 @@
 
 ## 目录结构
 
-```
+```text
 web/
 ├── src/
 │   ├── pages/            # HomePage（一句话构建入口）、DetailPage（构建详情）
@@ -23,9 +23,7 @@ web/
 └── vite.config.ts        # /api 代理到 Python 后端
 ```
 
-详情页 `BuildProgress` 的阶段名称与状态不是前端硬编码顺序推进，而是由后端
-`RunProgress` 中的 pipeline、tmux lane、UI QA、capture 和分发状态综合映射。
-详细规则见 [`../docs/BUILD_PROGRESS_STAGE_RULES.md`](../docs/BUILD_PROGRESS_STAGE_RULES.md)。
+详情页 `BuildProgress` 的阶段名称与状态不是前端硬编码顺序推进，而是由后端 `RunProgress` 中的 pipeline、tmux lane、UI QA、capture 和分发状态综合映射。阶段序列、每阶段 20% 的计分规则和签名阶段的完成条件见 [`../docs/FOLLOW_UP_AND_INSTALL.md`](../docs/FOLLOW_UP_AND_INSTALL.md) 的「7.2 进度条规则」；把后端状态判成某个阶段的具体启发式（trace 文本匹配、`newer_hap_available` 与 capture 状态的组合）只存在于 `src/components/detail/BuildProgress.tsx`，随实现调整，不另行成文。
 
 ## 本地开发
 
@@ -59,9 +57,7 @@ npm install   # 首次
 npm run dev
 ```
 
-打开 http://127.0.0.1:5173 即可。此时 `/api/*` 没有后端会返回错误，
-但首页渲染、建议胶囊、输入卡片等纯 UI 都能正常调试。
-提交构建（POST `/api/runs`）需要后端，见方式二。
+打开 http://127.0.0.1:5173 即可。此时 `/api/*` 没有后端会返回错误，但首页渲染、建议胶囊、输入卡片等纯 UI 都能正常调试。提交构建（POST `/api/runs`）需要后端，见方式二。
 
 ### 方式二：连本地后端调完整流程（首页 + 详情页）
 
@@ -87,9 +83,7 @@ npm run dev
 VITE_API_TARGET=http://192.168.1.20:8080 npm run dev
 ```
 
-> 提示：详情页地址形如 `http://127.0.0.1:5173/runs/<run_id>`，
-> 其中 `<run_id>` 是后端 `data/runs/` 下已存在的任务 id（16 进制）。
-> 想快速造一条用于调试的记录，可在后端项目根目录执行：
+> 提示：详情页地址形如 `http://127.0.0.1:5173/runs/<run_id>`，其中 `<run_id>` 是后端 `data/runs/` 下已存在的任务 id（16 进制）。想快速造一条用于调试的记录，可在后端项目根目录执行：
 >
 > ```bash
 > python3 - <<'PY'
@@ -119,9 +113,7 @@ VITE_API_TARGET=http://192.168.1.20:8080 npm run dev
 
 ## 实时更新
 
-`useRunStream` 会先连接 `GET /api/runs/{id}/events`（SSE，已在后端实现），
-每帧推送一份与 `/api/runs/{id}` 相同结构的 JSON，进入终态（succeeded / failed）后自动关流。
-若 SSE 连接失败（如代理不透传），会自动降级为按 `poll_interval_ms` 轮询，前端无需改动。
+`useRunStream` 会先连接 `GET /api/runs/{id}/events`（SSE，已在后端实现），每帧推送一份与 `/api/runs/{id}` 相同结构的 JSON，进入终态（succeeded / failed）后自动关流。若 SSE 连接失败（如代理不透传），会自动降级为按 `poll_interval_ms` 轮询，前端无需改动。
 
 ## 生产构建
 

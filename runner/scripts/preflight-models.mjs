@@ -201,13 +201,16 @@ function probeModel(claudeBin, model, notice) {
     if (thinking.unmeasured) {
       record.thinkingDisablable = stamp({ status: 'unmeasured', evidence: thinking.unmeasured });
       record.absentThinkingMeansOff = stamp({ status: 'unmeasured', evidence: thinking.unmeasured });
+      record.thinkingDisableReachesPrompt = stamp({ status: 'unmeasured', evidence: thinking.unmeasured });
     } else {
       record.thinkingDisablable = stamp(thinking.thinkingDisablable);
       record.absentThinkingMeansOff = stamp(thinking.absentThinkingMeansOff);
+      record.thinkingDisableReachesPrompt = stamp(thinking.thinkingDisableReachesPrompt);
     }
   } catch (error) {
     record.thinkingDisablable = unmeasured(error);
     record.absentThinkingMeansOff = unmeasured(error);
+    record.thinkingDisableReachesPrompt = unmeasured(error);
   }
   return record;
 }

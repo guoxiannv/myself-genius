@@ -76,11 +76,34 @@ export function probeContextWindow(claudeBin, model, notice = () => {}, ladder =
   };
 }
 
-// Two small requests that differ in one field. The verdict rests on the reply:
-// a thinking block, and the thinking_tokens the endpoint reports for it. That
-// is the observable difference the rule above demands -- a relay that merely
-// hid the block while the model still thought would leave the token count
-// behind, and this would catch it.
+// Two small requests that differ in one field, read on both sides.
+//
+// The reply side decides the verdict: a thinking block, and the thinking_tokens
+// the endpoint reports for it. That is the observable difference the rule above
+// demands -- a relay that merely hid the block while the model still thought
+// would leave the token count behind, and this would catch it.
+//
+// The request side says how far the field got, which the reply alone cannot
+// tell. Measured on this relay, turning thinking off also shrinks the prompt
+// the endpoint counts, by a per-model amount that does not vary with the
+// message: 68 tokens on k3-256k and 79 on deepseek-v4-flash, over three message
+// lengths each. Nothing a relay does to a reply can shorten the prompt it
+// billed, so this separates "the model was told not to think" from "the block
+// was stripped on the way back". It costs no extra turn -- both numbers come
+// out of the two requests already being sent.
+// Prompt tokens as the endpoint counted them, summed over the cache buckets. A
+// near-repeated body moves the same number out of input_tokens and into
+// cache_read_input_tokens, so reading one bucket alone reports a difference
+// that is only caching -- and the second request here is a near-repeat of the
+// first by construction, so that mistake would fire every time.
+function promptTokens(reply) {
+  const usage = reply.json?.usage;
+  if (!usage) return null;
+  const total = ['input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens']
+    .reduce((sum, key) => sum + (Number(usage[key]) || 0), 0);
+  return total > 0 ? total : null;
+}
+
 function thinkingTokens(reply) {
   const blocks = Array.isArray(reply.json?.content) ? reply.json.content : [];
   const counted = reply.json?.usage?.output_tokens_details?.thinking_tokens;
@@ -105,6 +128,8 @@ export function probeThinking(claudeBin, model) {
   }
   const before = thinkingTokens(absent);
   const after = thinkingTokens(disabled);
+  const promptBefore = promptTokens(absent);
+  const promptAfter = promptTokens(disabled);
   const seen = (side) => (side.counted === null ? (side.present ? 'a thinking block' : 'none') : `${side.counted} thinking tokens`);
   return {
     // Whether this model can be told to stop thinking at all.
@@ -121,6 +146,22 @@ export function probeThinking(claudeBin, model) {
       confidence: 'exact',
       evidence: `no thinking field sent, reply carried ${seen(before)}`,
     },
+    // Which side the field changed. Kept apart from the verdict because it
+    // answers a different question: thinkingDisablable says the thinking went
+    // away, this says whether it went away before the model saw the prompt or
+    // somewhere on the way back. A false here alongside a true above is the
+    // signature of a relay hiding the block rather than an endpoint honoring
+    // the field, and that is worth being able to read off the fact table.
+    thinkingDisableReachesPrompt: promptBefore === null || promptAfter === null
+      ? { status: 'unmeasured', evidence: 'the endpoint reported no prompt tokens, so which side changed cannot be told' }
+      : {
+        value: promptBefore !== promptAfter,
+        confidence: 'exact',
+        evidence: `${promptBefore} prompt tokens with no thinking field, ${promptAfter} with thinking disabled`
+          + (promptBefore === promptAfter
+            ? ' (identical, so only the reply changed)'
+            : ` (differs by ${Math.abs(promptBefore - promptAfter)}, so the field changed what the model was sent)`),
+      },
   };
 }
 

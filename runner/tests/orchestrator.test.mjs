@@ -2862,12 +2862,17 @@ echo '{"error":{"message":"slow down"}}'`);
   const thinks = fakeEndpoint(`body=$(cat)
 echo 'HTTP/2 200' >&2
 case "$body" in
-  *'"thinking"'*) echo '{"content":[{"type":"text","text":"red"}],"usage":{"output_tokens":5}}' ;;
-  *) echo '{"content":[{"type":"thinking","thinking":"x"},{"type":"text","text":"red"}],"usage":{"output_tokens":50,"output_tokens_details":{"thinking_tokens":34}}}' ;;
+  *'"thinking"'*) echo '{"content":[{"type":"text","text":"red"}],"usage":{"input_tokens":25,"output_tokens":5}}' ;;
+  *) echo '{"content":[{"type":"thinking","thinking":"x"},{"type":"text","text":"red"}],"usage":{"input_tokens":93,"output_tokens":50,"output_tokens_details":{"thinking_tokens":34}}}' ;;
 esac`);
   const measured = probeThinking(thinks, 'k3-256k');
   assert.equal(measured.thinkingDisablable.value, true);
   assert.match(measured.thinkingDisablable.evidence, /34 thinking tokens .*, none with thinking disabled/);
+  // The prompt the endpoint billed shrank too, which no amount of rewriting the
+  // reply could do. That is what says the field reached the model rather than
+  // the block being stripped on the way back.
+  assert.equal(measured.thinkingDisableReachesPrompt.value, true);
+  assert.match(measured.thinkingDisableReachesPrompt.evidence, /93 prompt tokens .*25 with thinking disabled .*differs by 68/);
   // Omitting the field is not the same as disabling it. Claude Code drops the
   // field entirely at MAX_THINKING_TOKENS=0, so this is what decides whether
   // that could ever have meant what it looks like.
@@ -2879,6 +2884,37 @@ esac`);
 echo 'HTTP/2 200' >&2
 echo '{"content":[{"type":"thinking","thinking":"x"}],"usage":{"output_tokens_details":{"thinking_tokens":9}}}'`);
   assert.equal(probeThinking(alwaysThinks, 'k3-256k').thinkingDisablable.value, false);
+
+  // The case the reply alone cannot tell apart from a working field: the block
+  // is gone but the endpoint billed the same prompt both ways, so nothing
+  // reached the model. Reported as disablable -- that is what was observed --
+  // with the second fact saying the change never got past the relay.
+  const stripsTheBlock = fakeEndpoint(`body=$(cat)
+echo 'HTTP/2 200' >&2
+case "$body" in
+  *'"thinking"'*) echo '{"content":[{"type":"text","text":"red"}],"usage":{"input_tokens":93,"output_tokens":50}}' ;;
+  *) echo '{"content":[{"type":"thinking","thinking":"x"},{"type":"text","text":"red"}],"usage":{"input_tokens":93,"output_tokens":50,"output_tokens_details":{"thinking_tokens":34}}}' ;;
+esac`);
+  const stripped = probeThinking(stripsTheBlock, 'k3-256k');
+  assert.equal(stripped.thinkingDisablable.value, true);
+  assert.equal(stripped.thinkingDisableReachesPrompt.value, false);
+  assert.match(stripped.thinkingDisableReachesPrompt.evidence, /identical, so only the reply changed/);
+
+  // Caching moves the same prompt out of input_tokens and into
+  // cache_read_input_tokens, which reading one bucket would report as the
+  // prompt having shrunk to nothing. The second request here is a near-repeat
+  // of the first by construction, so this is the default case, not a corner.
+  const cached = fakeEndpoint(`body=$(cat)
+echo 'HTTP/2 200' >&2
+case "$body" in
+  *'"thinking"'*) echo '{"content":[{"type":"text","text":"red"}],"usage":{"input_tokens":0,"cache_read_input_tokens":93,"output_tokens":5}}' ;;
+  *) echo '{"content":[{"type":"thinking","thinking":"x"},{"type":"text","text":"red"}],"usage":{"input_tokens":93,"output_tokens":50,"output_tokens_details":{"thinking_tokens":34}}}' ;;
+esac`);
+  assert.equal(probeThinking(cached, 'k3-256k').thinkingDisableReachesPrompt.value, false);
+
+  // An endpoint that reports no prompt tokens at all cannot answer the
+  // question, and says so rather than defaulting either way.
+  assert.equal(probeThinking(alwaysThinks, 'k3-256k').thinkingDisableReachesPrompt.status, 'unmeasured');
 
   // A window larger than the probe expects grows the request until it is
   // rejected, because only a rejection carries the number and only a rejection

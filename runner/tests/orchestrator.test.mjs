@@ -25,6 +25,7 @@ import { auditProductSource, verifyHarmonyGoArtifacts } from '../scripts/verify-
 import { writeRunState } from '../scripts/run-state.mjs';
 import {
   executionConfig,
+  fieldCriteria,
   resolveExecution,
   resolveRole,
   roleEnv,
@@ -3052,4 +3053,146 @@ test('the design turn records the thinking it observed, not the thinking it aske
   const runner = readFileSync(join(root, 'scripts/run-livetest.mjs'), 'utf8');
   assert.doesNotMatch(runner, /thinking=disabled|designThinking|thinking: 'disabled'/);
   assert.match(runner, /thinkingBlocks arrives from designMetrics/);
+});
+
+test('every configuration field says how it was seen to do something', () => {
+  // The rule this enforces is in AGENTS.md: name a setting's criterion before
+  // adding it. The failure it prevents happens at review time -- somebody adds a
+  // field nobody checked -- so it is caught here rather than at startup, where
+  // there would be nothing to fire on.
+  const used = [...new Set(roleNames.flatMap((role) => Object.keys(executionConfig.roles[role])))].sort();
+  const documented = Object.keys(fieldCriteria).sort();
+  assert.deepEqual(used.filter((field) => !documented.includes(field)), [], 'a field with no criterion is a field nobody checked');
+  assert.deepEqual(documented.filter((field) => !used.includes(field)), [], 'a criterion for a field no role declares is stale');
+
+  for (const [field, criterion] of Object.entries(fieldCriteria)) {
+    assert.ok(['orchestrator', 'harness', 'request', 'endpoint'].includes(criterion.layer), `${field} layer`);
+    assert.ok(criterion.evidence && criterion.evidence.length > 20, `${field} evidence must say what was observed`);
+
+    // The one status that may be written down and may never be shipped. A field
+    // measured to change nothing gets deleted; annotating it instead is how
+    // disableAdaptiveThinking survived four roles, a schema, a launcher guard
+    // and two documents while doing nothing at all.
+    assert.notEqual(criterion.status, 'ineffective', `${field} was measured to do nothing, so remove the field rather than record it`);
+    assert.ok(['effective', 'unverifiable'].includes(criterion.status), `${field} status`);
+  }
+
+  // Recorded as unverifiable rather than effective, because no measurement
+  // separated the four levels. Reporting it as working would be the same
+  // mistake pointed the other way.
+  assert.equal(fieldCriteria.effort.status, 'unverifiable');
+});
+
+test('the window rule refuses only what it measured, and reports the rest', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'expo-fast-window-'));
+  const llmEnvPath = join(dir, 'llm.env');
+  const cachePath = join(dir, 'models-cache.json');
+  const paths = { llmEnvPath, cachePath };
+  writeFileSync(llmEnvPath, 'export ANTHROPIC_BASE_URL="https://relay.example"\n');
+  const main = executionConfig.roles.main;
+  const design = executionConfig.roles.design;
+  const write = (models) => writeFileSync(cachePath, JSON.stringify({
+    schemaVersion: 2, probeSuiteVersion: 1, claudeCodeVersion: '2.1.241',
+    llmEnvMtimeMs: Math.trunc(statSync(llmEnvPath).mtimeMs), llmEnvSize: statSync(llmEnvPath).size,
+    fetchedAt: '2026-08-24T00:00:00.000Z', models,
+  }));
+  const window = (value, confidence) => ({ value, confidence, evidence: `endpoint said ${value}` });
+  const both = (fact) => ({ [main.model]: { contextWindowTokens: fact }, [design.model]: { contextWindowTokens: fact } });
+
+  // Configured exactly at the measured limit is the intended state, and says
+  // nothing. contextWindowTokens exists so compaction happens before the
+  // endpoint refuses; at the limit it still does.
+  write({ [main.model]: { contextWindowTokens: window(main.contextWindowTokens, 'exact') },
+          [design.model]: { contextWindowTokens: window(design.contextWindowTokens, 'exact') } });
+  assert.deepEqual(verifyConfiguredModels({}, paths).notes, []);
+
+  // Above a limit the endpoint stated outright, the run would compact too late
+  // and be refused part-way through. That is worth refusing to start for.
+  write(both(window(1000, 'exact')));
+  assert.throws(() => verifyConfiguredModels({}, paths), /asks for more context than this endpoint gives/);
+
+  // Above a limit we inferred, it is a warning. k3's window is read from
+  // "supports only 256K context" assuming K means 1024; if that is wrong the
+  // error makes the check useless rather than stopping a run that would work.
+  write(both(window(1000, 'derived')));
+  const derived = verifyConfiguredModels({}, paths);
+  assert.equal(derived.verified, true);
+  assert.match(derived.notes.join('\n'), /derived rather than stated, so this is a warning/);
+
+  // The back door goes through the same door. Ten command-line flags can replace
+  // a role's model on any run, and they bypass every check in
+  // config/execution.json except whether the name exists. They do not bypass
+  // this one, because the roles are resolved with the overrides applied -- and
+  // the direction that matters is caught: a role keeps its declared window when
+  // its model is swapped, so pointing a wide-window role at a narrow model asks
+  // for context the endpoint will refuse.
+  write({ [main.model]: { contextWindowTokens: window(main.contextWindowTokens, 'exact') },
+          [design.model]: { contextWindowTokens: window(design.contextWindowTokens, 'exact') } });
+  assert.deepEqual(verifyConfiguredModels({}, paths).notes, [], 'unchanged configuration still passes');
+  assert.throws(
+    () => verifyConfiguredModels({ designModel: main.model }, paths),
+    /asks for more context than this endpoint gives: design compacts at/,
+    'a --design-model swap keeps the wide window and is caught',
+  );
+
+  // The same swap against a derived limit warns instead of refusing, which is
+  // the shape the real fact table has today: k3's window is read from "supports
+  // only 256K context" rather than stated outright.
+  write({ [main.model]: { contextWindowTokens: window(main.contextWindowTokens, 'derived') },
+          [design.model]: { contextWindowTokens: window(design.contextWindowTokens, 'exact') } });
+  const swapped = verifyConfiguredModels({ designModel: main.model }, paths);
+  assert.equal(swapped.verified, true);
+  assert.match(swapped.notes.join('\n'), /design compacts at .* derived rather than stated/);
+
+  // Nothing measured means the value is simply unchecked, and saying so is the
+  // point: the alternative is a run that looks protected and is not.
+  write({ [main.model]: {}, [design.model]: {} });
+  assert.match(verifyConfiguredModels({}, paths).notes.join('\n'), /nothing has measured .* window/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('the design deadline is reported, never judged', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'expo-fast-deadline-'));
+  const llmEnvPath = join(dir, 'llm.env');
+  const cachePath = join(dir, 'models-cache.json');
+  const paths = { llmEnvPath, cachePath };
+  writeFileSync(llmEnvPath, 'export ANTHROPIC_BASE_URL="https://relay.example"\n');
+  const main = executionConfig.roles.main;
+  const design = executionConfig.roles.design;
+  const deadlineMs = design.timeoutSeconds * 1000;
+  const write = (samples) => writeFileSync(cachePath, JSON.stringify({
+    schemaVersion: 2, probeSuiteVersion: 1, claudeCodeVersion: '2.1.241',
+    llmEnvMtimeMs: Math.trunc(statSync(llmEnvPath).mtimeMs), llmEnvSize: statSync(llmEnvPath).size,
+    fetchedAt: '2026-08-24T00:00:00.000Z',
+    models: {
+      [main.model]: { contextWindowTokens: { value: main.contextWindowTokens, confidence: 'exact', evidence: 'x' } },
+      [design.model]: {
+        contextWindowTokens: { value: design.contextWindowTokens, confidence: 'exact', evidence: 'x' },
+        referenceTurn: { reference: 'ledger', samples },
+      },
+    },
+  }));
+
+  // The deadline is a budget, not an estimate: the turn is expected to exceed it
+  // sometimes and failure is a non-blocking fallback. So no value of it is
+  // "wrong" and nothing throws -- what gets said is how often it was enough.
+  write([
+    { ms: deadlineMs - 5000, bytes: 9000, complete: true },
+    { ms: deadlineMs + 40000, bytes: 16000, complete: true },
+    { ms: deadlineMs - 1000, bytes: 0, complete: false },
+  ]);
+  const reported = verifyConfiguredModels({}, paths);
+  assert.equal(reported.verified, true);
+  assert.match(reported.notes.join('\n'), new RegExp(`design: at ${design.timeoutSeconds}s, 1 of 3 reference runs finished`));
+
+  // Computed from the samples rather than frozen when they were measured, so
+  // the answer follows the configured deadline.
+  write([{ ms: deadlineMs - 1, bytes: 9000, complete: true }, { ms: deadlineMs + 1, bytes: 9000, complete: true }]);
+  assert.match(verifyConfiguredModels({}, paths).notes.join('\n'), /1 of 2 reference runs/);
+
+  // Silent when every sample made it. A line that only ever says everything is
+  // fine is how people stop reading lines.
+  write([{ ms: 1000, bytes: 9000, complete: true }, { ms: 2000, bytes: 9000, complete: true }]);
+  assert.deepEqual(verifyConfiguredModels({}, paths).notes, []);
+  rmSync(dir, { recursive: true, force: true });
 });

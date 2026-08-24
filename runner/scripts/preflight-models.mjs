@@ -71,10 +71,10 @@ export function readModelCache(paths = {}, now = Date.now()) {
 function roleModels(options = {}) {
   const { main, repair } = resolveExecutionRoles(options);
   return [
-    ['main', main.model],
-    ['repair', repair.model],
-    ['design', resolveRole('design', { model: options.designModel, effort: options.designEffort, inheritModel: main.model }).model],
-    ['appIcon', resolveRole('appIcon', { inheritModel: main.model }).model],
+    ['main', main],
+    ['repair', repair],
+    ['design', resolveRole('design', { model: options.designModel, effort: options.designEffort, inheritModel: main.model })],
+    ['appIcon', resolveRole('appIcon', { inheritModel: main.model })],
   ];
 }
 
@@ -100,9 +100,9 @@ export function verifyConfiguredModels(options = {}, paths = {}) {
   const roles = roleModels(options);
   const servedNames = Object.keys(result.cache.models);
   const served = new Set(servedNames);
-  const missing = roles.filter(([, model]) => !served.has(model));
+  const missing = roles.filter(([, role]) => !served.has(role.model));
   if (missing.length) {
-    const names = missing.map(([role, model]) => `${role}=${model}`).join(', ');
+    const names = missing.map(([name, role]) => `${name}=${role.model}`).join(', ');
     throw new Error(
       `config/execution.json names models this endpoint does not serve: ${names}\n`
       + `  It serves: ${servedNames.join(', ')}\n`
@@ -110,17 +110,77 @@ export function verifyConfiguredModels(options = {}, paths = {}) {
       + '    ./start-livetest.sh --refresh-models',
     );
   }
+  const notes = [
+    ...windowNotes(roles, result.cache),
+    ...designDeadlineNote(roles, result.cache),
+  ];
+
   // The provenance travels with the answer rather than being logged every run:
   // it belongs in --dry-run output and run evidence, where someone reading a
   // result can see how old the facts behind it are, not in a line printed on a
   // path whose whole point is to stay silent when nothing is wrong.
   return {
     verified: true,
+    notes,
     models: servedNames,
     fetchedAt: result.cache.fetchedAt,
     measuredDaysAgo: result.measuredDaysAgo,
     claudeCodeVersion: result.cache.claudeCodeVersion ?? null,
   };
+}
+
+// The one configured value whose intent is unambiguous enough for a machine to
+// check: contextWindowTokens exists so that Claude Code compacts before the
+// endpoint refuses the request. Set above the real window, compaction comes too
+// late and a turn is refused mid-run -- and until the run-path warning existed,
+// silently.
+//
+// A derived limit only warns. k3's 262144 is read from "supports only 256K
+// context" on the assumption that K is 1024, and if that assumption is wrong the
+// error runs toward making this check useless rather than toward stopping a run
+// that would have worked. Refusing to start on an inference we have not
+// confirmed would be the more expensive mistake.
+function windowNotes(roles, cache) {
+  const notes = [];
+  for (const [name, role] of roles) {
+    const fact = cache.models[role.model]?.contextWindowTokens;
+    if (!Number.isFinite(fact?.value)) {
+      notes.push(`${name}: nothing has measured ${role.model}'s window, so contextWindowTokens ${role.contextWindowTokens} is unchecked · ./start-livetest.sh --refresh-models`);
+      continue;
+    }
+    if (role.contextWindowTokens <= fact.value) continue;
+    const said = `${name} compacts at ${role.contextWindowTokens}, but ${role.model} refuses past ${fact.value}`;
+    if (fact.confidence !== 'exact') {
+      notes.push(`${said} — that limit is derived rather than stated, so this is a warning: ${fact.evidence}`);
+      continue;
+    }
+    throw new Error(
+      `config/execution.json asks for more context than this endpoint gives: ${said}.\n`
+      + `  The endpoint said: ${fact.evidence}\n`
+      + '  Compaction would come too late and a turn would be refused part-way through the run.\n'
+      + '  Lower contextWindowTokens, or refresh the facts if the endpoint changed:\n'
+      + '    ./start-livetest.sh --refresh-models',
+    );
+  }
+  return notes;
+}
+
+// A report, not a verdict. The design deadline is a budget rather than an
+// estimate -- the turn is expected to exceed it sometimes and failure is a
+// non-blocking fallback -- so no value of it can be "wrong" and nothing here
+// judges one. What is worth saying out loud is how often that budget has been
+// enough, computed from the stored samples so it follows the configured
+// deadline rather than being frozen at measuring time.
+//
+// Silent when every sample made it. A line printed on every run that only ever
+// says everything is fine is how people stop reading lines.
+function designDeadlineNote(roles, cache) {
+  const design = roles.find(([name]) => name === 'design')?.[1];
+  const samples = cache.models[design?.model]?.referenceTurn?.samples;
+  if (!design || !Array.isArray(samples) || !samples.length) return [];
+  const within = samples.filter((sample) => sample.complete && sample.ms <= design.timeoutSeconds * 1000);
+  if (within.length === samples.length) return [];
+  return [`design: at ${design.timeoutSeconds}s, ${within.length} of ${samples.length} reference runs finished a document (${cache.models[design.model].referenceTurn.reference})`];
 }
 
 // Fetch through the launcher so the credentials stay inside it. Out of band
@@ -160,7 +220,7 @@ export function refreshModelCache(claudeBin, paths = {}, options = {}) {
   const notice = options.notice || (() => {});
   const wanted = options.probe === false
     ? []
-    : [...new Set(roleModels().map(([, model]) => model))].filter((model) => models.includes(model));
+    : [...new Set(roleModels().map(([, role]) => role.model))].filter((model) => models.includes(model));
   const measured = Object.fromEntries(models.map((model) => [model, { ...(carried[model] || {}) }]));
   for (const model of wanted) {
     notice(`probing ${model}`);

@@ -19,6 +19,62 @@ const roleFields = {
 
 export const roleNames = Object.freeze(Object.keys(roleFields));
 
+// Why every field is believed to do something, and how that was seen.
+//
+// A value written here has to name an observable difference: what is different
+// in the output when the field is set one way rather than another. That is the
+// bar AGENTS.md sets before a setting may be added, and this table is where the
+// bar is met -- the failure it prevents happens at review time, when someone
+// adds a field nobody checked, not at startup.
+//
+// `layer` says how far the value travels: the orchestrator's own code, Claude
+// Code's behaviour inside its process, the request body, or the endpoint's
+// reading of it. A field can reach a layer and still change nothing beyond it,
+// which is exactly what `effort` does.
+//
+// `status` has a third value, `ineffective`, that must never appear here. A
+// field measured to change nothing is deleted, not documented -- keeping one and
+// annotating it is how disableAdaptiveThinking survived four roles, a schema, a
+// launcher guard and two documents while doing nothing at all. The value exists
+// so a finding can be written down; a test stops it from being shipped.
+export const fieldCriteria = Object.freeze({
+  model: {
+    layer: 'request',
+    status: 'effective',
+    evidence: 'the request body carries it and the reply names the same model; an unserved name comes back 503 model_not_found',
+  },
+  effort: {
+    layer: 'request',
+    status: 'unverifiable',
+    evidence: 'lands as output_config.effort and all four levels are accepted, but thinking volume did not order across three counterbalanced variants (0/3)',
+  },
+  contextWindowTokens: {
+    layer: 'harness',
+    status: 'effective',
+    evidence: 'left unset, Claude Code warns that auto-compact will hold the session to the 200k it assumes; set, it does not',
+  },
+  limit: {
+    layer: 'orchestrator',
+    status: 'effective',
+    evidence: 'the repair loop counts against it and stops the run when reached',
+  },
+  timeoutSeconds: {
+    layer: 'orchestrator',
+    status: 'effective',
+    evidence: 'the turn is sent SIGINT on the deadline; four live runs recorded ms: 45027 against a 45s value',
+  },
+  briefTimeoutSeconds: {
+    layer: 'orchestrator',
+    status: 'effective',
+    evidence: 'bounds how long the app icon turn waits for .expo-fast/brief.json before giving up',
+  },
+  enabled: {
+    layer: 'orchestrator',
+    status: 'effective',
+    evidence: 'false skips the app icon turn entirely, so no request is made',
+  },
+});
+
 // Reject a configuration that is incomplete, over-complete, or from the old
 // schema. Exported so the contract can be exercised without a file on disk.
 export function validateExecutionConfig(config) {

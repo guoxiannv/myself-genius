@@ -420,6 +420,10 @@ async function main() {
   // Cache-only, so this never reaches the network on a run path.
   const preflight = verifyConfiguredModels(raw);
   if (!preflight.verified && !raw.dryRun) console.log(`preflight: ${preflight.notice}`);
+  // Only what is worth interrupting for: a window nothing has measured, a
+  // derived limit the configuration exceeds, or a design deadline the measured
+  // runs did not always meet. Silence when the facts and the configuration agree.
+  if (!raw.dryRun) for (const note of preflight.notes || []) console.log(`preflight: ${note}`);
 
   if (raw.dryRun) {
     console.log(JSON.stringify({ ...plan, promptBytes: Buffer.byteLength(prompt.text), preflight }, null, 2));

@@ -80,36 +80,42 @@ export async function captureRequest({ flags = [], env = {}, cwd, timeoutMs = 60
   const args = ['-p', '--permission-mode', 'dontAsk', '--model', 'probe-model', '--effort', 'low',
     ...flags, '--output-format', 'stream-json', '--verbose', 'Reply OK'];
   let output = '';
-  const exitCode = await new Promise((settle) => {
-    const child = spawn(claudeBinary(), args, {
-      cwd,
-      env: {
-        ...process.env,
-        ANTHROPIC_BASE_URL: endpoint.origin,
-        ANTHROPIC_AUTH_TOKEN: 'probe',
-        CLAUDE_CONFIG_DIR: configDir,
-        ...env,
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
+  // try/finally, because the endpoint holds a port and the config directory is
+  // real: a throw between here and the end would leak both, and a probe that
+  // litters when it fails is one people stop running.
+  try {
+    const exitCode = await new Promise((settle) => {
+      const child = spawn(claudeBinary(), args, {
+        cwd,
+        env: {
+          ...process.env,
+          ANTHROPIC_BASE_URL: endpoint.origin,
+          ANTHROPIC_AUTH_TOKEN: 'probe',
+          CLAUDE_CONFIG_DIR: configDir,
+          ...env,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+      child.stdout.on('data', (chunk) => { output += chunk; });
+      child.stderr.on('data', (chunk) => { output += chunk; });
+      child.on('error', () => { clearTimeout(timer); settle(-1); });
+      child.on('exit', (code) => { clearTimeout(timer); settle(code); });
     });
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
-    child.stdout.on('data', (chunk) => { output += chunk; });
-    child.stderr.on('data', (chunk) => { output += chunk; });
-    child.on('error', () => { clearTimeout(timer); settle(-1); });
-    child.on('exit', (code) => { clearTimeout(timer); settle(code); });
-  });
-  await endpoint.close();
-  rmSync(configDir, { recursive: true, force: true });
-  const events = output.split(/\r?\n/).filter(Boolean).flatMap((line) => {
-    try { return [JSON.parse(line)]; } catch { return []; }
-  });
-  return {
-    exitCode,
-    output,
-    request: endpoint.requests[0] ?? null,
-    requestCount: endpoint.requests.length,
-    init: events.find((event) => event.subtype === 'init') ?? null,
-  };
+    const events = output.split(/\r?\n/).filter(Boolean).flatMap((line) => {
+      try { return [JSON.parse(line)]; } catch { return []; }
+    });
+    return {
+      exitCode,
+      output,
+      request: endpoint.requests[0] ?? null,
+      requestCount: endpoint.requests.length,
+      init: events.find((event) => event.subtype === 'init') ?? null,
+    };
+  } finally {
+    await endpoint.close();
+    rmSync(configDir, { recursive: true, force: true });
+  }
 }
 
 // A workspace with something for each knob to act on: a CLAUDE.md an ancestor

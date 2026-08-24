@@ -65,6 +65,23 @@ const root = resolve(new URL('..', import.meta.url).pathname);
 const script = join(root, 'scripts/fast-harmony.mjs');
 const dependencyController = join(root, 'scripts/dependencies.mjs');
 
+// Every temporary directory this file creates, removed when the run ends
+// whichever way it ended. Individual tests used to remove their own on the last
+// line, which works right up until an assertion fails earlier -- and a failing
+// run is exactly when nobody is looking at what got left behind. Roughly 85
+// directories survived each run that way, and about 1400 had accumulated.
+const temporaryDirectories = [];
+function temporaryDirectory(prefix) {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  temporaryDirectories.push(dir);
+  return dir;
+}
+process.on('exit', () => {
+  for (const dir of temporaryDirectories) {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* exiting; nothing further to try */ }
+  }
+});
+
 test('Claude trace rows receive timestamps without breaking chunked JSONL', () => {
   const state = { pending: '' };
   let tick = 0;
@@ -142,7 +159,7 @@ test('app icon SVG contract requires opaque background and safe local vector con
 });
 
 test('generated icon assets declare app, splash, and SDK-owned Harmony icons after all PNGs validate', () => {
-  const project = mkdtempSync(join(tmpdir(), 'expo-fast-app-icon-install-'));
+  const project = temporaryDirectory('expo-fast-app-icon-install-');
   writeFileSync(join(project, 'app.json'), `${JSON.stringify({
     expo: {
       name: 'Timer',
@@ -176,7 +193,7 @@ test('generated icon assets declare app, splash, and SDK-owned Harmony icons aft
 });
 
 test('generated app icons preserve an explicitly configured splash image', () => {
-  const project = mkdtempSync(join(tmpdir(), 'expo-fast-app-icon-custom-splash-'));
+  const project = temporaryDirectory('expo-fast-app-icon-custom-splash-');
   writeFileSync(join(project, 'app.json'), `${JSON.stringify({
     expo: {
       name: 'Timer',
@@ -200,7 +217,7 @@ test('generated app icons preserve an explicitly configured splash image', () =>
 });
 
 test('independent icon task waits for brief and records ready or fallback evidence', async () => {
-  const project = mkdtempSync(join(tmpdir(), 'expo-fast-app-icon-task-'));
+  const project = temporaryDirectory('expo-fast-app-icon-task-');
   mkdirSync(join(project, '.expo-fast'), { recursive: true });
   let receivedContext = '';
   const readyPromise = generateAppIconAfterBrief({
@@ -235,7 +252,7 @@ test('independent icon task waits for brief and records ready or fallback eviden
   assert.match(receivedContext, /番茄钟/);
   assert.doesNotMatch(receivedContext, /must-not-leak/);
 
-  const failedProject = mkdtempSync(join(tmpdir(), 'expo-fast-app-icon-fallback-'));
+  const failedProject = temporaryDirectory('expo-fast-app-icon-fallback-');
   mkdirSync(join(failedProject, '.expo-fast'), { recursive: true });
   writeFileSync(join(failedProject, '.expo-fast/brief.json'), '{"spec":"计时器"}\n');
   const fallback = await generateAppIconAfterBrief({
@@ -303,7 +320,7 @@ test('dependency runtime preflight verifies Node and npm together', () => {
 });
 
 test('one-click launcher resolves isolated projects, prompt input, models, and tmux defaults', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-launcher-'));
+  const workspace = temporaryDirectory('expo-fast-launcher-');
   const project = join(workspace, 'custom-app');
   const launcher = join(root, 'scripts/start-livetest.mjs');
   const result = spawnSync(process.execPath, [launcher,
@@ -352,7 +369,7 @@ test('one-click launcher resolves isolated projects, prompt input, models, and t
 test('tmux launcher persists output and exits its session after the runner completes', {
   skip: spawnSync('tmux', ['-V']).status !== 0 || !existsSync('/bin/zsh'),
 }, async () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-session-log-'));
+  const workspace = temporaryDirectory('expo-fast-session-log-');
   const project = join(workspace, 'logged-app');
   const fakeNode = join(workspace, 'fake-node');
   const fakeSdk = join(workspace, 'sdk');
@@ -406,7 +423,7 @@ exit 0
 test('tmux launcher forwards EXPO_FAST_BUNDLE_IDENTIFIER into the runner session', {
   skip: spawnSync('tmux', ['-V']).status !== 0 || !existsSync('/bin/zsh'),
 }, async () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-bundle-env-'));
+  const workspace = temporaryDirectory('expo-fast-bundle-env-');
   const fakeNode = join(workspace, 'fake-node');
   const fakeSdk = join(workspace, 'sdk');
   const fakeDevEco = join(workspace, 'DevEco-Studio.app');
@@ -477,7 +494,7 @@ test('one-click launcher defaults to the tested learning-goals scenario and sing
 });
 
 test('enabled direct-HAP preview always builds the required HAP', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-required-hap-'));
+  const workspace = temporaryDirectory('expo-fast-required-hap-');
   const launcher = join(root, 'scripts/start-livetest.mjs');
   const result = spawnSync(process.execPath, [launcher,
     '--dry-run',
@@ -498,7 +515,7 @@ test('enabled direct-HAP preview always builds the required HAP', () => {
 });
 
 test('one-click launcher accepts a user-selected output directory under expo-app root', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-output-dir-'));
+  const workspace = temporaryDirectory('expo-fast-output-dir-');
   const launcher = join(root, 'scripts/start-livetest.mjs');
   const result = spawnSync(process.execPath, [launcher,
     '--dry-run',
@@ -516,7 +533,7 @@ test('one-click launcher accepts a user-selected output directory under expo-app
 });
 
 test('launcher separates follow-up, rebuild, and preview lifecycle actions', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-actions-'));
+  const workspace = temporaryDirectory('expo-fast-actions-');
   const project = join(workspace, 'existing-app');
   const followUp = join(workspace, 'follow-up.md');
   mkdirSync(project, { recursive: true });
@@ -541,7 +558,7 @@ test('launcher separates follow-up, rebuild, and preview lifecycle actions', () 
 });
 
 test('controlled Agent MCP exposes check and build without a shell tool', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-agent-tools-'));
+  const workspace = temporaryDirectory('expo-fast-agent-tools-');
   const server = join(root, 'scripts/agent-tools-server.mjs');
   const input = [
     { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } },
@@ -556,7 +573,7 @@ test('controlled Agent MCP exposes check and build without a shell tool', () => 
 });
 
 test('Expo follow-up status is read-only until the initial Agent session exists', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-follow-up-status-'));
+  const workspace = temporaryDirectory('expo-fast-follow-up-status-');
   const controller = join(root, 'scripts/follow-up-control.mjs');
   const result = spawnSync(process.execPath, [controller, 'status', '--cwd', workspace, '--run', 'test-run'], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -568,7 +585,7 @@ test('Expo follow-up status is read-only until the initial Agent session exists'
 });
 
 test('Expo follow-up controller persists FIFO queue updates without argv message text', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-follow-up-'));
+  const workspace = temporaryDirectory('expo-fast-follow-up-');
   const stateDir = join(workspace, '.expo-fast');
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(join(stateDir, 'result.json'), JSON.stringify({ sessionId: 'session-1' }));
@@ -611,7 +628,7 @@ test('Expo follow-up controller persists FIFO queue updates without argv message
 });
 
 test('one machine-local env file configures every portable launcher path', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-machine-config-'));
+  const workspace = temporaryDirectory('expo-fast-machine-config-');
   const appRoot = join(workspace, 'apps');
   const envFile = join(workspace, 'machine.env');
   writeFileSync(envFile, [
@@ -648,7 +665,7 @@ test('one machine-local env file configures every portable launcher path', () =>
 });
 
 test('monorepo defaults and relative env paths resolve from the runner root', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-relative-config-'));
+  const workspace = temporaryDirectory('expo-fast-relative-config-');
   const launcher = join(root, 'scripts/start-livetest.mjs');
   const missingEnv = join(workspace, 'missing.env');
   const cleanEnv = { ...process.env, EXPO_FAST_ENV_FILE: missingEnv };
@@ -706,7 +723,7 @@ test('portable launchers contain no user-specific path and keep machine config o
 });
 
 test('device type discovery separates PC and phone targets without fixed ports', () => {
-  const fakeHdc = join(mkdtempSync(join(tmpdir(), 'fake-hdc-')), 'hdc');
+  const fakeHdc = join(temporaryDirectory('fake-hdc-'), 'hdc');
   writeFileSync(fakeHdc, `#!/bin/sh
 if [ "$2" = "127.0.0.1:5555" ]; then
   echo phone
@@ -787,7 +804,7 @@ test('Harmony Go reverse mapping retries an orphaned device listener on the next
 });
 
 test('preview pool leases desktop and phone independently without cross-kind blocking', async () => {
-  const poolRoot = mkdtempSync(join(tmpdir(), 'expo-preview-pool-independent-'));
+  const poolRoot = temporaryDirectory('expo-preview-pool-independent-');
   const desktop = await acquirePreviewDevice({
     runId: 'desktop-run',
     kind: 'desktop',
@@ -822,7 +839,7 @@ test('preview pool leases desktop and phone independently without cross-kind blo
 });
 
 test('preview pool refreshes dynamically discovered targets while a request is queued', async () => {
-  const poolRoot = mkdtempSync(join(tmpdir(), 'expo-preview-pool-dynamic-'));
+  const poolRoot = temporaryDirectory('expo-preview-pool-dynamic-');
   let targets = [];
   const leasePromise = acquirePreviewDevice({
     runId: 'dynamic-desktop-run',
@@ -840,7 +857,7 @@ test('preview pool refreshes dynamically discovered targets while a request is q
 });
 
 test('runner preview validation has priority over queued live viewers', async () => {
-  const poolRoot = mkdtempSync(join(tmpdir(), 'expo-preview-pool-priority-'));
+  const poolRoot = temporaryDirectory('expo-preview-pool-priority-');
   for (const name of ['queue', 'leases', 'quarantine']) mkdirSync(join(poolRoot, name), { recursive: true });
   writeFileSync(join(poolRoot, 'queue/live-viewer.json'), JSON.stringify({
     schema_version: 1,
@@ -865,7 +882,7 @@ test('runner preview validation has priority over queued live viewers', async ()
 });
 
 test('preview pool leases one free desktop and phone then queues the next run', async () => {
-  const poolRoot = mkdtempSync(join(tmpdir(), 'expo-preview-pool-'));
+  const poolRoot = temporaryDirectory('expo-preview-pool-');
   const pools = {
     desktop: ['127.0.0.1:5557', '127.0.0.1:5561'],
     phone: ['127.0.0.1:5555', '127.0.0.1:5559'],
@@ -896,7 +913,7 @@ test('preview pool leases one free desktop and phone then queues the next run', 
 });
 
 test('preview pool supports desktop-only validation when no phone emulator is configured', async () => {
-  const poolRoot = mkdtempSync(join(tmpdir(), 'expo-preview-pool-desktop-only-'));
+  const poolRoot = temporaryDirectory('expo-preview-pool-desktop-only-');
   const pools = {
     desktop: ['127.0.0.1:5555'],
     phone: [],
@@ -921,7 +938,7 @@ test('preview pool supports desktop-only validation when no phone emulator is co
 });
 
 test('preview pool quarantines a failed target and leases its same-kind fallback', async () => {
-  const poolRoot = mkdtempSync(join(tmpdir(), 'expo-preview-pool-failover-'));
+  const poolRoot = temporaryDirectory('expo-preview-pool-failover-');
   const pools = {
     desktop: ['127.0.0.1:5557', '127.0.0.1:5561'],
     phone: ['127.0.0.1:5555', '127.0.0.1:5559'],
@@ -1295,7 +1312,7 @@ test('desktop HAP preview stops after every discovered emulator fails', async ()
 });
 
 test('direct-HAP preview rejects the legacy Harmony Go smoke agent before generation', () => {
-  const project = mkdtempSync(join(tmpdir(), 'expo-fast-direct-hap-smoke-'));
+  const project = temporaryDirectory('expo-fast-direct-hap-smoke-');
   const request = join(project, 'request.md');
   writeFileSync(request, 'Build a small offline task app.');
   const result = spawnSync(process.execPath, [join(root, 'scripts/run-livetest.mjs'),
@@ -1309,7 +1326,7 @@ test('direct-HAP preview rejects the legacy Harmony Go smoke agent before genera
 });
 
 test('external controller atomically records live generation, repair, and completion state', () => {
-  const project = mkdtempSync(join(tmpdir(), 'expo-fast-state-'));
+  const project = temporaryDirectory('expo-fast-state-');
   const runId = 'run-state-test';
   writeRunState(project, 'generating_code', { runId, reset: true, detail: 'model_generation', context: { model: 'k3-256k' } });
   writeRunState(project, 'generating_code', { runId, detail: 'app_icon_generation', context: { appIcon: { model: 'k3-256k' } } });
@@ -1338,7 +1355,7 @@ test('external controller atomically records live generation, repair, and comple
 });
 
 test('external controller records a terminal failed state without invoking the product agent', () => {
-  const project = mkdtempSync(join(tmpdir(), 'expo-fast-state-failure-'));
+  const project = temporaryDirectory('expo-fast-state-failure-');
   const request = join(project, 'request.md');
   writeFileSync(request, 'Build a small offline task app.');
   const runner = join(root, 'scripts/run-livetest.mjs');
@@ -1358,7 +1375,7 @@ test('external controller records a terminal failed state without invoking the p
 });
 
 test('runner publishes a validated SDK pool HAP into the run-owned output', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-hap-'));
+  const workspace = temporaryDirectory('expo-fast-hap-');
   const project = join(workspace, 'product');
   const sdk = join(workspace, 'sdk');
   const pool = join(workspace, 'pool');
@@ -1410,7 +1427,7 @@ test('runner publishes a validated SDK pool HAP into the run-owned output', () =
 });
 
 test('forced HAP rebuild invalidates an existing ready result and invokes the SDK pool', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-hap-rebuild-'));
+  const workspace = temporaryDirectory('expo-fast-hap-rebuild-');
   const project = join(workspace, 'product');
   const sdk = join(workspace, 'sdk');
   const pool = join(workspace, 'pool');
@@ -1484,7 +1501,7 @@ test('forced HAP rebuild invalidates an existing ready result and invokes the SD
 });
 
 test('preview refresh HAP build stays isolated from the canonical run artifact', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-preview-hap-'));
+  const workspace = temporaryDirectory('expo-fast-preview-hap-');
   const project = join(workspace, 'product');
   const sdk = join(workspace, 'sdk');
   const pool = join(workspace, 'pool');
@@ -1528,7 +1545,7 @@ test('preview refresh HAP build stays isolated from the canonical run artifact',
 });
 
 test('runner records a bounded HAP failure when the SDK pool command cannot publish diagnostics', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-hap-failure-'));
+  const workspace = temporaryDirectory('expo-fast-hap-failure-');
   const project = join(workspace, 'product');
   const sdk = join(workspace, 'sdk');
   mkdirSync(project);
@@ -1552,7 +1569,7 @@ test('runner records a bounded HAP failure when the SDK pool command cannot publ
 });
 
 test('runner rejects a successful pool result that lacks the universal HAP device contract', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-hap-device-contract-'));
+  const workspace = temporaryDirectory('expo-fast-hap-device-contract-');
   const project = join(workspace, 'product');
   const sdk = join(workspace, 'sdk');
   mkdirSync(project);
@@ -1587,7 +1604,7 @@ test('runner rejects a successful pool result that lacks the universal HAP devic
 });
 
 test('catalog captures emulator-validated support exports', () => {
-  const project = mkdtempSync(join(tmpdir(), 'expo-fast-catalog-'));
+  const project = temporaryDirectory('expo-fast-catalog-');
   const result = spawnSync(process.execPath, [script, 'catalog', project], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
   const catalog = JSON.parse(readFileSync(join(project, '.expo-fast/capability-catalog.json'), 'utf8'));
@@ -1614,7 +1631,7 @@ test('catalog captures emulator-validated support exports', () => {
 });
 
 test('product capability selection adds exact Expo dependencies and rejects drift', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-selection-'));
+  const workspace = temporaryDirectory('expo-fast-selection-');
   const project = join(workspace, 'selected-app');
   const request = join(workspace, 'request.md');
   writeFileSync(request, '导出 JSON 并从 JSON 文件导入。');
@@ -1650,7 +1667,7 @@ test('product capability selection adds exact Expo dependencies and rejects drif
 });
 
 test('prepare uses the signing profile bundle identifier when provided by Remote UI', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-signing-bundle-'));
+  const workspace = temporaryDirectory('expo-fast-signing-bundle-');
   const project = join(workspace, 'signed-app');
   const request = join(workspace, 'request.md');
   writeFileSync(request, '生成一个待签名的应用。');
@@ -1672,7 +1689,7 @@ test('prepare uses the signing profile bundle identifier when provided by Remote
 });
 
 test('runtime override dependencies are derived and exact native declarations remain recoverable', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-runtime-override-'));
+  const workspace = temporaryDirectory('expo-fast-runtime-override-');
   const project = join(workspace, 'runtime-app');
   const request = join(workspace, 'request.md');
   writeFileSync(request, '保存离线数据。');
@@ -1705,7 +1722,7 @@ test('runtime override dependencies are derived and exact native declarations re
 });
 
 test('selected Expo capabilities are synchronized from a compatible dependency cache', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-sync-'));
+  const workspace = temporaryDirectory('expo-fast-sync-');
   const project = join(workspace, 'sync-app');
   const request = join(workspace, 'request.md');
   const cache = join(workspace, 'node_modules-cache');
@@ -1754,7 +1771,7 @@ test('selected Expo capabilities are synchronized from a compatible dependency c
 });
 
 test('external dependency controller pins the Harmony runtime core without a product cache', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-runtime-pins-'));
+  const workspace = temporaryDirectory('expo-fast-runtime-pins-');
   const project = join(workspace, 'app');
   const sdk = join(workspace, 'sdk');
   mkdirSync(join(project, '.expo-fast'), { recursive: true });
@@ -1776,7 +1793,7 @@ test('external dependency controller pins the Harmony runtime core without a pro
 });
 
 test('a stale npm package document retries against the registry instead of failing the run', () => {
-  const project = mkdtempSync(join(tmpdir(), 'expo-fast-etarget-'));
+  const project = temporaryDirectory('expo-fast-etarget-');
   mkdirSync(join(project, '.expo-fast'), { recursive: true });
   const calls = [];
   const record = (result) => (command, args) => {
@@ -1813,7 +1830,7 @@ test('a stale npm package document retries against the registry instead of faili
 });
 
 test('external dependency controller runs the SDK Harmony overlay from project-installed CLI', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-sdk-cli-'));
+  const workspace = temporaryDirectory('expo-fast-sdk-cli-');
   const project = join(workspace, 'app');
   const sdk = join(workspace, 'sdk');
   mkdirSync(join(project, 'node_modules/@expo/cli'), { recursive: true });
@@ -1828,7 +1845,7 @@ test('external dependency controller runs the SDK Harmony overlay from project-i
 });
 
 test('external dependency controller CLI synchronizes an already installed exact capability', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-dependency-sync-'));
+  const workspace = temporaryDirectory('expo-fast-dependency-sync-');
   const project = join(workspace, 'app');
   const packageContract = { name: 'sync-app', version: '1.0.0', private: true, dependencies: { '@react-native-async-storage/async-storage': '1.24.0', 'react-native-svg': '15.15.4' } };
   mkdirSync(join(project, '.expo-fast'), { recursive: true });
@@ -1942,7 +1959,7 @@ test('initial 0-to-1 product prompt remains byte-stable while follow-up tools ev
     .replace(/\n\nasync function claudeTurn$/, '');
   assert.ok(source, 'buildPrompt source');
   const buildPrompt = Function('readFileSync', 'join', `${source}; return buildPrompt;`)(readFileSync, join);
-  const project = mkdtempSync(join(tmpdir(), 'expo-fast-prompt-contract-'));
+  const project = temporaryDirectory('expo-fast-prompt-contract-');
   mkdirSync(join(project, '.expo-fast'), { recursive: true });
   writeFileSync(join(project, '.expo-fast/request.md'), readFileSync(join(root, 'prompts/learning-goals.md')));
   const digest = createHash('sha256').update(buildPrompt(project)).digest('hex');
@@ -2190,7 +2207,7 @@ test('the product contract is injected, not inherited from a CLAUDE.md walk', ()
 });
 
 test('model preflight reads only a local cache and never the network', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'expo-fast-preflight-'));
+  const dir = temporaryDirectory('expo-fast-preflight-');
   const llmEnvPath = join(dir, 'llm.env');
   const cachePath = join(dir, 'models-cache.json');
   const paths = { llmEnvPath, cachePath };
@@ -2316,7 +2333,7 @@ test('repair artifacts give every retry separate evidence', () => {
 });
 
 test('trace analyzer includes every numbered repair trace in attempt order', () => {
-  const project = mkdtempSync(join(tmpdir(), 'expo-fast-multi-repair-trace-'));
+  const project = temporaryDirectory('expo-fast-multi-repair-trace-');
   const traceDir = join(project, '.expo-fast');
   mkdirSync(traceDir, { recursive: true });
   const resultRow = (duration) => `${JSON.stringify({ type: 'result', duration_ms: duration, num_turns: 1, modelUsage: {} })}\n`;
@@ -2377,19 +2394,19 @@ function writeEvidence(project, category = 'form-submit') {
 }
 
 test('smoke validator accepts core data mutation with exact app identity', () => {
-  const project = mkdtempSync(join(tmpdir(), 'expo-fast-smoke-'));
+  const project = temporaryDirectory('expo-fast-smoke-');
   writeEvidence(project);
   assert.equal(validateSmoke(project).category, 'form-submit');
 });
 
 test('smoke validator rejects navigation-only evidence', () => {
-  const project = mkdtempSync(join(tmpdir(), 'expo-fast-smoke-'));
+  const project = temporaryDirectory('expo-fast-smoke-');
   writeEvidence(project, 'navigation');
   assert.throws(() => validateSmoke(project), /non-navigation state change/);
 });
 
 test('exact-app identity rejects a listed app when another app is current', () => {
-  const project = mkdtempSync(join(tmpdir(), 'expo-fast-smoke-wrong-app-'));
+  const project = temporaryDirectory('expo-fast-smoke-wrong-app-');
   writeEvidence(project);
   const smoke = join(project, '.expo-fast/smoke');
   const wrong = { children: [{ attributes: { bundleName: 'com.example.myapplication1.ide', type: 'root' }, children: [
@@ -2416,7 +2433,7 @@ test('exact-app identity locates the Host identity on high-density layouts', asy
 });
 
 test('exact-app identity rejects a visible runtime error overlay', () => {
-  const project = mkdtempSync(join(tmpdir(), 'expo-fast-smoke-crash-'));
+  const project = temporaryDirectory('expo-fast-smoke-crash-');
   writeEvidence(project);
   const smoke = join(project, '.expo-fast/smoke');
   const before = JSON.parse(readFileSync(join(smoke, 'layout-before.json'), 'utf8'));
@@ -2426,7 +2443,7 @@ test('exact-app identity rejects a visible runtime error overlay', () => {
 });
 
 test('cold-start trace scope rejects sibling source reads and shell escape', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-trace-scope-'));
+  const workspace = temporaryDirectory('expo-fast-trace-scope-');
   const project = join(workspace, 'fresh-app');
   mkdirSync(join(project, '.expo-fast'), { recursive: true });
   const trace = join(project, '.expo-fast/agent-trace.jsonl');
@@ -2445,7 +2462,7 @@ test('cold-start trace scope rejects sibling source reads and shell escape', () 
 });
 
 test('cold-start trace scope accepts whitelisted native file tools and rejects escaped paths', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-trace-batch-'));
+  const workspace = temporaryDirectory('expo-fast-trace-batch-');
   const project = join(workspace, 'fresh-app');
   mkdirSync(join(project, '.expo-fast'), { recursive: true });
   const trace = join(project, '.expo-fast/agent-trace.jsonl');
@@ -2468,7 +2485,7 @@ test('cold-start trace scope accepts whitelisted native file tools and rejects e
 });
 
 test('cold-start trace scope records permission-blocked outside reads without treating them as leakage', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-trace-denied-'));
+  const workspace = temporaryDirectory('expo-fast-trace-denied-');
   const project = join(workspace, 'fresh-app');
   mkdirSync(join(project, '.expo-fast'), { recursive: true });
   const trace = join(project, '.expo-fast/agent-trace.jsonl');
@@ -2483,7 +2500,7 @@ test('cold-start trace scope records permission-blocked outside reads without tr
 });
 
 test('source audit enforces native persistence and inline SVG contracts', () => {
-  const project = mkdtempSync(join(tmpdir(), 'expo-fast-audit-'));
+  const project = temporaryDirectory('expo-fast-audit-');
   mkdirSync(join(project, '.expo-fast'), { recursive: true });
   mkdirSync(join(project, 'src'), { recursive: true });
   writeFileSync(join(project, '.expo-fast/request.md'), '四个 Tab：今日、看板、周报、我的。使用 inline SVG 图标和图表，所有输入即时保存到 localStorage。导出 JSON 和导入。今日建议量、预计完成日、休息日、补记、逾期目标、环比、保持、问题、尝试、下周预案、清空全部、添加到手机主屏幕。');
@@ -2507,7 +2524,7 @@ const copy = 'audit-app 今日 看板 周报 我的 今日建议 预计完成 �
 });
 
 test('source audit rejects mixed direct SVG shapes in the production icon module', () => {
-  const project = mkdtempSync(join(tmpdir(), 'expo-fast-icon-audit-'));
+  const project = temporaryDirectory('expo-fast-icon-audit-');
   mkdirSync(join(project, '.expo-fast'), { recursive: true });
   mkdirSync(join(project, 'src/components'), { recursive: true });
   writeFileSync(join(project, '.expo-fast/request.md'), '使用 inline SVG 图标。');
@@ -2525,7 +2542,7 @@ test('source audit rejects mixed direct SVG shapes in the production icon module
 });
 
 test('source audit rejects named exports absent from the selected catalog', () => {
-  const project = mkdtempSync(join(tmpdir(), 'expo-fast-export-audit-'));
+  const project = temporaryDirectory('expo-fast-export-audit-');
   mkdirSync(join(project, '.expo-fast'), { recursive: true });
   mkdirSync(join(project, 'src'), { recursive: true });
   writeFileSync(join(project, '.expo-fast/request.md'), 'Create a state-changing app.');
@@ -2538,7 +2555,7 @@ test('source audit rejects named exports absent from the selected catalog', () =
 });
 
 test('source audit rejects obsolete multi-device breakpoints and detached desktop navigation', () => {
-  const project = mkdtempSync(join(tmpdir(), 'expo-fast-responsive-audit-'));
+  const project = temporaryDirectory('expo-fast-responsive-audit-');
   mkdirSync(join(project, '.expo-fast'), { recursive: true });
   mkdirSync(join(project, 'src'), { recursive: true });
   writeFileSync(join(project, '.expo-fast/request.md'), '手机使用底部导航和单列，平板使用顶部横向导航，电脑使用左侧固定边栏与多栏布局。');
@@ -2560,7 +2577,7 @@ const styles = StyleSheet.create({ frame: { flex: 1 }, desktopFrame: { flexDirec
 });
 
 test('artifact evidence binds runtime, manifest, bundle hash, and source digest', () => {
-  const project = mkdtempSync(join(tmpdir(), 'expo-fast-artifacts-'));
+  const project = temporaryDirectory('expo-fast-artifacts-');
   const output = join(project, 'dist/harmony-go');
   const miniapp = join(output, 'miniapps/test-app');
   mkdirSync(join(project, '.expo-fast'), { recursive: true });
@@ -2596,7 +2613,7 @@ test('artifact evidence binds runtime, manifest, bundle hash, and source digest'
 });
 
 function poolSetupFixture(label) {
-  const workspace = mkdtempSync(join(tmpdir(), `expo-fast-pool-setup-${label}-`));
+  const workspace = temporaryDirectory(`expo-fast-pool-setup-${label}-`);
   const bin = join(workspace, 'bin');
   const sdk = join(workspace, 'sdk');
   mkdirSync(join(sdk, 'tools/harmony'), { recursive: true });
@@ -2733,7 +2750,7 @@ test('the orchestrator stamps the build into the product entry without moving th
 
   // index.js and build-identity.js are orchestrator-owned. Restamping must not move
   // productInputSha256, or every build would read as a source change.
-  const project = mkdtempSync(join(tmpdir(), 'expo-fast-stamp-'));
+  const project = temporaryDirectory('expo-fast-stamp-');
   mkdirSync(join(project, '.expo-fast'), { recursive: true });
   mkdirSync(join(project, 'src'), { recursive: true });
   writeFileSync(join(project, '.expo-fast/request.md'), '记一笔');
@@ -2751,7 +2768,7 @@ test('the orchestrator stamps the build into the product entry without moving th
 });
 
 test('the HAP build stamps the source before the pool runs and reports the stamp of the artifact on disk', () => {
-  const workspace = mkdtempSync(join(tmpdir(), 'expo-fast-hap-stamp-'));
+  const workspace = temporaryDirectory('expo-fast-hap-stamp-');
   const project = join(workspace, 'product');
   const sdk = join(workspace, 'sdk');
   const pool = join(workspace, 'pool');
@@ -2828,7 +2845,7 @@ test('model probes rest on an observable difference, never on a request being ac
   assert.equal(windowFromRejection('You have reached your concurrent request limit'), null);
   assert.equal(windowFromRejection('invalid api key'), null);
 
-  const dir = mkdtempSync(join(tmpdir(), 'expo-fast-probes-'));
+  const dir = temporaryDirectory('expo-fast-probes-');
   const fakeEndpoint = (script) => {
     const path = join(dir, `launcher-${createHash('sha256').update(script).digest('hex').slice(0, 8)}`);
     writeFileSync(path, `#!/bin/sh\n${script}\n`);
@@ -3017,7 +3034,7 @@ test('the effort probe counterbalances its levels so drift cannot fake an orderi
   // told apart from the endpoint drifting over the couple of minutes a variant
   // takes -- drift alone manufactures monotonicity -- so the level a variant
   // starts at rotates.
-  const dir = mkdtempSync(join(tmpdir(), 'expo-fast-effort-'));
+  const dir = temporaryDirectory('expo-fast-effort-');
   const asked = join(dir, 'asked.txt');
   const launcher = join(dir, 'launcher');
   writeFileSync(launcher, `#!/bin/sh
@@ -3055,7 +3072,7 @@ test('a cheap refresh keeps the facts that cost real turns to measure', () => {
   // expensive probes do not run then. Rebuilding each model record from scratch
   // therefore destroyed the reference-turn and effort rows every time somebody
   // built a pool -- measurements that cost minutes of real generation.
-  const dir = mkdtempSync(join(tmpdir(), 'expo-fast-carry-'));
+  const dir = temporaryDirectory('expo-fast-carry-');
   const llmEnvPath = join(dir, 'llm.env');
   const cachePath = join(dir, 'models-cache.json');
   const paths = { llmEnvPath, cachePath };
@@ -3157,7 +3174,7 @@ test('a window nobody measured is named, and one nobody wrote down cannot be wro
   // measured to accept and nothing else. An error made impossible needs no
   // detector, and a check that can never fire is decoration of the kind this
   // work exists to remove.
-  const dir = mkdtempSync(join(tmpdir(), 'expo-fast-window-'));
+  const dir = temporaryDirectory('expo-fast-window-');
   const llmEnvPath = join(dir, 'llm.env');
   const cachePath = join(dir, 'models-cache.json');
   const paths = { llmEnvPath, cachePath };
@@ -3195,7 +3212,7 @@ test('a window nobody measured is named, and one nobody wrote down cannot be wro
 });
 
 test('the design deadline is reported, never judged', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'expo-fast-deadline-'));
+  const dir = temporaryDirectory('expo-fast-deadline-');
   const llmEnvPath = join(dir, 'llm.env');
   const cachePath = join(dir, 'models-cache.json');
   const paths = { llmEnvPath, cachePath };
@@ -3279,7 +3296,7 @@ test('the request-body probe reads what was sent, not where we assumed it lands'
 
   // The capture plumbing, driven by a stand-in for Claude Code so the test needs
   // neither the real binary nor the network.
-  const dir = mkdtempSync(join(tmpdir(), 'expo-fast-capture-test-'));
+  const dir = temporaryDirectory('expo-fast-capture-test-');
   const stub = join(dir, 'claude-stub');
   writeFileSync(stub, `#!/bin/sh
 echo '{"type":"system","subtype":"init","mcp_servers":[{"name":"ghost","status":"failed"}]}'

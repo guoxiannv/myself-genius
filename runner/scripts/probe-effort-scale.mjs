@@ -2,7 +2,8 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { probeEfforts } from './model-probes.mjs';
-import { assertModelsServed, recordModelFacts } from './preflight-models.mjs';
+import { assertModelsServed } from './preflight-models.mjs';
+import { recordModelFacts } from './model-facts.mjs';
 
 // Whether this endpoint's effort levels form an ordered scale, and where the
 // order stops holding. Separate from --refresh-models for the same reason the

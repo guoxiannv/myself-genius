@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { modelCapability } from './model-facts.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const configPath = join(root, 'config/execution.json');
@@ -11,13 +12,26 @@ const designTimeoutCeiling = 55;
 // timeout ever falls back to a literal in code, so a field that goes missing
 // after an upgrade fails loudly instead of silently changing behavior.
 const roleFields = {
-  main: ['model', 'effort', 'contextWindowTokens'],
-  repair: ['model', 'effort', 'contextWindowTokens', 'limit'],
-  design: ['model', 'effort', 'contextWindowTokens', 'timeoutSeconds'],
-  appIcon: ['model', 'effort', 'contextWindowTokens', 'timeoutSeconds', 'briefTimeoutSeconds', 'enabled'],
+  main: ['model', 'effort', 'contextWindow'],
+  repair: ['model', 'effort', 'contextWindow', 'limit'],
+  design: ['model', 'effort', 'contextWindow', 'timeoutSeconds'],
+  appIcon: ['model', 'effort', 'contextWindow', 'timeoutSeconds', 'briefTimeoutSeconds', 'enabled'],
 };
 
 export const roleNames = Object.freeze(Object.keys(roleFields));
+
+// The only policy there is. It says where the window comes from -- the model's
+// measured capability -- rather than what the window is.
+//
+// A single-valued field cannot show a difference between its values, which is
+// the bar AGENTS.md sets, and fieldCriteria says so rather than pretending
+// otherwise. It is here because the alternative is no field at all, and then
+// the split between "we choose this" and "the endpoint decides this" survives
+// only in someone's memory. A second policy -- compacting deliberately earlier
+// than the model allows, so that later prompts are shorter -- is a real want
+// with no implementation; when it arrives it is a new value here rather than a
+// new schema.
+const windowPolicies = new Set(['model-max']);
 
 // Why every field is believed to do something, and how that was seen.
 //
@@ -48,10 +62,10 @@ export const fieldCriteria = Object.freeze({
     status: 'unverifiable',
     evidence: 'lands as output_config.effort and all four levels are accepted, but thinking volume did not order across three counterbalanced variants (0/3)',
   },
-  contextWindowTokens: {
+  contextWindow: {
     layer: 'harness',
-    status: 'effective',
-    evidence: 'left unset, Claude Code warns that auto-compact will hold the session to the 200k it assumes; set, it does not',
+    status: 'unverifiable',
+    evidence: 'the window it selects is effective -- left unset, Claude Code warns that auto-compact will hold the session to the 200k it assumes -- but the field has one legal value, so no difference between settings can be shown until a second policy exists',
   },
   limit: {
     layer: 'orchestrator',
@@ -78,13 +92,15 @@ export const fieldCriteria = Object.freeze({
 // Reject a configuration that is incomplete, over-complete, or from the old
 // schema. Exported so the contract can be exercised without a file on disk.
 export function validateExecutionConfig(config) {
-  if (config?.schemaVersion !== 3) {
+  if (config?.schemaVersion !== 4) {
     throw new Error(
-      `config/execution.json schemaVersion must be 3, found ${JSON.stringify(config.schemaVersion)}.`
+      `config/execution.json schemaVersion must be 4, found ${JSON.stringify(config.schemaVersion)}.`
       + ' Version 1 declared model and effort at the top level; move them under roles.main and roles.repair.'
-      + ' Version 2 declared disableAdaptiveThinking on every role; delete those four lines.'
-      + ' The variable it set leaves the request byte-for-byte identical whether it is 1, 0, or unset,'
-      + ' so the field named an intention nothing carried out.',
+      + ' Version 2 declared disableAdaptiveThinking on every role; delete those four lines, because the'
+      + ' variable it set leaves the request byte-for-byte identical whether it is 1, 0, or unset.'
+      + ' Version 3 wrote contextWindowTokens as a number; replace it with contextWindow: "model-max",'
+      + ' because a window is a property of the model and is now read from what the endpoint was measured'
+      + ' to accept rather than written down beside whichever role happens to name that model today.',
     );
   }
   for (const name of roleNames) {
@@ -99,6 +115,18 @@ export function validateExecutionConfig(config) {
   }
   for (const name of Object.keys(config.roles)) {
     if (!roleNames.includes(name)) throw new Error(`config/execution.json declares an unknown role: ${name}`);
+  }
+  // Checked here rather than while a role is resolved, because unlike effort
+  // this one has no command-line override: the closed set is known the moment
+  // the file is read, so a value outside it is a bad file rather than a bad run.
+  for (const name of roleNames) {
+    const policy = config.roles[name].contextWindow;
+    if (!windowPolicies.has(policy)) {
+      throw new Error(
+        `config/execution.json roles.${name}.contextWindow must be ${[...windowPolicies].map((value) => `"${value}"`).join(' or ')}, found ${JSON.stringify(policy)}.`
+        + ' It names where the window comes from, not what the window is: the number is read from what the endpoint was measured to accept.',
+      );
+    }
   }
   return config;
 }
@@ -145,7 +173,10 @@ function requireBoolean(label, value) {
 // Resolve one role into the exact model, effort, and limits a spawn will use.
 // `overrides` carries command-line values only; anything it omits comes from
 // configuration, and anything configuration omits is an error, never a default.
-export function resolveRole(name, overrides = {}) {
+// `paths` points the capability lookup at a different fact file. Threaded
+// through rather than left implicit because a role's window now depends on a
+// file, and a dependency a test cannot vary is one nobody can check.
+export function resolveRole(name, overrides = {}, paths = {}) {
   const declared = executionConfig.roles[name];
   if (!declared) throw new Error(`unknown execution role: ${name}`);
 
@@ -160,7 +191,12 @@ export function resolveRole(name, overrides = {}) {
     name,
     model: requireModel(`${name} model`, overrides.model || inherited),
     effort: requireEffort(`${name} effort`, overrides.effort || declared.effort),
-    contextWindowTokens: requireInteger(`${name} contextWindowTokens`, declared.contextWindowTokens, Number.MAX_SAFE_INTEGER),
+    contextWindow: declared.contextWindow,
+    // The measured window for whichever model this role resolved to, so a
+    // --model override and appIcon's inheritance both carry the right one
+    // without anybody maintaining a second number beside the first. null when
+    // nothing has measured it; roleEnv then sets no window at all.
+    contextWindowTokens: modelCapability(requireModel(`${name} model`, overrides.model || inherited), paths)?.value ?? null,
   };
 
   if (name === 'repair') {
@@ -191,37 +227,40 @@ export function resolveRole(name, overrides = {}) {
 // claude-isolated refuses to start when llm.env sets it, because a stale copy
 // there would silently override everything passed here.
 //
-// It never reaches the request body, which is exactly why it cannot be trusted
-// on its name: it only decides when this process compacts, and is not the
-// endpoint's hard limit, so a value above the real window is never rejected --
-// it just compacts too late. That is what the offline probes and the run-path
-// warning exist to catch.
+// Nothing is set when nothing has measured this model. Claude Code then says so
+// itself -- it warns that auto-compact will hold the session to the 200k it
+// assumes -- which is both louder and more accurate than a number we would have
+// had to invent. A run in that state is using less context than the model
+// allows, not more, so it degrades rather than fails.
 //
-// CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING used to be injected here too, from a
-// per-role field. Measured against Claude Code 2.1.241, the request is
-// byte-for-byte identical with it set to 1, to 0, or unset, so both the field
-// and the injection are gone. Nothing about the turns changed by removing them,
-// which is the whole point.
+// The value never reaches the request body, which is why it could not be
+// trusted on its name for so long: it only decides when this process compacts,
+// and is not the endpoint's hard limit, so a window set too high is never
+// rejected -- it just compacts too late.
 export function roleEnv(role) {
+  if (!Number.isFinite(role.contextWindowTokens)) return {};
   return {
     CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(role.contextWindowTokens),
   };
 }
 
 // Variables that only config/execution.json may set. claude-isolated rejects an
-// llm.env that declares any of them.
-export const roleOwnedEnvironmentKeys = Object.freeze(Object.keys(roleEnv(resolveRole('main'))));
+// llm.env that declares any of them. Written out rather than sampled from a
+// resolved role, because a role whose model has never been measured sets no
+// window at all -- and what llm.env may not claim does not depend on whether
+// anyone has run the probes.
+export const roleOwnedEnvironmentKeys = Object.freeze(['CLAUDE_CODE_MAX_CONTEXT_TOKENS']);
 
 // The two turn roles, fully resolved. A command-line main override that has no
 // matching repair override is inherited by the repair turn, as before.
-export function resolveExecutionRoles(options = {}) {
-  const main = resolveRole('main', { model: options.model, effort: options.effort });
+export function resolveExecutionRoles(options = {}, paths = {}) {
+  const main = resolveRole('main', { model: options.model, effort: options.effort }, paths);
   const repair = resolveRole('repair', {
     model: options.repairModel || options.model,
     effort: options.repairEffort || options.effort,
     limit: options.repairLimit,
     inheritModel: main.model,
-  });
+  }, paths);
   return { main, repair };
 }
 

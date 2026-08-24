@@ -33,7 +33,8 @@ import {
   roleOwnedEnvironmentKeys,
   validateExecutionConfig,
 } from '../scripts/execution-policy.mjs';
-import { readModelCache, refreshModelCache, verifyConfiguredModels } from '../scripts/preflight-models.mjs';
+import { refreshModelCache, verifyConfiguredModels } from '../scripts/preflight-models.mjs';
+import { modelCapability, readModelCache } from '../scripts/model-facts.mjs';
 import { probeContextWindow, probeEfforts, probeThinking, windowLadder } from '../scripts/model-probes.mjs';
 import { windowFromApiError, windowFromRejection } from '../scripts/endpoint-limits.mjs';
 import { parseArguments as parseTimingArguments } from '../scripts/probe-turn-timing.mjs';
@@ -1866,24 +1867,23 @@ test('external dependency controller CLI synchronizes an already installed exact
 
 test('single execution policy uses external model controls and caps deterministic repair at 100 attempts', () => {
   const config = JSON.parse(readFileSync(join(root, 'config/execution.json'), 'utf8'));
-  // Every window below is the endpoint's measured limit, not the number in the
-  // model's name: the k3 model rejects at 262144 (256*1024) and the design model
-  // at 1048576 (1024*1024). Rounding either back to a marketing figure gives up
-  // real context, and nothing in this repo would report the loss.
+  // No role writes a window down any more. A window is a property of the model,
+  // so it is read from what the endpoint was measured to accept for whichever
+  // model the role resolved to -- which is why a --model override now carries
+  // the right one, and why appIcon inheriting main's model no longer needs a
+  // second number maintained beside the first.
   //
-  // No role declares disableAdaptiveThinking any more. It set a variable that
+  // No role declares disableAdaptiveThinking either. It set a variable that
   // leaves the request byte-for-byte identical whether it is 1, 0, or unset, so
-  // it named an intention nothing carried out. A field like that is what this
-  // whole effort is about; keeping it would have been the disease writing the
-  // cure.
+  // it named an intention nothing carried out.
   assert.deepEqual(config, {
-    schemaVersion: 3,
+    schemaVersion: 4,
     roles: {
-      main: { model: 'k3-256k', effort: 'low', contextWindowTokens: 262144 },
-      repair: { model: 'k3-256k', effort: 'medium', contextWindowTokens: 262144, limit: 100 },
-      design: { model: 'deepseek-v4-flash', effort: 'low', contextWindowTokens: 1048576, timeoutSeconds: 45 },
+      main: { model: 'k3-256k', effort: 'low', contextWindow: 'model-max' },
+      repair: { model: 'k3-256k', effort: 'medium', contextWindow: 'model-max', limit: 100 },
+      design: { model: 'deepseek-v4-flash', effort: 'low', contextWindow: 'model-max', timeoutSeconds: 45 },
       appIcon: {
-        model: null, effort: 'low', contextWindowTokens: 262144,
+        model: null, effort: 'low', contextWindow: 'model-max',
         timeoutSeconds: 180, briefTimeoutSeconds: 180, enabled: true,
       },
     },
@@ -2020,20 +2020,43 @@ test('an incomplete execution configuration fails loudly instead of falling back
   // of date, it is asking for something that never happened.
   assert.throws(
     () => validateExecutionConfig({ schemaVersion: 1, model: 'k3-256k', effort: 'low', repairModel: 'k3-256k', repairEffort: 'medium', repairLimit: 100 }),
-    /schemaVersion must be 3/,
+    /schemaVersion must be 4/,
   );
-  const withDeadField = clone();
-  withDeadField.schemaVersion = 2;
-  assert.throws(() => validateExecutionConfig(withDeadField), /delete those four lines/);
+  const older = clone();
+  older.schemaVersion = 2;
+  assert.throws(() => validateExecutionConfig(older), /delete those four lines/);
+  older.schemaVersion = 3;
+  assert.throws(() => validateExecutionConfig(older), /replace it with contextWindow: "model-max"/);
+
+  // The policy names where the number comes from, so a number written in its
+  // place is refused rather than quietly treated as a window -- which is exactly
+  // the shape of the value this step removed.
+  const invented = clone();
+  invented.roles.main.contextWindow = 262144;
+  assert.throws(() => validateExecutionConfig(invented), /contextWindow must be "model-max", found 262144/);
+  invented.roles.main.contextWindow = 'model-min';
+  assert.throws(() => validateExecutionConfig(invented), /names where the window comes from/);
 });
 
 test('role environment carries the model window and nothing that does not work', () => {
   // The window is a model property rather than a credential, so it is injected
-  // per spawn from configuration instead of living in llm.env.
-  assert.deepEqual(roleEnv(resolveRole('design')), {
-    CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(executionConfig.roles.design.contextWindowTokens),
-  });
+  // per spawn instead of living in llm.env. Asserted as a relationship rather
+  // than a figure: the number now comes from a machine-local fact file that a
+  // fresh clone does not have, so a test naming 262144 would pass here and fail
+  // for the next person.
+  const designRole = resolveRole('design');
+  const measured = modelCapability(designRole.model);
+  assert.deepEqual(
+    roleEnv(designRole),
+    measured ? { CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(measured.value) } : {},
+  );
   assert.deepEqual(roleOwnedEnvironmentKeys, ['CLAUDE_CODE_MAX_CONTEXT_TOKENS']);
+
+  // A model nothing has measured sets no window at all, rather than borrowing
+  // one from whichever role named it. Claude Code then says on its own that it
+  // is holding the session to the 200k it assumes, which is both louder and more
+  // accurate than a figure we would have had to invent.
+  assert.deepEqual(roleEnv(resolveRole('main', { model: 'never-measured-model' })), {});
 
   // CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING is gone from every spawn. The launcher
   // stops guarding llm.env against it too -- that follows from the assertion
@@ -2041,7 +2064,7 @@ test('role environment carries the model window and nothing that does not work',
   // guarding a variable that changes nothing teaches the next reader that the
   // guard is theatre, and the guard on the one that matters is not.
   for (const role of roleNames) {
-    assert.deepEqual(Object.keys(roleEnv(resolveRole(role, { inheritModel: 'any' }))), ['CLAUDE_CODE_MAX_CONTEXT_TOKENS'], role);
+    assert.deepEqual(Object.keys(roleEnv(resolveRole(role, { inheritModel: 'never-measured-model' }))).filter((key) => key !== 'CLAUDE_CODE_MAX_CONTEXT_TOKENS'), [], role);
   }
 
   // Regression guard for the failure that started this refactor: a model name
@@ -2147,7 +2170,10 @@ test('the product contract is injected, not inherited from a CLAUDE.md walk', ()
   // a stronger guarantee than the two spawns that still spell it out inline.
   const designInvocation = designTurnInvocation(resolveRole('design'), 'prompt');
   assert.equal(designInvocation.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS, '1');
-  assert.equal(designInvocation.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, String(executionConfig.roles.design.contextWindowTokens));
+  assert.equal(
+    designInvocation.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS,
+    modelCapability(executionConfig.roles.design.model)?.value === undefined ? undefined : String(modelCapability(executionConfig.roles.design.model).value),
+  );
   const spelledOut = spawns.filter((spawnEnv) => /CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1'/.test(spawnEnv));
   assert.equal(spelledOut.length, 2, 'implementation and app icon still spell it out at the spawn');
 
@@ -2227,13 +2253,17 @@ test('model preflight reads only a local cache and never the network', () => {
   // The budget for starting a run is a few milliseconds and one round trip to
   // this relay measured 1.5-2.0s, so the read path must contain no network
   // call at all. Fetching happens only through the launcher, out of band.
+  const facts = readFileSync(join(root, 'scripts/model-facts.mjs'), 'utf8');
+  assert.doesNotMatch(facts, /fetch\(|https?:\/\/|spawnSync|execSync|curl/, 'the fact reader never reaches the network');
+  // It also imports nothing from this repository, which is what lets both
+  // execution-policy and preflight read the same facts without importing each
+  // other.
+  assert.deepEqual([...facts.matchAll(/^import .* from '(\.[^']*)'/gm)].map((match) => match[1]), []);
+
   const preflight = readFileSync(join(root, 'scripts/preflight-models.mjs'), 'utf8');
-  const readPath = preflight.slice(
-    preflight.indexOf('function fingerprintLlmEnv'),
-    preflight.indexOf('// Fetch through the launcher'),
-  );
+  const readPath = preflight.slice(0, preflight.indexOf('// Fetch through the launcher'));
   assert.ok(readPath.includes('export function verifyConfiguredModels'), 'read path located');
-  assert.doesNotMatch(readPath, /fetch\(|https?:\/\/|spawnSync|execSync|curl/);
+  assert.doesNotMatch(readPath.replace(/^import .*$/gm, ''), /fetch\(|https?:\/\/|spawnSync|execSync|curl/);
   assert.match(preflight, /spawnSync\(claudeBin, \['--genius-list-models'\]/);
   const launcher = readFileSync(join(root, '.local/claude-isolated'), 'utf8');
   assert.match(launcher, /--genius-list-models/);
@@ -3083,7 +3113,13 @@ test('every configuration field says how it was seen to do something', () => {
   assert.equal(fieldCriteria.effort.status, 'unverifiable');
 });
 
-test('the window rule refuses only what it measured, and reports the rest', () => {
+test('a window nobody measured is named, and one nobody wrote down cannot be wrong', () => {
+  // The check that used to refuse a start over a hand-written window is gone
+  // with the hand-written window. A role no longer names a number, so it cannot
+  // name one the endpoint will refuse: roleEnv passes on what the model was
+  // measured to accept and nothing else. An error made impossible needs no
+  // detector, and a check that can never fire is decoration of the kind this
+  // work exists to remove.
   const dir = mkdtempSync(join(tmpdir(), 'expo-fast-window-'));
   const llmEnvPath = join(dir, 'llm.env');
   const cachePath = join(dir, 'models-cache.json');
@@ -3096,58 +3132,28 @@ test('the window rule refuses only what it measured, and reports the rest', () =
     llmEnvMtimeMs: Math.trunc(statSync(llmEnvPath).mtimeMs), llmEnvSize: statSync(llmEnvPath).size,
     fetchedAt: '2026-08-24T00:00:00.000Z', models,
   }));
-  const window = (value, confidence) => ({ value, confidence, evidence: `endpoint said ${value}` });
-  const both = (fact) => ({ [main.model]: { contextWindowTokens: fact }, [design.model]: { contextWindowTokens: fact } });
 
-  // Configured exactly at the measured limit is the intended state, and says
-  // nothing. contextWindowTokens exists so compaction happens before the
-  // endpoint refuses; at the limit it still does.
-  write({ [main.model]: { contextWindowTokens: window(main.contextWindowTokens, 'exact') },
-          [design.model]: { contextWindowTokens: window(design.contextWindowTokens, 'exact') } });
+  // Measured on both sides, and nothing to say.
+  write({ [main.model]: { contextWindowTokens: { value: 262144, confidence: 'derived', evidence: 'x' } },
+          [design.model]: { contextWindowTokens: { value: 1048576, confidence: 'exact', evidence: 'x' } } });
   assert.deepEqual(verifyConfiguredModels({}, paths).notes, []);
 
-  // Above a limit the endpoint stated outright, the run would compact too late
-  // and be refused part-way through. That is worth refusing to start for.
-  write(both(window(1000, 'exact')));
-  assert.throws(() => verifyConfiguredModels({}, paths), /asks for more context than this endpoint gives/);
-
-  // Above a limit we inferred, it is a warning. k3's window is read from
-  // "supports only 256K context" assuming K means 1024; if that is wrong the
-  // error makes the check useless rather than stopping a run that would work.
-  write(both(window(1000, 'derived')));
-  const derived = verifyConfiguredModels({}, paths);
-  assert.equal(derived.verified, true);
-  assert.match(derived.notes.join('\n'), /derived rather than stated, so this is a warning/);
-
-  // The back door goes through the same door. Ten command-line flags can replace
-  // a role's model on any run, and they bypass every check in
-  // config/execution.json except whether the name exists. They do not bypass
-  // this one, because the roles are resolved with the overrides applied -- and
-  // the direction that matters is caught: a role keeps its declared window when
-  // its model is swapped, so pointing a wide-window role at a narrow model asks
-  // for context the endpoint will refuse.
-  write({ [main.model]: { contextWindowTokens: window(main.contextWindowTokens, 'exact') },
-          [design.model]: { contextWindowTokens: window(design.contextWindowTokens, 'exact') } });
-  assert.deepEqual(verifyConfiguredModels({}, paths).notes, [], 'unchanged configuration still passes');
-  assert.throws(
-    () => verifyConfiguredModels({ designModel: main.model }, paths),
-    /asks for more context than this endpoint gives: design compacts at/,
-    'a --design-model swap keeps the wide window and is caught',
-  );
-
-  // The same swap against a derived limit warns instead of refusing, which is
-  // the shape the real fact table has today: k3's window is read from "supports
-  // only 256K context" rather than stated outright.
-  write({ [main.model]: { contextWindowTokens: window(main.contextWindowTokens, 'derived') },
-          [design.model]: { contextWindowTokens: window(design.contextWindowTokens, 'exact') } });
-  const swapped = verifyConfiguredModels({ designModel: main.model }, paths);
-  assert.equal(swapped.verified, true);
-  assert.match(swapped.notes.join('\n'), /design compacts at .* derived rather than stated/);
-
-  // Nothing measured means the value is simply unchecked, and saying so is the
-  // point: the alternative is a run that looks protected and is not.
+  // Nothing measured means the run holds to the 200k Claude Code assumes. Not an
+  // error -- it uses less context than the model allows, not more -- but worth
+  // naming, because from the outside "measured and fine" and "never asked" look
+  // identical.
   write({ [main.model]: {}, [design.model]: {} });
-  assert.match(verifyConfiguredModels({}, paths).notes.join('\n'), /nothing has measured .* window/);
+  const unmeasured = verifyConfiguredModels({}, paths);
+  assert.equal(unmeasured.verified, true);
+  assert.equal(unmeasured.notes.length, 4, 'one per role, since every role resolves to an unmeasured model');
+  assert.match(unmeasured.notes.join('\n'), /nothing has measured .*'s window, so this run compacts at the 200k/);
+
+  // The back door goes through the same door, and now carries the right window
+  // rather than being caught carrying the wrong one: swapping a role's model
+  // swaps the measurement it resolves to.
+  write({ [main.model]: { contextWindowTokens: { value: 262144, confidence: 'derived', evidence: 'x' } },
+          [design.model]: { contextWindowTokens: { value: 1048576, confidence: 'exact', evidence: 'x' } } });
+  assert.deepEqual(verifyConfiguredModels({ designModel: main.model }, paths).notes, [], 'a swapped model brings its own window');
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -3165,9 +3171,9 @@ test('the design deadline is reported, never judged', () => {
     llmEnvMtimeMs: Math.trunc(statSync(llmEnvPath).mtimeMs), llmEnvSize: statSync(llmEnvPath).size,
     fetchedAt: '2026-08-24T00:00:00.000Z',
     models: {
-      [main.model]: { contextWindowTokens: { value: main.contextWindowTokens, confidence: 'exact', evidence: 'x' } },
+      [main.model]: { contextWindowTokens: { value: 262144, confidence: 'derived', evidence: 'x' } },
       [design.model]: {
-        contextWindowTokens: { value: design.contextWindowTokens, confidence: 'exact', evidence: 'x' },
+        contextWindowTokens: { value: 1048576, confidence: 'exact', evidence: 'x' },
         referenceTurn: { reference: 'ledger', samples },
       },
     },

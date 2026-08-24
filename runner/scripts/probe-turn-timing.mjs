@@ -4,7 +4,8 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDesignPrompt, readDesignTrace, designTurnInvocation } from './run-livetest.mjs';
 import { resolveRole } from './execution-policy.mjs';
-import { assertModelsServed, recordModelFacts } from './preflight-models.mjs';
+import { assertModelsServed } from './preflight-models.mjs';
+import { recordModelFacts } from './model-facts.mjs';
 
 // How long a reference turn takes, measured the only way it can be: by running
 // it. Deliberately separate from --refresh-models, which is called by

@@ -1,80 +1,24 @@
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { resolveExecutionRoles, resolveRole } from './execution-policy.mjs';
 import { probeContextWindow, probeThinking } from './model-probes.mjs';
+import { cacheSchemaVersion, fingerprintLlmEnv, llmEnvPath, cachePath, probeSuiteVersion, readModelCache } from './model-facts.mjs';
 
-const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const llmEnvPath = join(root, '.local/llm.env');
-const cachePath = join(root, '.local/models-cache.json');
-
-// Reading the list costs a network round trip measured at 1.5-2.0s on the
-// current relay, almost all of it the TLS handshake. That is three orders of
-// magnitude over the budget for starting a run, so the fetch never happens on a
-// run path: it is refreshed out of band and only the cache is read here.
-//
-// The cache fingerprints llm.env by size and modification time rather than
-// recording the endpoint it was fetched from. That keeps this check to one stat
-// and one small file read, with no subprocess and no need for the orchestrator
-// to parse a file that belongs to the launcher. Size is carried alongside the
-// timestamp because mtime has millisecond granularity.
-function fingerprintLlmEnv(envFile) {
-  if (!existsSync(envFile)) return { llmEnvMtimeMs: 0, llmEnvSize: 0 };
-  const stats = statSync(envFile);
-  return { llmEnvMtimeMs: Math.trunc(stats.mtimeMs), llmEnvSize: stats.size };
-}
-// Schema 1 held a bare array of model names. Schema 2 keys the same names to a
-// record per model, so that a measured capability can be attached to the model
-// it belongs to rather than to whichever role happens to name it today. An
-// older cache is reported as outdated rather than corrupt: nothing is wrong
-// with it, it simply predates the fields that would be read from it.
-const cacheSchemaVersion = 2;
-
-// How long ago this was measured. Reported, never enforced: an age threshold
-// would be a number invented rather than measured, and it would answer the
-// wrong question anyway. The fingerprint above says whether this cache is about
-// the current endpoint; nothing local can say whether that endpoint has since
-// changed what it serves. Making the age visible is the honest half of that.
-function measuredDaysAgo(fetchedAt, now) {
-  const at = Date.parse(fetchedAt ?? '');
-  if (!Number.isFinite(at)) return null;
-  return Math.max(0, Math.round((now - at) / 86_400_000));
-}
-export function readModelCache(paths = {}, now = Date.now()) {
-  const cacheFile = paths.cachePath || cachePath;
-  const envFile = paths.llmEnvPath || llmEnvPath;
-  if (!existsSync(cacheFile)) return { status: 'absent' };
-  let cache;
-  try {
-    cache = JSON.parse(readFileSync(cacheFile, 'utf8'));
-  } catch {
-    return { status: 'unreadable' };
-  }
-  if (Number.isInteger(cache?.schemaVersion) && cache.schemaVersion < cacheSchemaVersion) {
-    return { status: 'outdated', cache };
-  }
-  if (cache?.schemaVersion !== cacheSchemaVersion) return { status: 'unreadable' };
-  if (!cache.models || typeof cache.models !== 'object' || Array.isArray(cache.models)) return { status: 'unreadable' };
-  if (!Number.isInteger(cache.llmEnvMtimeMs) || !Number.isInteger(cache.llmEnvSize)) return { status: 'unreadable' };
-  const fingerprint = fingerprintLlmEnv(envFile);
-  const age = measuredDaysAgo(cache.fetchedAt, now);
-  if (fingerprint.llmEnvMtimeMs !== cache.llmEnvMtimeMs || fingerprint.llmEnvSize !== cache.llmEnvSize) {
-    return { status: 'stale', cache, measuredDaysAgo: age };
-  }
-  return { status: 'fresh', cache, measuredDaysAgo: age };
-}
+// Verifying a configuration against the measured facts. The facts themselves,
+// and reading them, live in model-facts.mjs, which imports nothing from here --
+// that is what lets execution-policy resolve a window from the same file
+// without the two importing each other.
 
 // Every role's model, including the command-line overrides, because those reach
 // the endpoint exactly as configuration does and must be checked and measured on
 // the same terms.
-function roleModels(options = {}) {
-  const { main, repair } = resolveExecutionRoles(options);
+function roleModels(options = {}, paths = {}) {
+  const { main, repair } = resolveExecutionRoles(options, paths);
   return [
     ['main', main],
     ['repair', repair],
-    ['design', resolveRole('design', { model: options.designModel, effort: options.designEffort, inheritModel: main.model })],
-    ['appIcon', resolveRole('appIcon', { inheritModel: main.model })],
+    ['design', resolveRole('design', { model: options.designModel, effort: options.designEffort, inheritModel: main.model }, paths)],
+    ['appIcon', resolveRole('appIcon', { inheritModel: main.model }, paths)],
   ];
 }
 
@@ -97,7 +41,7 @@ export function verifyConfiguredModels(options = {}, paths = {}) {
       notice: `models unverified: ${because} · ./start-livetest.sh --refresh-models`,
     };
   }
-  const roles = roleModels(options);
+  const roles = roleModels(options, paths);
   const servedNames = Object.keys(result.cache.models);
   const served = new Set(servedNames);
   const missing = roles.filter(([, role]) => !served.has(role.model));
@@ -111,7 +55,7 @@ export function verifyConfiguredModels(options = {}, paths = {}) {
     );
   }
   const notes = [
-    ...windowNotes(roles, result.cache),
+    ...windowNotes(roles),
     ...designDeadlineNote(roles, result.cache),
   ];
 
@@ -129,40 +73,25 @@ export function verifyConfiguredModels(options = {}, paths = {}) {
   };
 }
 
-// The one configured value whose intent is unambiguous enough for a machine to
-// check: contextWindowTokens exists so that Claude Code compacts before the
-// endpoint refuses the request. Set above the real window, compaction comes too
-// late and a turn is refused mid-run -- and until the run-path warning existed,
-// silently.
+// The window is no longer written down beside a role, so a configuration can no
+// longer name one the endpoint will refuse -- roleEnv passes on whatever the
+// model was measured to accept, and nothing else. The check that used to refuse
+// a start over that number is gone with the number: an error made impossible
+// needs no detector, and a check that can never fire is decoration of the same
+// kind this whole effort removed.
 //
-// A derived limit only warns. k3's 262144 is read from "supports only 256K
-// context" on the assumption that K is 1024, and if that assumption is wrong the
-// error runs toward making this check useless rather than toward stopping a run
-// that would have worked. Refusing to start on an inference we have not
-// confirmed would be the more expensive mistake.
-function windowNotes(roles, cache) {
-  const notes = [];
-  for (const [name, role] of roles) {
-    const fact = cache.models[role.model]?.contextWindowTokens;
-    if (!Number.isFinite(fact?.value)) {
-      notes.push(`${name}: nothing has measured ${role.model}'s window, so contextWindowTokens ${role.contextWindowTokens} is unchecked · ./start-livetest.sh --refresh-models`);
-      continue;
-    }
-    if (role.contextWindowTokens <= fact.value) continue;
-    const said = `${name} compacts at ${role.contextWindowTokens}, but ${role.model} refuses past ${fact.value}`;
-    if (fact.confidence !== 'exact') {
-      notes.push(`${said} — that limit is derived rather than stated, so this is a warning: ${fact.evidence}`);
-      continue;
-    }
-    throw new Error(
-      `config/execution.json asks for more context than this endpoint gives: ${said}.\n`
-      + `  The endpoint said: ${fact.evidence}\n`
-      + '  Compaction would come too late and a turn would be refused part-way through the run.\n'
-      + '  Lower contextWindowTokens, or refresh the facts if the endpoint changed:\n'
-      + '    ./start-livetest.sh --refresh-models',
-    );
-  }
-  return notes;
+// What is left is the case where nothing has measured the model at all. That is
+// not an error either -- the run simply uses the 200k Claude Code assumes, and
+// says so on its own -- but it is worth naming, because the difference between
+// "measured and fine" and "never asked" is invisible from the outside.
+//
+// A measurement that is itself wrong is still possible, and is still caught: the
+// endpoint says its real limit when it refuses a request, and the run reports
+// that contradiction where it happens.
+function windowNotes(roles) {
+  return roles
+    .filter(([, role]) => !Number.isFinite(role.contextWindowTokens))
+    .map(([name, role]) => `${name}: nothing has measured ${role.model}'s window, so this run compacts at the 200k Claude Code assumes · ./start-livetest.sh --refresh-models`);
 }
 
 // A report, not a verdict. The design deadline is a budget rather than an
@@ -253,13 +182,6 @@ function claudeCodeVersion(claudeBin) {
   return shown.stdout.match(/\b\d+(?:\.\d+)+[\w.-]*/)?.[0] ?? null;
 }
 
-// Bump when a probe changes what its answer means, so that a record measured by
-// an older suite is visibly not the same measurement. A probe that cannot reach
-// a verdict records that it could not, and never fails the refresh: the model
-// names are the part this file has always been trusted for, and losing them
-// because one probe timed out would trade a small gap for a large one.
-export const probeSuiteVersion = 1;
-
 function probeModel(claudeBin, model, notice) {
   const measuredAt = new Date().toISOString();
   const stamp = (fact) => ({ ...fact, measuredAt });
@@ -284,32 +206,6 @@ function probeModel(claudeBin, model, notice) {
     record.absentThinkingMeansOff = unmeasured(error);
   }
   return record;
-}
-
-// Record what one probe measured about one model, leaving the fingerprint and
-// every other model untouched. Kept apart from refreshModelCache because the
-// expensive probe is asked for on its own and should not have to re-fetch the
-// model list to write down what it learned.
-//
-// Only a fresh cache accepts a recording. If llm.env has changed, this cache
-// describes a different endpoint, and filing a measurement taken against the
-// current one under that fingerprint would produce exactly the quiet
-// disagreement between configuration and reality this whole effort is about.
-export function recordModelFacts(model, facts, paths = {}) {
-  const cacheFile = paths.cachePath || cachePath;
-  const current = readModelCache(paths);
-  if (current.status !== 'fresh') {
-    throw new Error(`the model cache is ${current.status}, so there is nothing to record into · ./start-livetest.sh --refresh-models`);
-  }
-  const { cache } = current;
-  if (!cache.models[model]) {
-    throw new Error(`this endpoint does not serve ${model}. It serves: ${Object.keys(cache.models).join(', ')}`);
-  }
-  const measuredAt = new Date().toISOString();
-  const stamped = Object.fromEntries(Object.entries(facts).map(([name, fact]) => [name, { ...fact, measuredAt }]));
-  cache.models[model] = { ...cache.models[model], ...stamped };
-  writeFileSync(cacheFile, `${JSON.stringify(cache, null, 2)}\n`);
-  return cache.models[model];
 }
 
 // Checked before an expensive probe spends anything. A model this endpoint does

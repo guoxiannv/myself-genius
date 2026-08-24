@@ -59,14 +59,16 @@ export function DevicePreview({
       }
   const resolvedPolicy = previewPolicy || defaultPolicy
   const availablePreviews: PreviewTabKind[] = [
+    ...(isExpo ? ["web" as const] : []),
     ...(["desktop", "phone"] as PreviewKind[]).filter(
       (kind) => resolvedPolicy.previews[kind]?.enabled,
     ),
-    ...(isExpo ? ["web" as const] : []),
   ]
-  const defaultPreview = availablePreviews.includes(resolvedPolicy.default_kind)
-    ? resolvedPolicy.default_kind
-    : availablePreviews[0] || (isExpo ? "desktop" : "phone")
+  const defaultPreview = isExpo
+    ? "web"
+    : availablePreviews.includes(resolvedPolicy.default_kind)
+      ? resolvedPolicy.default_kind
+      : availablePreviews[0] || "phone"
   const [activePreview, setActivePreview] = useState<PreviewTabKind>(defaultPreview)
   const isWebPreview = activePreview === "web"
   const activeSession = isWebPreview ? undefined : previewSessions?.[activePreview]
@@ -124,6 +126,7 @@ export function DevicePreview({
   const [retryingPreview, setRetryingPreview] = useState(false)
   const [retryPreviewError, setRetryPreviewError] = useState("")
   const [webCanvasScale, setWebCanvasScale] = useState(1)
+  const [verifiedWebUrl, setVerifiedWebUrl] = useState("")
 
   useEffect(() => {
     if (availablePreviews.length && !availablePreviews.includes(activePreview)) {
@@ -262,7 +265,37 @@ export function DevicePreview({
     observer.observe(host)
     syncScale()
     return () => observer.disconnect()
-  }, [isFullscreen, isWebPreview])
+  }, [isFullscreen, isWebPreview, verifiedWebUrl])
+
+  useEffect(() => {
+    setVerifiedWebUrl("")
+    if (!isWebPreview || !artifacts.web_ready || !artifacts.web_url) return
+
+    let disposed = false
+    let timer = 0
+    const probe = async () => {
+      try {
+        const response = await fetch(artifacts.web_url!, {
+          method: "HEAD",
+          cache: "no-store",
+          mode: "cors",
+        })
+        const contentType = response.headers.get("content-type") || ""
+        if (!disposed && response.ok && contentType.includes("text/html")) {
+          setVerifiedWebUrl(artifacts.web_url!)
+          return
+        }
+      } catch {
+        // The gateway may be restarting or replacing the export. Retry below.
+      }
+      if (!disposed) timer = window.setTimeout(probe, 900)
+    }
+    void probe()
+    return () => {
+      disposed = true
+      window.clearTimeout(timer)
+    }
+  }, [activePreview, artifacts.web_ready, artifacts.web_url, isWebPreview])
 
   useEffect(() => {
     if (!liveEnabled || !activeArtifacts.live_frame_path || !pageVisible || liveTransport === "webrtc") {
@@ -569,10 +602,10 @@ export function DevicePreview({
   ) : null
 
   const previewContent = isWebPreview ? (
-    artifacts.web_ready && artifacts.web_url ? (
+    verifiedWebUrl ? (
       <div ref={webCanvasHostRef} className="relative h-full w-full overflow-hidden bg-white">
         <iframe
-          src={artifacts.web_url}
+          src={verifiedWebUrl}
           title="Expo Web 应用预览"
           className="absolute left-0 top-0 border-0 bg-white"
           style={{
@@ -581,11 +614,13 @@ export function DevicePreview({
             transform: `scale(${webCanvasScale})`,
             transformOrigin: "top left",
           }}
-          sandbox={webPreviewSandbox(artifacts.web_url)}
+          sandbox={webPreviewSandbox(verifiedWebUrl)}
           allow="clipboard-read; clipboard-write"
           referrerPolicy="no-referrer"
         />
       </div>
+    ) : artifacts.web_status === "waiting" || artifacts.web_status === "ready" || !artifacts.web_status ? (
+      <WebPreviewLoading />
     ) : (
       <WaitingState
         message={
@@ -593,7 +628,7 @@ export function DevicePreview({
             ? artifacts.web_error || "Web 版构建失败，请查看构建日志。"
             : artifacts.web_status === "missing"
               ? "本次构建尚未生成可预览的 Web 产物。"
-              : "正在构建 Web 版…"
+          : "正在构建 Web 版…"
         }
         failed={artifacts.web_status === "failed" || artifacts.web_status === "missing"}
       />
@@ -815,6 +850,17 @@ function PreviewLoadingIcon() {
       className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-current/30 border-t-current"
       aria-hidden="true"
     />
+  )
+}
+
+function WebPreviewLoading() {
+  return (
+    <div className="flex h-full w-full items-center justify-center bg-[#0d1117] text-white" role="status" aria-live="polite" aria-label="代码生成中">
+      <div className="flex items-center gap-2.5 text-sm font-medium text-white/65">
+        <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/20 border-t-accent" aria-hidden="true" />
+        <span>代码生成中</span>
+      </div>
+    </div>
   )
 }
 

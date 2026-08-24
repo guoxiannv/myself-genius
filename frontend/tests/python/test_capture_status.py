@@ -559,7 +559,10 @@ class EffectiveCaptureStatusTests(unittest.TestCase):
         self.assertEqual(session["status"], "released")
 
     def test_expo_payload_exposes_desktop_and_phone_previews_from_one_build(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            remote_ui_app, "RUNS_DIR", Path(directory) / "runs"
+        ):
+            remote_ui_app.RUNS_DIR.mkdir()
             workspace = Path(directory)
             state_dir = workspace / ".expo-fast"
             state_dir.mkdir()

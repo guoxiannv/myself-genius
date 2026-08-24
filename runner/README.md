@@ -25,6 +25,7 @@ npm test
 
 ```sh
 ./start-livetest.sh --name my-app
+./start-livetest.sh --refresh-models                                  # 刷新事实表，换端点或换模型后跑一次
 ./start-livetest.sh --prompt-file ./prompts/ledger.md --model k3-256k --effort low
 ./start-livetest.sh --project /absolute/path/my-app --foreground
 ./start-livetest.sh --prompt "……" --no-launch --no-hap
@@ -41,7 +42,9 @@ npm test
 start-livetest.sh
   -> scripts/start-livetest.mjs       参数、环境、目标目录与 tmux
   -> scripts/run-livetest.mjs         唯一的端到端状态机与模型回合
-       -> scripts/execution-policy.mjs 主/repair 模型与 effort 的统一解析
+       -> scripts/execution-policy.mjs 四个角色的模型、effort、策略与超时的统一解析
+       -> scripts/model-facts.mjs      端点与 harness 的实测事实（只读，不出网）
+       -> scripts/preflight-models.mjs 启动前把配置和事实对上
        -> scripts/app-icon.mjs        Brief 后独立生成并安装分层应用图标
        -> scripts/verification.mjs     check/build 的唯一确定性验证服务
        -> scripts/agent-tools-server.mjs 仅向续跑/修复 Agent 暴露受控 check/build
@@ -64,7 +67,8 @@ follow-up-control.sh
 - `verification.mjs` 是依赖同步、typecheck、source audit、export 和 artifact audit 的唯一组合入口；外层最终门禁和 Agent 受控工具调用同一实现。
 - `agent-tools-server.mjs` 只提供绑定当前工程的 `check`、`build`，不接受路径或 shell 命令。初始 0→1 回合不会连接这两个工具。
 - `follow-up-control.mjs` 持久化 FIFO 与用户操作，通过原 Claude session 启动增量回合；用户正文经文件/标准输入传递，不进入 argv。worker 在 Agent 与最终确定性 gate 完成后立即释放队列，不等待设备租约。
-- `execution-policy.mjs` 是 model/effort 解析的唯一入口；`config/execution.json` 只提供主回合与 repair 回合的默认值，命令行参数可逐次覆盖。
+- `execution-policy.mjs` 是四个角色（main / repair / design / appIcon）解析的唯一入口；`config/execution.json` 提供模型、effort、策略与超时，命令行参数可逐次覆盖。
+- `model-facts.mjs` 只读 `.local/models-cache.json`——探针实测出来的事实表。**上下文窗口从这里取，不写在配置里**，所以角色换了模型，窗口自动跟着换。它不 import 仓库里的任何东西，这正是 `execution-policy` 和 `preflight-models` 能读同一份事实而互不依赖的原因。
 - `app-icon.mjs` 在 `brief.json` 可用后启动独立、无工具、无会话持久化的模型进程，使用产品/主流程/验收语义生成分层 SVG 并转为 1024×1024 PNG；任何失败都保留模板默认图标，不阻断产品生成。
 - `harmony-go-runtime.mjs` 是壳身份的唯一入口：优先读取 `EXPO_HARMONY_GO_BUNDLE_NAME`，其次读取 `EXPO_HARMONY_GO_HAP` 内嵌 `module.json`，最后使用当前 SDK 默认值 `com.example.myapplication1.ide`。安装、启动、强停、前台检查和 smoke 身份校验共享该结果。
 - `templates/expo-harmony/` 是冷启动技术模板；`docs/runtime-contract.md` 是当前 Harmony Go 运行合同。
@@ -88,6 +92,27 @@ follow-up-control.sh
 HAP 失败会被记录为独立的 partial failure，不会抹掉此前已经通过的生成、审计或 Harmony Go 证据。
 
 Runner 只有一套执行策略，不再接受 `--candidate`，也不会根据需求长度或关键词自动分流。主回合由 `--model`、`--effort` 控制，repair 回合由 `--repair-model`、`--repair-effort` 控制；未传入时读取 `config/execution.json`。若只传主回合参数，repair 会继承对应的外部覆盖值。`--timeout` 控制主回合，`--repair-timeout` 控制每一轮 repair；模型/进程失败、单轮超时、用户停止或系统限制仍会终止执行。
+
+**`--model` 只需要给模型名，窗口会自己跟上。** 上下文窗口是模型的属性，从事实表按解析后的模型取，所以覆盖模型不会留下上一个模型的窗口。代价是：**换到一个探针没测过的模型时，不设窗口**——Claude Code 会自己说它按假定的 200k 压缩，启动前也会点名是哪个角色。跑一次 `--refresh-models` 就能补上。
+
+## 事实表与探针
+
+配置写「我们要什么」，事实表记「端点和 Claude Code 实际是什么」，启动前把两者对上。事实表是 `.local/models-cache.json`，不进版本库，由带外探针刷新；**运行路径只读它，不联网**。
+
+探针分两级，因为成本差几个数量级：
+
+```sh
+./start-livetest.sh --refresh-models        # 便宜：模型列表、上下文窗口、thinking 能否关
+node scripts/probe-turn-timing.mjs   --model <name> --samples 5   # 贵：真实 design 回合
+node scripts/probe-effort-scale.mjs  --model <name>               # 贵：每个模型 12 个回合
+node scripts/probe-hardcoded-knobs.mjs                            # 免费：全程 loopback，不出网
+```
+
+`--refresh-models` 必须一直便宜——`setup-harmony-pool.sh` 每次建池都会调它。**两个贵探针都不设默认模型**：要花钱的测量必须由人点名。它们不会覆盖彼此的结果，便宜的刷新也不会抹掉贵探针测出来的行。
+
+判据只认**可观测的输出差异**：带与不带，输出有没有区别。「请求没报错」不算，「请求体里有这个字段」也不算。测不出差异的项记成 `unverifiable`，不记成有效——细则见仓库根 `AGENTS.md` 的「配置的对错」。
+
+事实表缺失时**提示并继续**，不阻塞运行：把「忘了刷新」变成启动失败，是拿一个常见的假错误换一个罕见的真错误。
 
 ## 生成后的增量修改
 

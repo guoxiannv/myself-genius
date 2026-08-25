@@ -1,0 +1,672 @@
+From 454c4612db4bd0bcb771769987bfc56edff9d737 Mon Sep 17 00:00:00 2001
+From: v0 <it+v0agent@vercel.com>
+Date: Tue, 25 Aug 2026 11:46:03 +0000
+Subject: [PATCH] feat: remove AuthControl and add UserMenu components
+
+Co-authored-by: guoxiannv <48988582+guoxiannv@users.noreply.github.com>
+---
+ .../web/src/components/layout/AuthControl.tsx | 127 --------
+ .../web/src/components/layout/UserMenu.tsx    | 300 ++++++++++++++++++
+ frontend/web/src/pages/DetailPage.tsx         |  22 +-
+ frontend/web/src/pages/GalleryDetailPage.tsx  |  21 +-
+ frontend/web/src/pages/GalleryPage.tsx        |   4 +-
+ frontend/web/src/pages/HistoryPage.tsx        |  18 +-
+ frontend/web/src/pages/HomePage.tsx           |  18 +-
+ 7 files changed, 325 insertions(+), 185 deletions(-)
+ delete mode 100644 frontend/web/src/components/layout/AuthControl.tsx
+ create mode 100644 frontend/web/src/components/layout/UserMenu.tsx
+
+diff --git a/frontend/web/src/components/layout/AuthControl.tsx b/frontend/web/src/components/layout/AuthControl.tsx
+deleted file mode 100644
+index e54e9f2..0000000
+--- a/frontend/web/src/components/layout/AuthControl.tsx
++++ /dev/null
+@@ -1,127 +0,0 @@
+-import { useEffect, useState } from "react"
+-import { createPortal } from "react-dom"
+-import { api, ApiError } from "@/lib/api"
+-import type { AuthState } from "@/lib/types"
+-
+-const GUEST_STATE: AuthState = { role: "guest", root_login_enabled: false }
+-
+-export function AuthControl({ compact = false }: { compact?: boolean }) {
+-  const [auth, setAuth] = useState<AuthState | null>(null)
+-  const [open, setOpen] = useState(false)
+-  const [password, setPassword] = useState("")
+-  const [submitting, setSubmitting] = useState(false)
+-  const [error, setError] = useState("")
+-
+-  useEffect(() => {
+-    let active = true
+-    api.getAuthMe().then((state) => active && setAuth(state)).catch(() => active && setAuth(GUEST_STATE))
+-    return () => {
+-      active = false
+-    }
+-  }, [])
+-
+-  const login = async (event: React.FormEvent) => {
+-    event.preventDefault()
+-    if (!password || submitting) return
+-    setSubmitting(true)
+-    setError("")
+-    try {
+-      const state = await api.login(password)
+-      setAuth(state)
+-      setPassword("")
+-      setOpen(false)
+-      window.location.reload()
+-    } catch (reason) {
+-      setError(reason instanceof ApiError ? reason.message : "登录失败，请稍后重试")
+-    } finally {
+-      setSubmitting(false)
+-    }
+-  }
+-
+-  const logout = async () => {
+-    await api.logout().catch(() => undefined)
+-    window.location.reload()
+-  }
+-
+-  if (auth?.role === "root") {
+-    return (
+-      <button
+-        type="button"
+-        onClick={logout}
+-        className={`inline-flex items-center gap-1.5 rounded-full border border-accent/35 bg-accent/15 text-xs font-semibold text-accent-soft transition-colors hover:border-accent/55 hover:text-foreground ${compact ? "h-8 px-2.5" : "h-9 px-3"}`}
+-        title="退出管理员"
+-      >
+-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
+-          <path d="M10 5H5v14h5M14 8l4 4-4 4M18 12H9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+-        </svg>
+-        <span className="hidden sm:inline">管理员</span>
+-      </button>
+-    )
+-  }
+-
+-  if (auth && !auth.root_login_enabled) return null
+-
+-  return (
+-    <>
+-      <button
+-        type="button"
+-        onClick={() => {
+-          setError("")
+-          setOpen(true)
+-        }}
+-        className={`inline-flex items-center gap-1.5 rounded-full border border-border bg-surface/70 text-xs font-semibold text-muted transition-colors hover:border-border-strong hover:text-foreground ${compact ? "h-8 px-2.5" : "h-9 px-3"}`}
+-        title="管理员登录"
+-      >
+-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
+-          <rect x="5" y="10" width="14" height="10" rx="2" stroke="currentColor" strokeWidth="2" />
+-          <path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+-        </svg>
+-        <span className="hidden sm:inline">管理员登录</span>
+-      </button>
+-
+-      {open && createPortal(
+-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/65 px-5" role="presentation" onMouseDown={() => setOpen(false)}>
+-          <form
+-            onSubmit={login}
+-            onMouseDown={(event) => event.stopPropagation()}
+-            role="dialog"
+-            aria-modal="true"
+-            aria-labelledby="root-login-title"
+-            className="glass w-full max-w-sm rounded-[var(--radius-card)] border border-border p-6 shadow-2xl shadow-black/60"
+-          >
+-            <div className="flex items-start justify-between gap-4">
+-              <div>
+-                <p className="text-xs font-semibold text-accent-soft">Bitfun Genius</p>
+-                <h2 id="root-login-title" className="mt-1 text-xl font-bold text-foreground">管理员登录</h2>
+-              </div>
+-              <button type="button" onClick={() => setOpen(false)} aria-label="关闭登录窗口" className="text-subtle transition-colors hover:text-foreground">
+-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true">
+-                  <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+-                </svg>
+-              </button>
+-            </div>
+-            <label className="mt-6 block text-sm font-medium text-muted">
+-              管理员密码
+-              <input
+-                autoFocus
+-                type="password"
+-                value={password}
+-                onChange={(event) => setPassword(event.target.value)}
+-                className="mt-2 h-10 w-full rounded-lg border border-border bg-surface-raised px-3 text-sm text-foreground outline-none transition-colors placeholder:text-subtle focus:border-accent/50"
+-              />
+-            </label>
+-            {error && <p role="alert" className="mt-3 text-sm text-danger">{error}</p>}
+-            <button
+-              type="submit"
+-              disabled={!password || submitting}
+-              className="mt-6 inline-flex h-10 w-full items-center justify-center rounded-lg bg-accent px-4 text-sm font-semibold text-background transition-colors hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-60"
+-            >
+-              {submitting ? "验证中…" : "进入管理模式"}
+-            </button>
+-          </form>
+-        </div>,
+-        document.body,
+-      )}
+-    </>
+-  )
+-}
+diff --git a/frontend/web/src/components/layout/UserMenu.tsx b/frontend/web/src/components/layout/UserMenu.tsx
+new file mode 100644
+index 0000000..99431f7
+--- /dev/null
++++ b/frontend/web/src/components/layout/UserMenu.tsx
+@@ -0,0 +1,300 @@
++import { useEffect, useRef, useState } from "react"
++import { createPortal } from "react-dom"
++import { Link, useLocation } from "react-router-dom"
++import { api, ApiError } from "@/lib/api"
++import { cn } from "@/lib/format"
++import type { AuthState } from "@/lib/types"
++
++const GUEST_STATE: AuthState = { role: "guest", root_login_enabled: false }
++
++const NAV_ITEMS = [
++  {
++    to: "/",
++    label: "新建生成",
++    hint: "从一句话开始",
++    icon: (
++      <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
++    ),
++  },
++  {
++    to: "/gallery",
++    label: "灵感库",
++    hint: "挑个模板续跑",
++    icon: (
++      <path
++        d="M4 5h7v7H4zM13 5h7v4h-7zM13 13h7v6h-7zM4 16h7v3H4z"
++        stroke="currentColor"
++        strokeWidth="1.7"
++        strokeLinejoin="round"
++      />
++    ),
++  },
++  {
++    to: "/runs",
++    label: "我的应用",
++    hint: "查看历史构建",
++    icon: <path d="M4 7h16M4 12h16M4 17h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />,
++  },
++]
++
++export function UserMenu({ compact = false }: { compact?: boolean }) {
++  const [auth, setAuth] = useState<AuthState | null>(null)
++  const [open, setOpen] = useState(false)
++  const [loginOpen, setLoginOpen] = useState(false)
++  const [password, setPassword] = useState("")
++  const [submitting, setSubmitting] = useState(false)
++  const [error, setError] = useState("")
++  const wrapRef = useRef<HTMLDivElement>(null)
++  const { pathname } = useLocation()
++
++  useEffect(() => {
++    let active = true
++    api
++      .getAuthMe()
++      .then((state) => active && setAuth(state))
++      .catch(() => active && setAuth(GUEST_STATE))
++    return () => {
++      active = false
++    }
++  }, [])
++
++  // 路由变化时收起菜单，避免跳转后浮层残留
++  useEffect(() => setOpen(false), [pathname])
++
++  useEffect(() => {
++    if (!open) return
++    const onPointerDown = (event: MouseEvent) => {
++      if (!wrapRef.current?.contains(event.target as Node)) setOpen(false)
++    }
++    const onKeyDown = (event: KeyboardEvent) => {
++      if (event.key === "Escape") setOpen(false)
++    }
++    document.addEventListener("mousedown", onPointerDown)
++    document.addEventListener("keydown", onKeyDown)
++    return () => {
++      document.removeEventListener("mousedown", onPointerDown)
++      document.removeEventListener("keydown", onKeyDown)
++    }
++  }, [open])
++
++  const isRoot = auth?.role === "root"
++  const canLogin = Boolean(auth?.root_login_enabled)
++
++  const login = async (event: React.FormEvent) => {
++    event.preventDefault()
++    if (!password || submitting) return
++    setSubmitting(true)
++    setError("")
++    try {
++      const state = await api.login(password)
++      setAuth(state)
++      setPassword("")
++      setLoginOpen(false)
++      window.location.reload()
++    } catch (reason) {
++      setError(reason instanceof ApiError ? reason.message : "登录失败，请稍后重试")
++    } finally {
++      setSubmitting(false)
++    }
++  }
++
++  const logout = async () => {
++    await api.logout().catch(() => undefined)
++    window.location.reload()
++  }
++
++  return (
++    <>
++      <div ref={wrapRef} className="relative">
++        <button
++          type="button"
++          onClick={() => setOpen((value) => !value)}
++          aria-haspopup="menu"
++          aria-expanded={open}
++          aria-label="菜单与账户"
++          className={cn(
++            "inline-flex items-center gap-2 rounded-full border bg-surface/70 pl-1 pr-2.5 transition-colors",
++            compact ? "h-8" : "h-9",
++            open ? "border-accent/45 text-foreground" : "border-border text-muted hover:border-border-strong hover:text-foreground",
++          )}
++        >
++          <span
++            className={cn(
++              "flex items-center justify-center rounded-full",
++              compact ? "h-6 w-6" : "h-7 w-7",
++              isRoot ? "bg-accent/20 text-accent-soft ring-1 ring-accent/40" : "bg-surface-raised text-subtle",
++            )}
++          >
++            {isRoot ? (
++              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" aria-hidden="true">
++                <path
++                  d="M12 3l7 3v5c0 4.2-2.8 7.6-7 9-4.2-1.4-7-4.8-7-9V6l7-3z"
++                  stroke="currentColor"
++                  strokeWidth="1.8"
++                  strokeLinejoin="round"
++                />
++              </svg>
++            ) : (
++              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" aria-hidden="true">
++                <circle cx="12" cy="8.5" r="3.2" stroke="currentColor" strokeWidth="1.8" />
++                <path d="M5.5 19.5a6.5 6.5 0 0113 0" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
++              </svg>
++            )}
++          </span>
++          <svg
++            viewBox="0 0 24 24"
++            width="12"
++            height="12"
++            fill="none"
++            aria-hidden="true"
++            className={cn("transition-transform", open && "rotate-180")}
++          >
++            <path d="M6 9.5l6 5 6-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
++          </svg>
++        </button>
++
++        {open && (
++          <div
++            role="menu"
++            aria-label="菜单与账户"
++            className="glass absolute right-0 top-[calc(100%+0.5rem)] z-[80] w-60 overflow-hidden rounded-[var(--radius-card)] border border-border shadow-2xl shadow-black/50"
++          >
++            <p className="px-3 pb-1.5 pt-3 text-[0.6875rem] uppercase tracking-[0.18em] text-subtle">前往</p>
++            <div className="pb-1.5">
++              {NAV_ITEMS.map((item) => {
++                const active = item.to === "/" ? pathname === "/" : pathname.startsWith(item.to)
++                return (
++                  <Link
++                    key={item.to}
++                    to={item.to}
++                    role="menuitem"
++                    className={cn(
++                      "flex items-center gap-2.5 px-3 py-2 transition-colors",
++                      active ? "bg-accent/10 text-accent-soft" : "text-muted hover:bg-surface-raised hover:text-foreground",
++                    )}
++                  >
++                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" aria-hidden="true" className="shrink-0">
++                      {item.icon}
++                    </svg>
++                    <span className="min-w-0 flex-1">
++                      <span className="block text-xs leading-tight">{item.label}</span>
++                      <span className="mt-0.5 block text-[0.6875rem] leading-tight text-subtle">{item.hint}</span>
++                    </span>
++                    {active && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" aria-hidden="true" />}
++                  </Link>
++                )
++              })}
++            </div>
++
++            {(isRoot || canLogin) && (
++              <div className="border-t border-border/70">
++                {isRoot ? (
++                  <>
++                    <div className="flex items-center gap-2 px-3 pb-1 pt-2.5">
++                      <span className="h-1.5 w-1.5 rounded-full bg-accent" aria-hidden="true" />
++                      <span className="text-[0.6875rem] text-accent-soft">管理员模式</span>
++                    </div>
++                    <button
++                      type="button"
++                      role="menuitem"
++                      onClick={logout}
++                      className="flex w-full items-center gap-2.5 px-3 pb-2.5 pt-1 text-xs text-muted transition-colors hover:text-danger"
++                    >
++                      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" aria-hidden="true" className="shrink-0">
++                        <path
++                          d="M10 5H5v14h5M14 8l4 4-4 4M18 12H9"
++                          stroke="currentColor"
++                          strokeWidth="1.8"
++                          strokeLinecap="round"
++                          strokeLinejoin="round"
++                        />
++                      </svg>
++                      退出管理员
++                    </button>
++                  </>
++                ) : (
++                  <button
++                    type="button"
++                    role="menuitem"
++                    onClick={() => {
++                      setError("")
++                      setOpen(false)
++                      setLoginOpen(true)
++                    }}
++                    className="flex w-full items-center gap-2.5 px-3 py-2.5 text-xs text-muted transition-colors hover:bg-surface-raised hover:text-foreground"
++                  >
++                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" aria-hidden="true" className="shrink-0">
++                      <rect x="5" y="10" width="14" height="10" rx="2" stroke="currentColor" strokeWidth="1.8" />
++                      <path d="M8 10V7a4 4 0 018 0v3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
++                    </svg>
++                    管理员登录
++                  </button>
++                )}
++              </div>
++            )}
++          </div>
++        )}
++      </div>
++
++      {loginOpen &&
++        createPortal(
++          <div
++            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/65 px-5"
++            role="presentation"
++            onMouseDown={() => setLoginOpen(false)}
++          >
++            <form
++              onSubmit={login}
++              onMouseDown={(event) => event.stopPropagation()}
++              role="dialog"
++              aria-modal="true"
++              aria-labelledby="root-login-title"
++              className="glass w-full max-w-sm rounded-[var(--radius-card)] border border-border p-6 shadow-2xl shadow-black/60"
++            >
++              <div className="flex items-start justify-between gap-4">
++                <div>
++                  <p className="text-xs text-accent-soft">Bitfun Genius</p>
++                  <h2 id="root-login-title" className="mt-1 text-xl text-foreground">
++                    管理员登录
++                  </h2>
++                </div>
++                <button
++                  type="button"
++                  onClick={() => setLoginOpen(false)}
++                  aria-label="关闭登录窗口"
++                  className="text-subtle transition-colors hover:text-foreground"
++                >
++                  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true">
++                    <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
++                  </svg>
++                </button>
++              </div>
++              <label className="mt-6 block text-sm text-muted">
++                管理员密码
++                <input
++                  autoFocus
++                  type="password"
++                  value={password}
++                  onChange={(event) => setPassword(event.target.value)}
++                  className="mt-2 h-10 w-full rounded-lg border border-border bg-surface-raised px-3 text-sm text-foreground outline-none transition-colors placeholder:text-subtle focus:border-accent/50"
++                />
++              </label>
++              {error && (
++                <p role="alert" className="mt-3 text-sm text-danger">
++                  {error}
++                </p>
++              )}
++              <button
++                type="submit"
++                disabled={!password || submitting}
++                className="mt-6 inline-flex h-10 w-full items-center justify-center rounded-lg bg-accent px-4 text-sm text-background transition-colors hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-60"
++              >
++                {submitting ? "验证中…" : "进入管理模式"}
++              </button>
++            </form>
++          </div>,
++          document.body,
++        )}
++    </>
++  )
++}
+diff --git a/frontend/web/src/pages/DetailPage.tsx b/frontend/web/src/pages/DetailPage.tsx
+index 7a830d6..37f9103 100644
+--- a/frontend/web/src/pages/DetailPage.tsx
++++ b/frontend/web/src/pages/DetailPage.tsx
+@@ -1,6 +1,6 @@
+ import { Link, useParams, useSearchParams } from "react-router-dom"
+ import { TopBar } from "@/components/layout/TopBar"
+-import { AuthControl } from "@/components/layout/AuthControl"
++import { UserMenu } from "@/components/layout/UserMenu"
+ import { Card } from "@/components/ui/Card"
+ import { DevicePreview } from "@/components/detail/DevicePreview"
+ import { InstallDock } from "@/components/detail/InstallDock"
+@@ -88,24 +88,9 @@ export function DetailPage() {
+             {canWrite && isExpo && data && (mainBuildComplete || Boolean(data.artifacts.hap_found)) && (
+               <ExpoInstallMenu runId={data.run.run_id} artifacts={data.artifacts} serve={data.expo?.serve} />
+             )}
+-            <AuthControl compact />
+-            <Link
+-              to="/runs"
+-              className="inline-flex h-8 items-center gap-1.5 rounded-full border border-accent/35 bg-accent/15 px-3 text-xs font-semibold text-accent-soft shadow-lg shadow-black/20 transition-colors hover:border-accent/55 hover:bg-accent/25 hover:text-foreground"
+-            >
+-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
+-                <path
+-                  d="M4 7h16M4 12h16M4 17h10"
+-                  stroke="currentColor"
+-                  strokeWidth="2"
+-                  strokeLinecap="round"
+-                />
+-              </svg>
+-              我的应用
+-            </Link>
+             <Link
+               to="/"
+-              className="inline-flex h-8 items-center gap-1.5 rounded-full bg-accent px-3 text-xs font-semibold text-background shadow-lg shadow-accent/20 transition-colors hover:bg-accent-soft"
++              className="inline-flex h-8 items-center gap-1.5 rounded-full bg-accent px-3 text-xs text-background shadow-lg shadow-accent/20 transition-colors hover:bg-accent-soft"
+             >
+               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
+                 <path
+@@ -116,8 +101,9 @@ export function DetailPage() {
+                   strokeLinejoin="round"
+                 />
+               </svg>
+-              新建构建
++              <span className="hidden sm:inline">新建构建</span>
+             </Link>
++            <UserMenu compact />
+           </div>
+         }
+       />
+diff --git a/frontend/web/src/pages/GalleryDetailPage.tsx b/frontend/web/src/pages/GalleryDetailPage.tsx
+index 0e2d2c5..7323ab0 100644
+--- a/frontend/web/src/pages/GalleryDetailPage.tsx
++++ b/frontend/web/src/pages/GalleryDetailPage.tsx
+@@ -1,7 +1,7 @@
+ import { useState } from "react"
+ import { Link, useNavigate, useParams } from "react-router-dom"
+ import { TopBar } from "@/components/layout/TopBar"
+-import { AuthControl } from "@/components/layout/AuthControl"
++import { UserMenu } from "@/components/layout/UserMenu"
+ import { GalleryCard } from "@/components/gallery/GalleryCard"
+ import { TemplatePreviewFrame } from "@/components/gallery/TemplatePreviewFrame"
+ import { api, ApiError } from "@/lib/api"
+@@ -15,7 +15,7 @@ export function GalleryDetailPage() {
+   if (!template) {
+     return (
+       <div className="aurora-bg min-h-screen">
+-        <TopBar left={<BackLink />} right={<AuthControl />} />
++        <TopBar left={<BackLink />} right={<UserMenu />} />
+         <main className="relative z-10 mx-auto w-full max-w-3xl px-5 py-24 text-center">
+           <h1 className="text-2xl tracking-tight">模板不存在</h1>
+           <p className="mt-3 text-sm text-muted">这个模板可能已下线，回到灵感库看看其他示例。</p>
+@@ -40,13 +40,22 @@ export function GalleryDetailPage() {
+         left={<BackLink />}
+         right={
+           <>
+-            <AuthControl />
+             <Link
+-              to="/runs"
+-              className="inline-flex h-9 items-center rounded-full border border-border bg-surface/70 px-3.5 text-xs text-foreground transition-colors hover:border-accent/40 hover:text-accent-soft"
++              to="/"
++              className="inline-flex h-9 items-center gap-1.5 rounded-full bg-accent px-3.5 text-xs text-background shadow-lg shadow-accent/20 transition-colors hover:bg-accent-soft"
+             >
+-              我的应用
++              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
++                <path
++                  d="M12 5v14M5 12h14"
++                  stroke="currentColor"
++                  strokeWidth="2"
++                  strokeLinecap="round"
++                  strokeLinejoin="round"
++                />
++              </svg>
++              新建生成
+             </Link>
++            <UserMenu />
+           </>
+         }
+       />
+diff --git a/frontend/web/src/pages/GalleryPage.tsx b/frontend/web/src/pages/GalleryPage.tsx
+index b5bd239..c58fa64 100644
+--- a/frontend/web/src/pages/GalleryPage.tsx
++++ b/frontend/web/src/pages/GalleryPage.tsx
+@@ -1,7 +1,7 @@
+ import { useMemo, useState } from "react"
+ import { Link } from "react-router-dom"
+ import { TopBar } from "@/components/layout/TopBar"
+-import { AuthControl } from "@/components/layout/AuthControl"
++import { UserMenu } from "@/components/layout/UserMenu"
+ import { GalleryCard } from "@/components/gallery/GalleryCard"
+ import { TemplatePreviewFrame } from "@/components/gallery/TemplatePreviewFrame"
+ import { GALLERY_CATEGORIES, GALLERY_TEMPLATES, type GalleryTemplate } from "@/lib/galleryData"
+@@ -47,7 +47,6 @@ export function GalleryPage() {
+         left={<BackLink />}
+         right={
+           <>
+-            <AuthControl />
+             <Link
+               to="/"
+               className="inline-flex h-9 items-center gap-1.5 rounded-full bg-accent px-3.5 text-xs text-background shadow-lg shadow-accent/20 transition-colors hover:bg-accent-soft"
+@@ -63,6 +62,7 @@ export function GalleryPage() {
+               </svg>
+               新建生成
+             </Link>
++            <UserMenu />
+           </>
+         }
+       />
+diff --git a/frontend/web/src/pages/HistoryPage.tsx b/frontend/web/src/pages/HistoryPage.tsx
+index f299b51..46ab40e 100644
+--- a/frontend/web/src/pages/HistoryPage.tsx
++++ b/frontend/web/src/pages/HistoryPage.tsx
+@@ -1,7 +1,7 @@
+ import { useEffect, useMemo, useState } from "react"
+ import { Link } from "react-router-dom"
+ import { TopBar } from "@/components/layout/TopBar"
+-import { AuthControl } from "@/components/layout/AuthControl"
++import { UserMenu } from "@/components/layout/UserMenu"
+ import { StatusBadge, statusToTone } from "@/components/ui/StatusBadge"
+ import { api, withCacheBust } from "@/lib/api"
+ import { cn, formatDateTime } from "@/lib/format"
+@@ -105,21 +105,6 @@ export function HistoryPage() {
+         left={<BackLink />}
+         right={
+           <>
+-            <AuthControl />
+-            <Link
+-              to="/gallery"
+-              className="inline-flex h-9 items-center gap-1.5 rounded-full border border-border bg-surface/70 px-3.5 text-xs text-foreground shadow-lg shadow-black/15 transition-colors hover:border-accent/40 hover:text-accent-soft"
+-            >
+-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
+-                <path
+-                  d="M4 5h7v7H4zM13 5h7v4h-7zM13 13h7v6h-7zM4 16h7v3H4z"
+-                  stroke="currentColor"
+-                  strokeWidth="1.7"
+-                  strokeLinejoin="round"
+-                />
+-              </svg>
+-              灵感库
+-            </Link>
+             <Link
+               to="/"
+               className="inline-flex h-9 items-center gap-1.5 rounded-full bg-accent px-3.5 text-xs font-semibold text-background shadow-lg shadow-accent/20 transition-colors hover:bg-accent-soft"
+@@ -135,6 +120,7 @@ export function HistoryPage() {
+               </svg>
+               新建生成
+             </Link>
++            <UserMenu />
+           </>
+         }
+       />
+diff --git a/frontend/web/src/pages/HomePage.tsx b/frontend/web/src/pages/HomePage.tsx
+index ef25c0c..c575892 100644
+--- a/frontend/web/src/pages/HomePage.tsx
++++ b/frontend/web/src/pages/HomePage.tsx
+@@ -1,6 +1,6 @@
+ import { Link } from "react-router-dom"
+ import { TopBar } from "@/components/layout/TopBar"
+-import { AuthControl } from "@/components/layout/AuthControl"
++import { UserMenu } from "@/components/layout/UserMenu"
+ import { PromptComposer } from "@/components/home/PromptComposer"
+ 
+ const STEPS = [
+@@ -28,7 +28,6 @@ export function HomePage() {
+       <TopBar
+         right={
+           <>
+-            <AuthControl />
+             <Link
+               to="/gallery"
+               className="inline-flex h-9 items-center gap-1.5 rounded-full border border-border bg-surface/70 px-3.5 text-xs text-foreground shadow-lg shadow-black/15 transition-colors hover:border-accent/40 hover:text-accent-soft"
+@@ -43,20 +42,7 @@ export function HomePage() {
+               </svg>
+               灵感库
+             </Link>
+-            <Link
+-              to="/runs"
+-              className="inline-flex h-9 items-center gap-1.5 rounded-full border border-accent/35 bg-accent/15 px-3.5 text-xs font-semibold text-accent-soft shadow-lg shadow-black/20 transition-colors hover:border-accent/55 hover:bg-accent/25 hover:text-foreground"
+-            >
+-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
+-                <path
+-                  d="M4 7h16M4 12h16M4 17h10"
+-                  stroke="currentColor"
+-                  strokeWidth="2"
+-                  strokeLinecap="round"
+-                />
+-              </svg>
+-              我的应用
+-            </Link>
++            <UserMenu />
+           </>
+         }
+       />
+-- 
+2.50.1
+

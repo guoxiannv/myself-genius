@@ -20,3 +20,6 @@
 
 # Machine-local Harmony Go shell build cache (unsigned host.exp.exponent.harmony HAP).
 /runner/.harmony-go-shell/
+
+# Root forwarding shell for the v0 preview (frontend lives in frontend/web).
+/package.json

@@ -107,6 +107,20 @@ export function HistoryPage() {
           <>
             <AuthControl />
             <Link
+              to="/gallery"
+              className="inline-flex h-9 items-center gap-1.5 rounded-full border border-border bg-surface/70 px-3.5 text-xs text-foreground shadow-lg shadow-black/15 transition-colors hover:border-accent/40 hover:text-accent-soft"
+            >
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
+                <path
+                  d="M4 5h7v7H4zM13 5h7v4h-7zM13 13h7v6h-7zM4 16h7v3H4z"
+                  stroke="currentColor"
+                  strokeWidth="1.7"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              灵感库
+            </Link>
+            <Link
               to="/"
               className="inline-flex h-9 items-center gap-1.5 rounded-full bg-accent px-3.5 text-xs font-semibold text-background shadow-lg shadow-accent/20 transition-colors hover:bg-accent-soft"
             >

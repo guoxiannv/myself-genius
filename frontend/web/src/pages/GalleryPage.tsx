@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react"
 import { Link } from "react-router-dom"
 import { TopBar } from "@/components/layout/TopBar"
-import { AuthControl } from "@/components/layout/AuthControl"
+import { UserMenu } from "@/components/layout/UserMenu"
 import { GalleryCard } from "@/components/gallery/GalleryCard"
 import { TemplatePreviewFrame } from "@/components/gallery/TemplatePreviewFrame"
 import { GALLERY_CATEGORIES, GALLERY_TEMPLATES, type GalleryTemplate } from "@/lib/galleryData"
@@ -47,7 +47,6 @@ export function GalleryPage() {
         left={<BackLink />}
         right={
           <>
-            <AuthControl />
             <Link
               to="/"
               className="inline-flex h-9 items-center gap-1.5 rounded-full bg-accent px-3.5 text-xs text-background shadow-lg shadow-accent/20 transition-colors hover:bg-accent-soft"
@@ -63,6 +62,7 @@ export function GalleryPage() {
               </svg>
               新建生成
             </Link>
+            <UserMenu />
           </>
         }
       />

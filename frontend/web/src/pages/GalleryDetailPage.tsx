@@ -1,7 +1,7 @@
 import { useState } from "react"
 import { Link, useNavigate, useParams } from "react-router-dom"
 import { TopBar } from "@/components/layout/TopBar"
-import { AuthControl } from "@/components/layout/AuthControl"
+import { UserMenu } from "@/components/layout/UserMenu"
 import { GalleryCard } from "@/components/gallery/GalleryCard"
 import { TemplatePreviewFrame } from "@/components/gallery/TemplatePreviewFrame"
 import { api, ApiError } from "@/lib/api"
@@ -15,7 +15,7 @@ export function GalleryDetailPage() {
   if (!template) {
     return (
       <div className="aurora-bg min-h-screen">
-        <TopBar left={<BackLink />} right={<AuthControl />} />
+        <TopBar left={<BackLink />} right={<UserMenu />} />
         <main className="relative z-10 mx-auto w-full max-w-3xl px-5 py-24 text-center">
           <h1 className="text-2xl tracking-tight">模板不存在</h1>
           <p className="mt-3 text-sm text-muted">这个模板可能已下线，回到灵感库看看其他示例。</p>
@@ -40,13 +40,22 @@ export function GalleryDetailPage() {
         left={<BackLink />}
         right={
           <>
-            <AuthControl />
             <Link
-              to="/runs"
-              className="inline-flex h-9 items-center rounded-full border border-border bg-surface/70 px-3.5 text-xs text-foreground transition-colors hover:border-accent/40 hover:text-accent-soft"
+              to="/"
+              className="inline-flex h-9 items-center gap-1.5 rounded-full bg-accent px-3.5 text-xs text-background shadow-lg shadow-accent/20 transition-colors hover:bg-accent-soft"
             >
-              我的应用
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
+                <path
+                  d="M12 5v14M5 12h14"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              新建生成
             </Link>
+            <UserMenu />
           </>
         }
       />

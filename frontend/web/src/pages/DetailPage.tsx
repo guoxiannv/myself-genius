@@ -1,6 +1,6 @@
 import { Link, useParams, useSearchParams } from "react-router-dom"
 import { TopBar } from "@/components/layout/TopBar"
-import { AuthControl } from "@/components/layout/AuthControl"
+import { UserMenu } from "@/components/layout/UserMenu"
 import { Card } from "@/components/ui/Card"
 import { DevicePreview } from "@/components/detail/DevicePreview"
 import { InstallDock } from "@/components/detail/InstallDock"
@@ -88,24 +88,9 @@ export function DetailPage() {
             {canWrite && isExpo && data && (mainBuildComplete || Boolean(data.artifacts.hap_found)) && (
               <ExpoInstallMenu runId={data.run.run_id} artifacts={data.artifacts} serve={data.expo?.serve} />
             )}
-            <AuthControl compact />
-            <Link
-              to="/runs"
-              className="inline-flex h-8 items-center gap-1.5 rounded-full border border-accent/35 bg-accent/15 px-3 text-xs font-semibold text-accent-soft shadow-lg shadow-black/20 transition-colors hover:border-accent/55 hover:bg-accent/25 hover:text-foreground"
-            >
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
-                <path
-                  d="M4 7h16M4 12h16M4 17h10"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                />
-              </svg>
-              我的应用
-            </Link>
             <Link
               to="/"
-              className="inline-flex h-8 items-center gap-1.5 rounded-full bg-accent px-3 text-xs font-semibold text-background shadow-lg shadow-accent/20 transition-colors hover:bg-accent-soft"
+              className="inline-flex h-8 items-center gap-1.5 rounded-full bg-accent px-3 text-xs text-background shadow-lg shadow-accent/20 transition-colors hover:bg-accent-soft"
             >
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
                 <path
@@ -116,8 +101,9 @@ export function DetailPage() {
                   strokeLinejoin="round"
                 />
               </svg>
-              新建构建
+              <span className="hidden sm:inline">新建构建</span>
             </Link>
+            <UserMenu compact />
           </div>
         }
       />

@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom"
 import { TopBar } from "@/components/layout/TopBar"
-import { AuthControl } from "@/components/layout/AuthControl"
+import { UserMenu } from "@/components/layout/UserMenu"
 import { PromptComposer } from "@/components/home/PromptComposer"
 
 const STEPS = [
@@ -28,7 +28,6 @@ export function HomePage() {
       <TopBar
         right={
           <>
-            <AuthControl />
             <Link
               to="/gallery"
               className="inline-flex h-9 items-center gap-1.5 rounded-full border border-border bg-surface/70 px-3.5 text-xs text-foreground shadow-lg shadow-black/15 transition-colors hover:border-accent/40 hover:text-accent-soft"
@@ -43,20 +42,7 @@ export function HomePage() {
               </svg>
               灵感库
             </Link>
-            <Link
-              to="/runs"
-              className="inline-flex h-9 items-center gap-1.5 rounded-full border border-accent/35 bg-accent/15 px-3.5 text-xs font-semibold text-accent-soft shadow-lg shadow-black/20 transition-colors hover:border-accent/55 hover:bg-accent/25 hover:text-foreground"
-            >
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
-                <path
-                  d="M4 7h16M4 12h16M4 17h10"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                />
-              </svg>
-              我的应用
-            </Link>
+            <UserMenu />
           </>
         }
       />
